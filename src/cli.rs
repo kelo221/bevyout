@@ -1,5 +1,16 @@
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 use std::path::PathBuf;
+
+pub mod progress;
+
+pub use progress::ProgressMode;
+
+#[derive(Args, Clone, Debug, Default)]
+pub(crate) struct ProgressArgs {
+    /// Progress output policy. Progress is written to stderr.
+    #[arg(long = "progress", value_enum, default_value_t = ProgressMode::Auto)]
+    pub(crate) mode: ProgressMode,
+}
 
 #[derive(Parser, Debug)]
 #[command(
@@ -212,6 +223,8 @@ pub struct ScriptRunArgs {
 
 #[derive(Parser, Debug, Clone)]
 pub struct PrepareArgs {
+    #[command(flatten)]
+    pub(crate) progress: ProgressArgs,
     /// GECK EditorID, or an eight-digit hexadecimal FormID. May be repeated to
     /// prepare several cells in one run.
     #[arg(value_name = "EDITOR_ID", conflicts_with_all = ["cell", "all"])]
@@ -412,6 +425,8 @@ pub struct AnimationZooArgs {
 
 #[derive(Parser, Debug)]
 pub struct RenderArgs {
+    #[command(flatten)]
+    pub(crate) progress: ProgressArgs,
     /// GECK EditorID, or an eight-digit hexadecimal FormID.
     #[arg(value_name = "EDITOR_ID")]
     pub(crate) selector: String,
@@ -466,6 +481,8 @@ pub struct RenderArgs {
 
 #[derive(Parser, Debug)]
 pub struct BakeArgs {
+    #[command(flatten)]
+    pub(crate) progress: ProgressArgs,
     /// Prepared scene manifest to bake. The final bake metadata is written back to it.
     #[arg(long, conflicts_with = "selector")]
     pub(crate) manifest: Option<PathBuf>,

@@ -24,6 +24,7 @@
 use std::collections::{BTreeMap, HashSet};
 
 use super::*;
+use crate::cli::progress::ProgressReporter;
 
 use super::super::cell_map::CellMap;
 use super::super::paths::absolutize;
@@ -94,7 +95,7 @@ fn recorded_bake_validity(args: &BakeArgs, scene_manifest: &Path) -> bool {
 /// manifest plus the per-cell bake validity check, bakes the remainder
 /// sequentially, and persists progress after every cell so an interrupted
 /// batch resumes without redoing valid work.
-pub(crate) fn bake_batch(args: BakeArgs) -> Result<()> {
+pub(crate) fn bake_batch(args: BakeArgs, progress: &ProgressReporter) -> Result<()> {
     if args.selector.is_some() || args.manifest.is_some() {
         bail!("--all-interiors/--retry-failed cannot be combined with a selector or --manifest");
     }
@@ -176,9 +177,18 @@ pub(crate) fn bake_batch(args: BakeArgs) -> Result<()> {
     }
     job_manifest.write_atomic(&manifest_path)?;
 
+    progress.started(
+        super::bake_operation_label(args.lightmap_backend),
+        Some(resolved.len() as u64),
+    );
+    progress.phase_started("cell", Some(resolved.len() as u64));
+    for _ in 0..skipped {
+        progress.unit_completed_in_phase("cell", Some(resolved.len() as u64), None);
+    }
+
     for &form_id in &to_run {
         let scene_manifest = scene_manifest_path(&cache_dir, form_id);
-        let result = bake_manifest(&args, &scene_manifest);
+        let result = bake_manifest(&args, &scene_manifest, progress);
         let status = match &result {
             Ok(()) => JobStatus::Done,
             Err(error) => JobStatus::Failed(format!("{error:#}")),
@@ -186,6 +196,7 @@ pub(crate) fn bake_batch(args: BakeArgs) -> Result<()> {
         if let JobStatus::Failed(reason) = &status {
             eprintln!("cell {form_id:08x} failed: {reason}");
         }
+        progress.unit_completed_in_phase("cell", Some(resolved.len() as u64), None);
         job_manifest.set_status(form_id, status);
         // F48.4 (reused): rewrite the manifest through after EVERY cell
         // completion (atomically) so interrupting the batch at any point is
@@ -219,11 +230,13 @@ pub(crate) fn bake_batch(args: BakeArgs) -> Result<()> {
     }
 
     if !failed_entries.is_empty() {
+        progress.finished(false);
         bail!(
             "{} of {} cell(s) failed to bake",
             failed_entries.len(),
             to_run.len()
         );
     }
+    progress.finished(true);
     Ok(())
 }

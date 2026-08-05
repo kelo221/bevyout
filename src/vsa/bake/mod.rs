@@ -30,6 +30,7 @@ pub(crate) use job::*;
 pub(crate) use plan::*;
 pub(crate) use tools::*;
 
+use crate::cli::progress::ProgressReporter;
 use crate::cli::{BakeArgs, LightmapBackendPreference};
 use environment::EnvironmentMap;
 
@@ -46,6 +47,7 @@ use super::physics::PHYSICS_ASSET_SCHEMA_VERSION;
 use super::scenes::resolve_cached_manifest;
 
 pub fn bake(args: BakeArgs) -> Result<()> {
+    let progress = ProgressReporter::new(args.progress.mode);
     validate_backend(args.lightmap_backend)?;
     if args.lightmap_min_samples > args.lightmap_max_samples {
         bail!(
@@ -60,7 +62,7 @@ pub fn bake(args: BakeArgs) -> Result<()> {
     // single selector/--manifest keeps the original single-cell path, which
     // batch mode reuses per cell via `bake_manifest`.
     if args.all_interiors || args.retry_failed {
-        return bake_batch(args);
+        return bake_batch(args, &progress);
     }
     let manifest_path = match (args.selector.as_deref(), args.manifest.as_deref()) {
         (Some(_), Some(_)) => {
@@ -77,7 +79,17 @@ pub fn bake(args: BakeArgs) -> Result<()> {
             "provide a GECK EditorID/FormID selector or --manifest; run `bevyout bake --help` for usage"
         ),
     };
-    bake_manifest(&args, &manifest_path)
+    progress.started(bake_operation_label(args.lightmap_backend), None);
+    let result = bake_manifest(&args, &manifest_path, &progress);
+    progress.finished(result.is_ok());
+    result
+}
+
+fn bake_operation_label(backend: LightmapBackendPreference) -> &'static str {
+    match backend {
+        LightmapBackendPreference::Solari => "Solari bake",
+        LightmapBackendPreference::Auto | LightmapBackendPreference::Cpu => "CPU bake",
+    }
 }
 
 pub(crate) fn validate_lightmap_density_overrides(
@@ -406,8 +418,13 @@ fn update_asset_fingerprints(fingerprint: &mut Sha256, job: &BakeJob) -> Result<
 /// Bakes one prepared scene manifest in place: the whole original
 /// single-cell `bake` path after selector resolution, reused verbatim by
 /// each batch cell.
-pub(crate) fn bake_manifest(args: &BakeArgs, manifest_path: &Path) -> Result<()> {
+pub(crate) fn bake_manifest(
+    args: &BakeArgs,
+    manifest_path: &Path,
+    progress: &ProgressReporter,
+) -> Result<()> {
     let mut manifest = load_prepared_manifest(manifest_path)?;
+    progress.message(format!("cell {}", cell_label(&manifest.cell)));
     validate_lightmap_density_override_targets(&manifest, &args.lightmap_density_overrides)?;
 
     let outputs = bake_outputs(&manifest)?;
@@ -448,6 +465,7 @@ pub(crate) fn bake_manifest(args: &BakeArgs, manifest_path: &Path) -> Result<()>
         "Rust bake: composing {} static placements",
         job.placements.len()
     );
+    progress.phase_started("scene composition", None);
     let mut rust_scene = rust_scene::compose_scene_with_lightmap_density(
         asset_root,
         &job.placements,
@@ -489,6 +507,9 @@ pub(crate) fn bake_manifest(args: &BakeArgs, manifest_path: &Path) -> Result<()>
     };
     let lightmap_bake = match args.lightmap_backend {
         LightmapBackendPreference::Solari => {
+            progress.set_backend("Solari");
+            progress.set_sampling(Some(job.lightmap_max_samples), Some(job.lightmap_bounces));
+            progress.phase_started("lightmap tile dispatch/readback", None);
             #[cfg(feature = "lightmap-gpu-solari")]
             {
                 lightmap::bake_direct_pages_solari_bounded(
@@ -506,6 +527,7 @@ pub(crate) fn bake_manifest(args: &BakeArgs, manifest_path: &Path) -> Result<()>
                     &accumulation_fingerprint,
                     debug,
                     &mut lightmap_cache,
+                    Some(progress),
                 )?
             }
             #[cfg(not(feature = "lightmap-gpu-solari"))]
@@ -516,6 +538,9 @@ pub(crate) fn bake_manifest(args: &BakeArgs, manifest_path: &Path) -> Result<()>
             }
         }
         LightmapBackendPreference::Auto | LightmapBackendPreference::Cpu => {
+            progress.set_backend("CPU");
+            progress.set_sampling(Some(job.lightmap_max_samples), Some(job.lightmap_bounces));
+            progress.phase_started("lightmap primitive/tile transport", None);
             lightmap::bake_direct_pages(
                 &rust_scene,
                 &job.lights,
@@ -531,16 +556,21 @@ pub(crate) fn bake_manifest(args: &BakeArgs, manifest_path: &Path) -> Result<()>
                 &accumulation_fingerprint,
                 debug,
                 &mut lightmap_cache,
+                Some(progress),
             )?
         }
     };
     let lightmap_sampling = lightmap_bake.sampling;
     let lightmap_pages = lightmap_bake.pages;
+    progress.phase_started("UV/page packing", Some(lightmap_pages.len() as u64));
     let (lightmap_pages, lightmap_atlases) = lightmap::pack_lightmap_pages(
         lightmap_pages,
         &lightmap_raw_dir,
         lightmap::LIGHTMAP_ATLAS_PAGE_SIZE,
     )?;
+    for _ in &lightmap_pages {
+        progress.unit_completed(Some(lightmap_pages.len() as u64), None);
+    }
     println!(
         "surface lightmaps: packed {} primitive pages into {} atlases; adaptive samples {}..{} mean {:.2} max relative variance {:.6}",
         lightmap_pages.len(),
@@ -560,6 +590,7 @@ pub(crate) fn bake_manifest(args: &BakeArgs, manifest_path: &Path) -> Result<()>
         cache_stats.hits, cache_stats.misses, cache_stats.writes
     );
     rust_scene.write_glb(&temporary_scene)?;
+    progress.phase_started("irradiance-volume probes", None);
     let irradiance = rust_irradiance::bake_irradiance(
         &rust_scene,
         &job.lights,
@@ -604,6 +635,7 @@ pub(crate) fn bake_manifest(args: &BakeArgs, manifest_path: &Path) -> Result<()>
         );
     }
     let mut lightmaps = Vec::with_capacity(lightmap_atlases.len());
+    progress.phase_started("atlas encoding", Some(lightmap_atlases.len() as u64));
     let covered_texels = lightmap_pages
         .iter()
         .map(|page| page.covered_texels)
@@ -642,6 +674,7 @@ pub(crate) fn bake_manifest(args: &BakeArgs, manifest_path: &Path) -> Result<()>
             );
         }
         replace_output(&temporary, &output)?;
+        progress.unit_completed(Some(lightmap_atlases.len() as u64), None);
         lightmaps.push(PreparedLightmapAtlas {
             asset_path: relative_asset_path(asset_root, &output)?,
             width: atlas.width,
@@ -694,6 +727,7 @@ pub(crate) fn bake_manifest(args: &BakeArgs, manifest_path: &Path) -> Result<()>
         })
         .collect::<Result<Vec<_>>>()?;
     if !args.keep_intermediate {
+        progress.phase_started("surface-lightmap intermediate cleanup", None);
         for page in &lightmap_pages {
             let _ = fs::remove_file(&page.raw_path);
         }
@@ -739,6 +773,7 @@ pub(crate) fn bake_manifest(args: &BakeArgs, manifest_path: &Path) -> Result<()>
     );
     replace_output(&temporary_scene, output_scene)?;
     replace_output(&temporary_ktx, &ktx2_path)?;
+    progress.phase_started("manifest publication", None);
     let scene_path = relative_asset_path(asset_root, output_scene)?;
     let irradiance_path = relative_asset_path(asset_root, &ktx2_path)?;
     let source_fingerprint = bake_job_fingerprint(&manifest, &job)?;
@@ -780,6 +815,7 @@ pub(crate) fn bake_manifest(args: &BakeArgs, manifest_path: &Path) -> Result<()>
         to_string_pretty(&manifest, PrettyConfig::default())?,
     )?;
     if !args.keep_intermediate {
+        progress.phase_started("irradiance intermediate cleanup", None);
         for raw_slice in &irradiance.raw_slices {
             let _ = fs::remove_file(raw_slice);
         }

@@ -20,6 +20,7 @@ use super::rust_irradiance::{
 use super::rust_scene::RustBakeScene;
 use super::transport::adaptive::AdaptiveEstimator;
 use super::transport::material::sample_material;
+use crate::cli::progress::ProgressReporter;
 use anyhow::{Context, Result, bail};
 use bevy::math::{Vec2, Vec3, Vec4};
 use bvh::bounding_hierarchy::BoundingHierarchy;
@@ -229,6 +230,7 @@ pub(crate) fn bake_direct_pages(
     cache_fingerprint: &str,
     debug: LightmapDebugSettings,
     cache: &mut TileCache,
+    progress: Option<&ProgressReporter>,
 ) -> Result<LightmapBakeResult> {
     let mut triangles = collect_triangles(scene)?;
     if triangles.is_empty() {
@@ -290,6 +292,7 @@ pub(crate) fn bake_direct_pages(
             output_dir,
             debug,
             cache,
+            progress,
         )?;
         let bytes = encode_rgba16f(&pixels);
         let raw_path = output_dir.join(format!("lightmap-{primitive_index:04}.rgba16f.raw"));
@@ -537,6 +540,7 @@ pub(crate) fn bake_direct_pages_solari_bounded(
     cache_fingerprint: &str,
     debug: LightmapDebugSettings,
     cache: &mut TileCache,
+    progress: Option<&ProgressReporter>,
 ) -> Result<LightmapBakeResult> {
     if bounce_count > SOLARI_BAKE_MAX_BOUNCES {
         bail!(
@@ -596,6 +600,13 @@ pub(crate) fn bake_direct_pages_solari_bounded(
         let mut features = vec![DenoiseFeature::default(); page_len];
         let tile_count_x = (width as usize).div_ceil(tile_size);
         let tile_count_y = (height as usize).div_ceil(tile_size);
+        let tile_total = (tile_count_x * tile_count_y) as u64;
+        if let Some(progress) = progress {
+            progress.phase_started(
+                format!("primitive {} Solari tiles", primitive_index + 1),
+                Some(tile_total),
+            );
+        }
 
         for tile_y in 0..tile_count_y {
             let tile_start_y = tile_y * tile_size;
@@ -622,6 +633,9 @@ pub(crate) fn bake_direct_pages_solari_bounded(
                         primitive,
                     )?;
                     summary.merge(decoded.summary);
+                    if let Some(progress) = progress {
+                        progress.unit_completed(Some(tile_total), Some(true));
+                    }
                     continue;
                 }
 
@@ -728,10 +742,22 @@ pub(crate) fn bake_direct_pages_solari_bounded(
                     tile_height as u32,
                     &payload,
                 )?;
+                if let Some(progress) = progress {
+                    progress.unit_completed(Some(tile_total), Some(false));
+                }
                 summary.merge(tile_summary);
             }
         }
 
+        if let Some(progress) = progress {
+            progress.phase_started(
+                format!(
+                    "primitive {} Solari denoise and dilation",
+                    primitive_index + 1
+                ),
+                None,
+            );
+        }
         let covered_texels = chart_owners.iter().filter(|owner| owner.is_some()).count();
         write_debug_images(
             output_dir,
@@ -1318,6 +1344,7 @@ fn rasterize_primitive(
     debug_output_dir: &Path,
     debug: LightmapDebugSettings,
     cache: &mut TileCache,
+    progress: Option<&ProgressReporter>,
 ) -> Result<(Vec<Vec3>, usize, usize, LightmapSamplingSummary)> {
     let mut pixels = vec![Vec3::ZERO; (width as usize) * (height as usize)];
     let mut chart_owners = vec![None; pixels.len()];
@@ -1329,6 +1356,13 @@ fn rasterize_primitive(
     let tile_size = usize::try_from(tile_size.max(1)).context("lightmap tile size overflowed")?;
     let tile_count_x = (width as usize).div_ceil(tile_size);
     let tile_count_y = (height as usize).div_ceil(tile_size);
+    let tile_total = (tile_count_x * tile_count_y) as u64;
+    if let Some(progress) = progress {
+        progress.phase_started(
+            format!("primitive {} tiles", primitive_index + 1),
+            Some(tile_total),
+        );
+    }
 
     for tile_y in 0..tile_count_y {
         let tile_start_y = tile_y * tile_size;
@@ -1338,14 +1372,12 @@ fn rasterize_primitive(
             let tile_start_x = tile_x * tile_size;
             let tile_end_x = (tile_start_x + tile_size).min(width as usize);
             let tile_width = tile_end_x - tile_start_x;
-            if let Some(record) = cache.read(
-                TileKey {
-                    primitive: primitive_index,
-                    tile_x: tile_x as u32,
-                    tile_y: tile_y as u32,
-                },
-                tile_fingerprint,
-            )? {
+            let key = TileKey {
+                primitive: primitive_index,
+                tile_x: tile_x as u32,
+                tile_y: tile_y as u32,
+            };
+            if let Some(record) = cache.read(key, tile_fingerprint)? {
                 let decoded = decode_tile_payload(&record, tile_width as u32, tile_height as u32)?;
                 for local_y in 0..tile_height {
                     for local_x in 0..tile_width {
@@ -1358,6 +1390,9 @@ fn rasterize_primitive(
                     }
                 }
                 sampling_summary.merge(decoded.summary);
+                if let Some(progress) = progress {
+                    progress.unit_completed(Some(tile_total), Some(true));
+                }
                 continue;
             }
             let mut tile_sampling_summary = LightmapSamplingSummary::default();
@@ -1610,16 +1645,15 @@ fn rasterize_primitive(
                 tile_sampling_summary,
             )?;
             cache.write(
-                TileKey {
-                    primitive: primitive_index,
-                    tile_x: tile_x as u32,
-                    tile_y: tile_y as u32,
-                },
+                key,
                 tile_fingerprint,
                 tile_width as u32,
                 tile_height as u32,
                 &payload,
             )?;
+            if let Some(progress) = progress {
+                progress.unit_completed(Some(tile_total), Some(false));
+            }
         }
     }
     let covered_texels = chart_owners.iter().filter(|owner| owner.is_some()).count();
@@ -1633,6 +1667,12 @@ fn rasterize_primitive(
         debug,
     )?;
     write_variance_output(debug_output_dir, primitive_index, &chart_owners, &features)?;
+    if let Some(progress) = progress {
+        progress.phase_started(
+            format!("primitive {} denoise and dilation", primitive_index + 1),
+            None,
+        );
+    }
     if denoise_settings.iterations > 0 {
         let mut denoised = pixels
             .iter()

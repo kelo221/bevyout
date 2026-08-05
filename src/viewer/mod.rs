@@ -686,6 +686,7 @@ fn prepare_args_for_render(
     actor_animation_converter: ActorAnimationConverter,
 ) -> PrepareArgs {
     PrepareArgs {
+        progress: args.progress.clone(),
         selectors: vec![args.selector.clone()],
         all: false,
         all_interiors: false,
@@ -734,6 +735,7 @@ fn prepare_for_render_with_converter(
 
 fn bake_for_render(args: &RenderArgs, cache_dir: &Path) -> Result<()> {
     bake(BakeArgs {
+        progress: args.progress.clone(),
         manifest: None,
         selector: Some(args.selector.clone()),
         all_interiors: false,

@@ -9,9 +9,11 @@ use super::super::lightmap::{
 };
 use super::super::rust_irradiance::DirectionalBakeLight;
 use super::super::rust_scene::{ComposedPrimitive, synthetic_lightmap_scene_for_test};
+use crate::cli::progress::{ProgressMode, ProgressReporter};
 use bevy::math::{Vec2, Vec3};
 use half::f16;
 use std::fs;
+use std::io;
 
 fn test_primitive() -> ComposedPrimitive {
     ComposedPrimitive {
@@ -85,6 +87,8 @@ fn miniature_surface_bake_produces_finite_ktx2() {
         variance_threshold: 0.0,
     };
     let mut cache = TileCache::open(&cache_dir, "synthetic-lightmap-v1", false).unwrap();
+    let progress = ProgressReporter::with_writer(ProgressMode::Off, io::sink(), false);
+    progress.started("CPU bake", None);
     let result = bake_direct_pages(
         &scene,
         &lights,
@@ -100,8 +104,10 @@ fn miniature_surface_bake_produces_finite_ktx2() {
         "synthetic-lightmap-v1",
         LightmapDebugSettings::default(),
         &mut cache,
+        Some(&progress),
     )
     .unwrap();
+    assert!(progress.snapshot().cache_misses > 0);
 
     assert_eq!(result.pages.len(), 1);
     assert!(result.pages[0].covered_texels > 0);
@@ -126,6 +132,8 @@ fn miniature_surface_bake_produces_finite_ktx2() {
     let resumed_output_dir = root.join("resumed");
     fs::create_dir_all(&resumed_output_dir).unwrap();
     let mut resumed_cache = TileCache::open(&cache_dir, "synthetic-lightmap-v1", false).unwrap();
+    let resumed_progress = ProgressReporter::with_writer(ProgressMode::Off, io::sink(), false);
+    resumed_progress.started("CPU bake", None);
     let resumed = bake_direct_pages(
         &scene,
         &lights,
@@ -141,8 +149,10 @@ fn miniature_surface_bake_produces_finite_ktx2() {
         "synthetic-lightmap-v1",
         LightmapDebugSettings::default(),
         &mut resumed_cache,
+        Some(&resumed_progress),
     )
     .unwrap();
+    assert!(resumed_progress.snapshot().cache_hits > 0);
     assert_eq!(resumed.pages.len(), 1);
     assert!(resumed_cache.stats().hits > 0);
     assert_eq!(resumed_cache.stats().writes, 0);

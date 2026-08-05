@@ -429,6 +429,47 @@ fn static_batch_chunk_size_defaults_to_64_metres_and_enforces_bounds() {
 }
 
 #[test]
+fn progress_mode_parses_all_values_and_defaults_to_auto() {
+    let cli = Cli::try_parse_from(["bevyout", "prepare", "SuperDuperMart"]).unwrap();
+    let CommandLine::Prepare(args) = cli.command else {
+        panic!("expected prepare command");
+    };
+    assert_eq!(args.progress.mode, ProgressMode::Auto);
+
+    for (value, expected) in [
+        ("auto", ProgressMode::Auto),
+        ("tty", ProgressMode::Tty),
+        ("plain", ProgressMode::Plain),
+        ("off", ProgressMode::Off),
+    ] {
+        let cli = Cli::try_parse_from([
+            "bevyout",
+            "bake",
+            "--manifest",
+            "scene.ron",
+            "--progress",
+            value,
+        ])
+        .unwrap();
+        let CommandLine::Bake(args) = cli.command else {
+            panic!("expected bake command");
+        };
+        assert_eq!(args.progress.mode, expected);
+    }
+
+    assert!(
+        Cli::try_parse_from([
+            "bevyout",
+            "prepare",
+            "SuperDuperMart",
+            "--progress",
+            "invalid",
+        ])
+        .is_err()
+    );
+}
+
+#[test]
 fn bake_backend_accepts_explicit_solari_prototype_request() {
     let cli = Cli::try_parse_from([
         "bevyout",
