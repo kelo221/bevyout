@@ -67,6 +67,9 @@ mod time_of_day {
 #[path = "../src/vsa/prepare/reflection_probe_distribution.rs"]
 mod reflection_probe_distribution;
 
+#[path = "../src/vsa/overlay_policy.rs"]
+mod overlay_policy;
+
 // These files are pulled in verbatim and cover far more ground than the three
 // pure seams this suite drives (placement math, cell selectors, manifest
 // (de)serialization, conversion-profile selection). Everything else in them
@@ -1210,6 +1213,11 @@ struct BevyoutWorld {
     legacy_glossiness_exponent: Option<f32>,
     legacy_micro_roughness: Option<f32>,
     legacy_chan_weight: Option<f32>,
+
+    // -- fallout_overlays.feature --
+    fallout_overlay_editor_id: Option<String>,
+    fallout_overlay_model: Option<String>,
+    fallout_overlay_kind: Option<overlay_policy::FalloutOverlayKind>,
 }
 
 fn synthetic_dialogue_source() -> dialogue::DialogueSource {
@@ -17176,4 +17184,45 @@ async fn then_effective_chan_weight_is(world: &mut BevyoutWorld, expected: f32) 
         .legacy_chan_weight
         .expect("legacy Chan weight should be evaluated");
     assert!((actual - expected).abs() < 1.0e-3, "{actual} != {expected}");
+}
+
+// -- fallout_overlays.feature --
+
+#[given(regex = r#"^a Fallout static named \"([^\"]+)\" using model \"([^\"]+)\"$"#)]
+async fn given_fallout_overlay_candidate(
+    world: &mut BevyoutWorld,
+    editor_id: String,
+    model: String,
+) {
+    world.fallout_overlay_editor_id = Some(editor_id);
+    world.fallout_overlay_model = Some(model);
+}
+
+#[when("its flat-overlay policy is evaluated")]
+async fn when_flat_overlay_policy_is_evaluated(world: &mut BevyoutWorld) {
+    world.fallout_overlay_kind = Some(overlay_policy::classify_fallout_overlay(
+        world.fallout_overlay_editor_id.as_deref(),
+        world.fallout_overlay_model.as_deref(),
+    ));
+}
+
+#[then(regex = r#"^its overlay kind is \"([^\"]+)\"$"#)]
+async fn then_overlay_kind_is(world: &mut BevyoutWorld, expected: String) {
+    let actual = match world
+        .fallout_overlay_kind
+        .expect("overlay policy not evaluated")
+    {
+        overlay_policy::FalloutOverlayKind::None => "none",
+        overlay_policy::FalloutOverlayKind::Decal => "decal",
+        overlay_policy::FalloutOverlayKind::Debris => "debris",
+    };
+    assert_eq!(actual, expected);
+}
+
+#[then("the placement is excluded from static lighting inputs")]
+async fn then_overlay_is_excluded_from_static_lighting(world: &mut BevyoutWorld) {
+    assert_ne!(
+        world.fallout_overlay_kind,
+        Some(overlay_policy::FalloutOverlayKind::None)
+    );
 }

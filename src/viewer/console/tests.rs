@@ -1,7 +1,7 @@
 use super::*;
 use crate::console::{ConsoleExecutor, ConsolePlugin, ConsoleRequest, ConsoleSessionId};
 use crate::viewer::world::exterior::ExteriorWorldspaceLodSettings;
-use crate::viewer::{ImageSpaceBloomOverrides, LegacyChanSettings};
+use crate::viewer::{ImageSpaceBloomOverrides, LegacyChanSettings, OverlayLightingSettings};
 use crate::vsa::{PreparedItemCategory, PreparedItemDefinition, PreparedSceneManifest};
 use bevy::state::app::StatesPlugin;
 
@@ -19,6 +19,7 @@ fn test_app() -> App {
         .insert_resource(EmissionScale(0.0))
         .insert_resource(MaterialClampSettings::default())
         .insert_resource(LegacyChanSettings::default())
+        .insert_resource(OverlayLightingSettings::default())
         .insert_resource(super::super::controls::ReflectionProbeSettings::default())
         .insert_resource(ImageSpaceBloomOverrides::default())
         .init_resource::<super::super::screen_fx::ScreenFxRuntime>()
@@ -514,6 +515,27 @@ fn render_settings_validate_boundaries_before_mutation() {
         exec(&mut app, "getrender reflection_probe_strength").value["value"],
         2.5
     );
+    assert!(exec(&mut app, "setrender overlay_shadows 1").ok);
+    assert!(exec(&mut app, "setrender overlay_reflections 1").ok);
+    assert_eq!(
+        exec(&mut app, "getrender overlay_shadows").value["value"],
+        1
+    );
+    assert_eq!(
+        exec(&mut app, "getrender overlay_reflections").value["value"],
+        1
+    );
+    assert_eq!(
+        exec(&mut app, "getrender overlay_lightmaps").value["value"],
+        0
+    );
+    assert_eq!(
+        exec(&mut app, "setrender overlay_lightmaps 1")
+            .error
+            .unwrap()
+            .code,
+        "requires_rebuild"
+    );
     assert!(exec(&mut app, "setrender reflection_probes 0").ok);
     assert!(
         !app.world()
@@ -594,7 +616,7 @@ fn render_settings_validate_boundaries_before_mutation() {
     );
     assert_eq!(
         exec(&mut app, "getrender").value.as_object().unwrap().len(),
-        20
+        23
     );
     assert!(exec(&mut app, "setrender day_night_preview 1").ok);
     assert_eq!(

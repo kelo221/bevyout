@@ -326,6 +326,47 @@ fn fallout_surface_configuration_bounds_skin_and_hair_specular_response() {
 }
 
 #[test]
+fn flat_overlay_materials_get_depth_bias_and_stains_lose_reflections() {
+    let mut app = test_app();
+    app.add_systems(Update, configure_fallout_surface_materials);
+    let stain = app
+        .world_mut()
+        .resource_mut::<Assets<StandardMaterial>>()
+        .add(StandardMaterial {
+            metallic: 0.6,
+            reflectance: 0.7,
+            perceptual_roughness: 0.2,
+            ..default()
+        });
+    let entity = app
+        .world_mut()
+        .spawn((
+            Mesh3d::default(),
+            MeshMaterial3d(stain.clone()),
+            GltfMeshName("Stain01:44".into()),
+            GltfMaterialExtras {
+                value: serde_json::json!({
+                    "bevyout_fallout_material": { "shader_type": 1 }
+                })
+                .to_string(),
+            },
+        ))
+        .id();
+
+    app.update();
+    let material = app
+        .world()
+        .resource::<Assets<StandardMaterial>>()
+        .get(&stain)
+        .unwrap();
+    assert_eq!(material.depth_bias, FALLOUT_OVERLAY_DEPTH_BIAS);
+    assert_eq!(material.reflectance, FALLOUT_DECAL_REFLECTANCE);
+    assert_eq!(material.metallic, 0.0);
+    assert_eq!(material.perceptual_roughness, 1.0);
+    assert!(app.world().entity(entity).contains::<NotShadowCaster>());
+}
+
+#[test]
 fn legacy_world_materials_preserve_glossiness_and_receive_only_changed_chan_values() {
     let mut app = test_app();
     app.add_systems(
@@ -454,6 +495,7 @@ fn test_app() -> App {
     app.init_resource::<Assets<Mesh>>();
     app.init_resource::<Assets<StandardMaterial>>();
     app.init_resource::<LegacyChanSettings>();
+    app.init_resource::<OverlayLightingSettings>();
     app.init_resource::<LegacyWorldMaterials>();
     app
 }

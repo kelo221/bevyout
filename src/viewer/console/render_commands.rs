@@ -4,7 +4,8 @@ use super::*;
 use crate::viewer::day_night::{DayNightPreview, GameClock, WeatherTransition, profile_for_cell};
 use crate::viewer::world::exterior::ExteriorWorldspaceLodSettings;
 use crate::viewer::{
-    ImageSpaceBloomOverrides, LegacyChanSettings, LoadedSceneManifest, image_space_bloom_values,
+    ImageSpaceBloomOverrides, LegacyChanSettings, LoadedSceneManifest, OverlayLightingSettings,
+    image_space_bloom_values,
 };
 use bevy::pbr::{MeshMaterial3d, StandardMaterial};
 
@@ -242,7 +243,7 @@ fn toggle_reflection_probe_debug(
     ))
 }
 
-pub(super) const RENDER_SETTINGS: [&str; 20] = [
+pub(super) const RENDER_SETTINGS: [&str; 23] = [
     "lighting",
     "irradiance",
     "ambient",
@@ -262,6 +263,9 @@ pub(super) const RENDER_SETTINGS: [&str; 20] = [
     "worldspace_lod",
     "reflection_probes",
     "reflection_probe_strength",
+    "overlay_lightmaps",
+    "overlay_shadows",
+    "overlay_reflections",
     "day_night_preview",
 ];
 
@@ -475,6 +479,19 @@ pub(super) fn render_values(world: &mut World) -> Result<Map<String, Value>, Con
         "reflection_probe_strength".into(),
         json!(world.resource::<ReflectionProbeSettings>().strength()),
     );
+    values.insert("overlay_lightmaps".into(), json!(0));
+    values.insert(
+        "overlay_shadows".into(),
+        json!(
+            world
+                .resource::<OverlayLightingSettings>()
+                .realtime_shadows() as u8
+        ),
+    );
+    values.insert(
+        "overlay_reflections".into(),
+        json!(world.resource::<OverlayLightingSettings>().reflections() as u8),
+    );
     values.insert(
         "day_night_preview".into(),
         json!(
@@ -571,6 +588,9 @@ pub(super) fn render_setting_label(setting: &str) -> &'static str {
         "worldspace_lod" => "Far worldspace LOD",
         "reflection_probes" => "Prepared reflection probes",
         "reflection_probe_strength" => "Reflection probe strength",
+        "overlay_lightmaps" => "Overlay prepared lightmaps",
+        "overlay_shadows" => "Overlay realtime shadows",
+        "overlay_reflections" => "Overlay reflections",
         "day_night_preview" => "Day/night preview",
         _ => "Render setting",
     }
@@ -654,6 +674,9 @@ pub(super) fn set_render(
         | "realtime_shadows"
         | "worldspace_lod"
         | "reflection_probes"
+        | "overlay_lightmaps"
+        | "overlay_shadows"
+        | "overlay_reflections"
         | "day_night_preview" => value == 0.0 || value == 1.0,
         _ => unreachable!(),
     };
@@ -661,6 +684,12 @@ pub(super) fn set_render(
         return Err(ConsoleError::new(
             "out_of_range",
             format!("value {value} is outside the supported range for {setting}"),
+        ));
+    }
+    if setting == "overlay_lightmaps" && value == 1.0 {
+        return Err(ConsoleError::new(
+            "requires_rebuild",
+            "Fallout overlays are intentionally excluded from prepared lightmaps; enabling them requires a legacy bake",
         ));
     }
 
@@ -704,6 +733,13 @@ pub(super) fn set_render(
         "reflection_probe_strength" => world
             .resource_mut::<ReflectionProbeSettings>()
             .set_strength(value),
+        "overlay_lightmaps" => {}
+        "overlay_shadows" => world
+            .resource_mut::<OverlayLightingSettings>()
+            .set_realtime_shadows(value == 1.0),
+        "overlay_reflections" => world
+            .resource_mut::<OverlayLightingSettings>()
+            .set_reflections(value == 1.0),
         "day_night_preview" => {
             if let Some(mut preview) = world.get_resource_mut::<DayNightPreview>() {
                 preview.0 = value == 1.0;

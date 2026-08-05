@@ -54,6 +54,42 @@ fn bake_progress_label_uses_a_concrete_backend_name() {
 }
 
 #[test]
+fn flat_overlays_are_not_folded_into_the_lightmapped_static_scene() {
+    let mut placement = PreparedPlacement {
+        reference_form_id: 1,
+        base_form_id: 2,
+        asset_path: Some("assets/stain.glb".into()),
+        translation: [0.0; 3],
+        rotation_xyzw: [0.0, 0.0, 0.0, 1.0],
+        scale: 1.0,
+        error: None,
+        physics_asset_path: None,
+        physics_source: None,
+        physics_classification: PreparedPhysicsClassification::Static,
+        step_support: false,
+        mutability: PreparedRuntimeMutability::Immutable,
+        mutability_root_form_id: None,
+        reference_kind: "REFR".into(),
+        base_kind: "STAT".into(),
+        editor_id: Some("Stain03".into()),
+        display_name: None,
+        count: 1,
+        semantic: PreparedSemantic::Static,
+        initially_enabled: true,
+        enable_parent: None,
+        owner_form_id: None,
+        owner_faction_rank: None,
+        linked_reference_form_id: None,
+        inventory: Vec::new(),
+        audio: Default::default(),
+        ao_mode: "ao-none".into(),
+    };
+    assert!(!is_bake_static(&placement));
+    placement.editor_id = Some("VaultWall01".into());
+    assert!(is_bake_static(&placement));
+}
+
+#[test]
 fn oversized_lightmap_pages_fail_before_backend_dispatch() {
     let mut scene = synthetic_lightmap_scene_for_test();
     scene.primitives[0].lightmap_dimensions = [4093, 8];

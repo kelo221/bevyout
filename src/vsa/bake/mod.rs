@@ -1061,6 +1061,8 @@ pub(crate) fn is_bake_static(placement: &PreparedPlacement) -> bool {
         && placement.mutability == PreparedRuntimeMutability::Immutable
         && matches!(placement.semantic, PreparedSemantic::Static)
         && !is_pickup_record_kind(&placement.base_kind)
+        && crate::vsa::classify_fallout_overlay(placement.editor_id.as_deref(), None)
+            == crate::vsa::FalloutOverlayKind::None
 }
 
 fn exclude_animated_static_assets(asset_root: &Path, job: &mut BakeJob) -> Result<()> {

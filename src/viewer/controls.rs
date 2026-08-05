@@ -239,6 +239,33 @@ impl LegacyChanSettings {
     }
 }
 
+/// Runtime diagnostics for flat Fallout overlays. Prepared lightmap/probe
+/// capture membership is fixed during preparation; these controls cover the
+/// remaining realtime reflection and shadow contributions.
+#[derive(Clone, Copy, Debug, Default, Resource)]
+pub(crate) struct OverlayLightingSettings {
+    realtime_shadows: bool,
+    reflections: bool,
+}
+
+impl OverlayLightingSettings {
+    pub(crate) fn realtime_shadows(&self) -> bool {
+        self.realtime_shadows
+    }
+
+    pub(crate) fn set_realtime_shadows(&mut self, enabled: bool) {
+        self.realtime_shadows = enabled;
+    }
+
+    pub(crate) fn reflections(&self) -> bool {
+        self.reflections
+    }
+
+    pub(crate) fn set_reflections(&mut self, enabled: bool) {
+        self.reflections = enabled;
+    }
+}
+
 /// Combined settings for the viewer's material-clamp policy (issue #269):
 /// metallic gate, dielectric-specular gate, and roughness scale behind one
 /// revision counter. `setrender` writes go through the setters; a write

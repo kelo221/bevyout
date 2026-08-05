@@ -52,6 +52,16 @@ fn placement(asset_path: &str) -> PreparedPlacement {
     }
 }
 
+#[test]
+fn flat_overlays_do_not_enter_prepared_point_shadow_geometry() {
+    let mut overlay = placement("assets/stain.glb");
+    overlay.editor_id = Some("Stain01".into());
+    assert!(!is_static_shadow_caster(&overlay));
+
+    overlay.editor_id = Some("ChainLinkFence01".into());
+    assert!(is_static_shadow_caster(&overlay));
+}
+
 fn light(reference_form_id: u32) -> PreparedLight {
     PreparedLight {
         reference_form_id,

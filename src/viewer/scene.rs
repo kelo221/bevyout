@@ -4,7 +4,8 @@ use std::sync::Arc;
 
 use super::controls::{
     AmbientScale, AuthorizedEmissionMaterials, FogStrength, ImageSpaceBloomOverrides,
-    LegacyChanSettings, LightingScale, VolumetricFogMultiplier, image_space_emission_multiplier,
+    LegacyChanSettings, LightingScale, OverlayLightingSettings, VolumetricFogMultiplier,
+    image_space_emission_multiplier,
 };
 use super::world::{ResidentCell, ResidentCells, ResidentState};
 use super::*;
@@ -35,6 +36,14 @@ pub(crate) struct FalloutMaterialConfigured;
 
 #[derive(Component)]
 pub(crate) struct FalloutSurfaceConfigured;
+
+#[derive(Component)]
+pub(crate) struct FalloutOverlaySurface {
+    kind: crate::vsa::FalloutOverlayKind,
+    reflectance: f32,
+    metallic: f32,
+    roughness: f32,
+}
 
 #[derive(Resource, Default)]
 pub(crate) struct LegacyWorldMaterials {
@@ -147,6 +156,8 @@ const FALLOUT_SKIN_MIN_ROUGHNESS: f32 = 0.62;
 const FALLOUT_SKIN_REFLECTANCE: f32 = 0.35;
 const FALLOUT_EYE_CLEARCOAT: f32 = 1.0;
 const FALLOUT_EYE_CLEARCOAT_ROUGHNESS: f32 = 0.04;
+const FALLOUT_OVERLAY_DEPTH_BIAS: f32 = 1.0;
+const FALLOUT_DECAL_REFLECTANCE: f32 = 0.0;
 
 fn is_eye_surface_mesh_name(name: &str) -> bool {
     name.to_ascii_lowercase().contains("eye")
@@ -175,6 +186,10 @@ fn fallout_surface_kind(metadata: &FalloutMaterialExtra, mesh_name: Option<&str>
     FALLOUT_SURFACE_LEGACY_WORLD
 }
 
+fn fallout_overlay_kind(mesh_name: Option<&str>) -> crate::vsa::FalloutOverlayKind {
+    crate::vsa::classify_fallout_overlay(mesh_name, mesh_name)
+}
+
 /// Applies the runtime-only Fallout skin, hair, and eye variants to the existing
 /// `StandardMaterial` handles. The GLB metadata remains the source of truth;
 /// no scene hierarchy or prepared manifest data is changed here.
@@ -192,6 +207,7 @@ pub(crate) fn configure_fallout_surface_materials(
     >,
     mut materials: ResMut<Assets<StandardMaterial>>,
     chan_settings: Res<LegacyChanSettings>,
+    overlay_settings: Res<OverlayLightingSettings>,
     mut legacy_materials: ResMut<LegacyWorldMaterials>,
 ) {
     for (entity, material_handle, extras, mesh_name) in &extras {
@@ -200,6 +216,7 @@ pub(crate) fn configure_fallout_surface_materials(
             continue;
         };
         let surface_kind = fallout_surface_kind(&metadata, mesh_name.map(|name| name.0.as_str()));
+        let overlay_kind = fallout_overlay_kind(mesh_name.map(|name| name.0.as_str()));
         let Some(mut material) = materials.get_mut(&material_handle.0) else {
             // The scene entity can arrive before its material asset. Leave it
             // unmarked so the next frame can configure it once loaded.
@@ -239,7 +256,74 @@ pub(crate) fn configure_fallout_surface_materials(
             _ => {}
         }
 
+        if overlay_kind != crate::vsa::FalloutOverlayKind::None {
+            // These are authored coplanar presentation surfaces. They remain
+            // forward-lit, but must neither fight their substrate nor enter
+            // Bevy's realtime shadow maps after being excluded from prepared
+            // lightmaps/shadows/probe captures.
+            material.depth_bias = material.depth_bias.max(FALLOUT_OVERLAY_DEPTH_BIAS);
+            let overlay = FalloutOverlaySurface {
+                kind: overlay_kind,
+                reflectance: material.reflectance,
+                metallic: material.metallic,
+                roughness: material.perceptual_roughness,
+            };
+            if !overlay_settings.realtime_shadows() {
+                commands.entity(entity).insert(NotShadowCaster);
+            }
+            if overlay_kind == crate::vsa::FalloutOverlayKind::Decal {
+                // Stains and graffiti describe the substrate and should not
+                // carry a separate glossy reflection lobe. Three-dimensional
+                // paper debris retains its authored response.
+                if !overlay_settings.reflections() {
+                    material.metallic = 0.0;
+                    material.reflectance = FALLOUT_DECAL_REFLECTANCE;
+                    material.perceptual_roughness = 1.0;
+                }
+            }
+            commands.entity(entity).insert(overlay);
+        }
+
         commands.entity(entity).insert(FalloutSurfaceConfigured);
+    }
+}
+
+pub(crate) fn apply_overlay_lighting_settings(
+    settings: Res<OverlayLightingSettings>,
+    overlays: Query<
+        (
+            Entity,
+            &MeshMaterial3d<StandardMaterial>,
+            &FalloutOverlaySurface,
+        ),
+        With<Mesh3d>,
+    >,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut commands: Commands,
+) {
+    if !settings.is_changed() {
+        return;
+    }
+    for (entity, handle, overlay) in &overlays {
+        if settings.realtime_shadows() {
+            commands.entity(entity).remove::<NotShadowCaster>();
+        } else {
+            commands.entity(entity).insert(NotShadowCaster);
+        }
+        let Some(mut material) = materials.get_mut(&handle.0) else {
+            continue;
+        };
+        if overlay.kind == crate::vsa::FalloutOverlayKind::Decal {
+            if settings.reflections() {
+                material.reflectance = overlay.reflectance;
+                material.metallic = overlay.metallic;
+                material.perceptual_roughness = overlay.roughness;
+            } else {
+                material.reflectance = FALLOUT_DECAL_REFLECTANCE;
+                material.metallic = 0.0;
+                material.perceptual_roughness = 1.0;
+            }
+        }
     }
 }
 
