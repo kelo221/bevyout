@@ -192,6 +192,24 @@ fn light_affects_primitive(
     position.distance_squared(closest) <= radius * radius + 1.0e-4
 }
 
+#[cfg(feature = "lightmap-gpu-solari")]
+fn solari_sample_count(settings: LightmapSamplingSettings) -> Result<u32> {
+    if settings.min_samples == 0 || settings.max_samples == 0 {
+        bail!("Solari bake requires at least one lightmap sample");
+    }
+    if settings.min_samples != settings.max_samples {
+        bail!(
+            "Solari bake currently requires fixed sampling; set --lightmap-min-samples and --lightmap-max-samples to the same value"
+        );
+    }
+    if !settings.variance_threshold.is_finite() || settings.variance_threshold > 0.0 {
+        bail!(
+            "Solari bake does not support adaptive variance stopping yet; set --lightmap-variance-threshold 0"
+        );
+    }
+    Ok(settings.max_samples)
+}
+
 /// Rasterizes every composed primitive's generated UV1 and evaluates the
 /// shared direct-light transport at covered texel centers. The output stores
 /// incident irradiance divided by PI, without receiver albedo.
@@ -305,7 +323,7 @@ pub(crate) fn bake_direct_pages(
 
 /// Runs the feature-gated Solari direct-light prototype through the same page
 /// publication path as the CPU backend. The prototype is intentionally narrow:
-/// opaque and alpha-mask receivers, point/spot lights, ambient/directional
+/// opaque, alpha-mask, and blended receivers, point/spot lights, ambient/directional
 /// input, bounded authored-environment and emissive-mesh transport, and at
 /// most four secondary diffuse bounces. Unsupported inputs fail explicitly
 /// so an explicit GPU request cannot silently change the bake meaning.
@@ -336,22 +354,13 @@ pub(crate) fn bake_direct_pages_solari(
             "Solari bake prototype supports at most {SOLARI_BAKE_MAX_BOUNCES} diffuse bounces; use --lightmap-bounces 0..={SOLARI_BAKE_MAX_BOUNCES}"
         );
     }
-    if sampling.min_samples > 1 || sampling.max_samples > 1 {
-        bail!(
-            "Solari bake prototype performs one direct evaluation per surfel; set --lightmap-min-samples 1 and --lightmap-max-samples 1"
-        );
-    }
+    let sample_count = solari_sample_count(sampling)?;
     let ambient = bevyout_core::lighting::ambient_irradiance(
         ambient_rgba,
         bevyout_core::lighting::DEFAULT_LIGHTING_SCALE,
         bevyout_core::lighting::DEFAULT_AMBIENT_SCALE,
     );
     for material in &scene.materials {
-        if matches!(material.alpha_mode, super::rust_scene::AlphaMode::Blend) {
-            bail!(
-                "Solari bake prototype supports opaque and alpha-mask materials only; blended material encountered"
-            );
-        }
         if material.translucency_strength > f32::EPSILON {
             bail!(
                 "Solari bake prototype does not support translucent transport yet; use --bake-backend cpu"
@@ -395,7 +404,7 @@ pub(crate) fn bake_direct_pages_solari(
         ambient,
         directional,
         environment_map,
-        sampling.max_samples.max(1),
+        sample_count,
         scene_seed,
     )?;
     if results.len() != texels.len() {
@@ -425,26 +434,26 @@ pub(crate) fn bake_direct_pages_solari(
                 position += Vec3::from_array(texels[*sample_index].position);
                 normal += Vec3::from_array(texels[*sample_index].normal);
             }
-            let sample_count = sample_indices.len() as f32;
-            pixels[pixel_index] = (irradiance / sample_count / std::f32::consts::PI)
+            let surfel_count = sample_indices.len() as f32;
+            pixels[pixel_index] = (irradiance / surfel_count / std::f32::consts::PI)
                 .max(Vec3::ZERO)
                 .min(Vec3::splat(65_504.0));
             features[pixel_index] = DenoiseFeature {
-                position: (position / sample_count).to_array(),
-                normal: (normal / sample_count).normalize_or_zero().to_array(),
+                position: (position / surfel_count).to_array(),
+                normal: (normal / surfel_count).normalize_or_zero().to_array(),
                 material_id: page.material_id,
                 relative_variance: 0.0,
                 coverage: 1.0,
-                sample_count: 1,
+                sample_count,
             };
             summary.sampled_texels += 1;
-            summary.total_samples += sample_indices.len() as u64;
+            summary.total_samples += sample_indices.len() as u64 * u64::from(sample_count);
             summary.min_samples = if summary.min_samples == 0 {
-                1
+                sample_count
             } else {
-                summary.min_samples.min(1)
+                summary.min_samples.min(sample_count)
             };
-            summary.max_samples = summary.max_samples.max(1);
+            summary.max_samples = summary.max_samples.max(sample_count);
         }
         write_debug_images(
             output_dir,
@@ -534,22 +543,13 @@ pub(crate) fn bake_direct_pages_solari_bounded(
             "Solari bake prototype supports at most {SOLARI_BAKE_MAX_BOUNCES} diffuse bounces; use --lightmap-bounces 0..={SOLARI_BAKE_MAX_BOUNCES}"
         );
     }
-    if sampling.min_samples > 1 || sampling.max_samples > 1 {
-        bail!(
-            "Solari bake prototype performs one direct evaluation per surfel; set --lightmap-min-samples 1 and --lightmap-max-samples 1"
-        );
-    }
+    let sample_count = solari_sample_count(sampling)?;
     let ambient = bevyout_core::lighting::ambient_irradiance(
         ambient_rgba,
         bevyout_core::lighting::DEFAULT_LIGHTING_SCALE,
         bevyout_core::lighting::DEFAULT_AMBIENT_SCALE,
     );
     for material in &scene.materials {
-        if matches!(material.alpha_mode, super::rust_scene::AlphaMode::Blend) {
-            bail!(
-                "Solari bake prototype supports opaque and alpha-mask materials only; blended material encountered"
-            );
-        }
         if material.translucency_strength > f32::EPSILON {
             bail!(
                 "Solari bake prototype does not support translucent transport yet; use --bake-backend cpu"
@@ -626,6 +626,7 @@ pub(crate) fn bake_direct_pages_solari_bounded(
 
                 let tile = collect_solari_tile(
                     primitive,
+                    primitive_index,
                     width,
                     height,
                     tile_start_x,
@@ -638,7 +639,7 @@ pub(crate) fn bake_direct_pages_solari_bounded(
                     lights,
                     ambient,
                     directional,
-                    1,
+                    sample_count,
                     bounce_count,
                     environment_map,
                     revision,
@@ -673,24 +674,25 @@ pub(crate) fn bake_direct_pages_solari_bounded(
                         position += Vec3::from_array(tile.texels[*sample_index].position);
                         normal += Vec3::from_array(tile.texels[*sample_index].normal);
                     }
-                    let sample_count = sample_indices.len() as f32;
-                    tile_pixels[local_index] = (irradiance / sample_count / std::f32::consts::PI)
+                    let surfel_count = sample_indices.len() as f32;
+                    tile_pixels[local_index] = (irradiance / surfel_count / std::f32::consts::PI)
                         .max(Vec3::ZERO)
                         .min(Vec3::splat(65_504.0));
                     tile_features[local_index] = DenoiseFeature {
-                        position: (position / sample_count).to_array(),
-                        normal: (normal / sample_count).normalize_or_zero().to_array(),
+                        position: (position / surfel_count).to_array(),
+                        normal: (normal / surfel_count).normalize_or_zero().to_array(),
                         material_id: primitive.material as u32,
                         relative_variance: 0.0,
                         coverage: 1.0,
-                        sample_count: 1,
+                        sample_count,
                     };
                     tile_summary.sampled_texels += 1;
-                    tile_summary.total_samples += sample_indices.len() as u64;
+                    tile_summary.total_samples +=
+                        sample_indices.len() as u64 * u64::from(sample_count);
                 }
                 if tile_summary.sampled_texels != 0 {
-                    tile_summary.min_samples = 1;
-                    tile_summary.max_samples = 1;
+                    tile_summary.min_samples = sample_count;
+                    tile_summary.max_samples = sample_count;
                 }
                 let decoded = DecodedTilePayload {
                     width: tile_width,
@@ -840,8 +842,10 @@ struct SolariTileWork {
 }
 
 #[cfg(feature = "lightmap-gpu-solari")]
+#[allow(clippy::too_many_arguments)]
 fn collect_solari_tile(
     primitive: &super::rust_scene::ComposedPrimitive,
+    primitive_index: usize,
     page_width: u32,
     page_height: u32,
     tile_start_x: usize,
@@ -953,11 +957,18 @@ fn collect_solari_tile(
                         );
                     }
                     chart_owners[local_index] = Some(chart_id);
-                    pixel_samples[local_index].push(texels.len());
+                    let sample_index = pixel_samples[local_index].len();
+                    let global_index = y as usize * page_width as usize + x as usize;
+                    let spatial_index = primitive_index
+                        .wrapping_mul(page_width as usize * page_height as usize)
+                        .wrapping_add(global_index.wrapping_mul(4))
+                        .wrapping_add(sample_index) as u32;
                     texels.push(SolariBakeTexel {
                         position: interpolate_vec3(position, weights).to_array(),
                         normal: sampled_normal.to_array(),
+                        spatial_index,
                     });
+                    pixel_samples[local_index].push(texels.len() - 1);
                 }
             }
         }
@@ -1082,11 +1093,17 @@ fn collect_solari_page(
                         );
                     }
                     chart_owners[index] = Some(chart_id);
-                    pixel_samples[index].push(texels.len());
+                    let sample_index = pixel_samples[index].len();
+                    let spatial_index = primitive_index
+                        .wrapping_mul(pixel_count)
+                        .wrapping_add(index.wrapping_mul(4))
+                        .wrapping_add(sample_index) as u32;
                     texels.push(SolariBakeTexel {
                         position: interpolate_vec3(position, weights).to_array(),
                         normal: sampled_normal.to_array(),
+                        spatial_index,
                     });
+                    pixel_samples[index].push(texels.len() - 1);
                 }
             }
         }

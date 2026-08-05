@@ -1215,9 +1215,9 @@ fn trace_indirect_path(
     let mut radiance = Vec3::ZERO;
     for _ in 0..MAX_TRANSPARENT_LAYERS {
         let Some(hit) = nearest_hit(bvh, triangles, origin, direction, remaining) else {
-            radiance += environment_map.map_or(Vec3::ZERO, |map| {
-                Vec3::from_array(map.sample(direction.to_array())) * throughput
-            });
+            // The previous surface already evaluated the authored environment
+            // through direct_irradiance_with_environment. Adding an escaped
+            // environment sample here would count that transport vertex twice.
             break;
         };
         let material = &materials[hit.triangle.material];

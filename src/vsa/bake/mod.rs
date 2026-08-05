@@ -214,9 +214,6 @@ pub(crate) fn build_bake_job(
         lightmap_tile_size: args.lightmap_tile_size,
         lightmap_backend: args.lightmap_backend.as_str().into(),
         static_batch_chunk_meters: args.static_batch_chunk_meters,
-        // Runtime glow maps are intentionally much brighter than their physical
-        // bake contribution so they remain visible under Bloom in the viewer.
-        emission_scale: 0.01,
         ambient_rgba: cell_lighting.ambient_rgba,
         lightmap_environment_map: args.lightmap_environment_map.as_ref().map(|path| {
             let resolved = if path.is_absolute() {
@@ -305,10 +302,41 @@ pub(crate) fn lightmap_accumulation_fingerprint(
     fingerprint.update(b"lightmap-accumulation-v2");
     let transport_revision = CURRENT_BAKE_REVISION.replace("-feature-guided-atrous-denoise-v1", "");
     fingerprint.update(transport_revision.as_bytes());
+    if job.lightmap_backend.eq_ignore_ascii_case("solari") {
+        fingerprint.update(b"solari-bevy-0.19-bounded-transport");
+        fingerprint.update(Sha256::digest(include_bytes!("backend/solari_bake.wgsl")));
+    } else {
+        fingerprint.update(b"transport-cpu");
+    }
     fingerprint.update(manifest.source_fingerprint.as_bytes());
     fingerprint.update(serde_json::to_vec(&job_value)?);
     update_asset_fingerprints(&mut fingerprint, job)?;
     Ok(format!("{:x}", fingerprint.finalize()))
+}
+
+fn integrator_revision_for_job(job: &BakeJob) -> String {
+    if job.lightmap_backend.eq_ignore_ascii_case("solari") {
+        let shader_revision = format!(
+            "{:x}",
+            Sha256::digest(include_bytes!("backend/solari_bake.wgsl"))
+        );
+        format!(
+            "solari-bevy-0.19-ray-query-bounded-cosine-hit-emission-env-direct-only-{}-min{}-max{}-variance-{:.6}-shader-{}",
+            job.lightmap_bounces,
+            job.lightmap_min_samples,
+            job.lightmap_max_samples,
+            job.lightmap_variance_threshold,
+            shader_revision,
+        )
+    } else {
+        format!(
+            "transport-cpu-direct-surface-v7-area-emissive-mis-rr-adaptive-bounces-{}-min{}-max{}-variance-{:.6}-environment-map-hdr-v1",
+            job.lightmap_bounces,
+            job.lightmap_min_samples,
+            job.lightmap_max_samples,
+            job.lightmap_variance_threshold
+        )
+    }
 }
 
 fn update_asset_fingerprints(fingerprint: &mut Sha256, job: &BakeJob) -> Result<()> {
@@ -694,13 +722,7 @@ pub(crate) fn bake_manifest(args: &BakeArgs, manifest_path: &Path) -> Result<()>
         lightmap_variance_pages,
         lightmap_bindings,
         bake_settings: PreparedBakeSettings {
-            integrator_revision: format!(
-                "transport-cpu-direct-surface-v7-area-emissive-mis-rr-adaptive-bounces-{}-min{}-max{}-variance-{:.6}-environment-map-hdr-v1",
-                job.lightmap_bounces,
-                job.lightmap_min_samples,
-                job.lightmap_max_samples,
-                job.lightmap_variance_threshold
-            ),
+            integrator_revision: integrator_revision_for_job(&job),
             xatlas_revision: "vendored-xatlas-rs-v2-source-v1".into(),
             uv_layout_fingerprint: CURRENT_BAKE_REVISION.into(),
             material_fingerprint: CURRENT_BAKE_REVISION.into(),

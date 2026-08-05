@@ -19,15 +19,19 @@ pub(crate) fn sample_material(
         .as_ref()
         .map_or(Vec4::ONE, |texture| texture.sample(uv));
     let alpha = (material.base_color_factor.w * sampled_base.w * vertex_color.w).clamp(0.0, 1.0);
-    let base = srgb_to_linear_vec3(material.base_color_factor.truncate())
+    // glTF baseColorFactor and COLOR_0 are already linear multipliers. Only
+    // the sampled texture carries sRGB encoding.
+    let base = material.base_color_factor.truncate()
         * srgb_to_linear_vec3(sampled_base.truncate())
-        * srgb_to_linear_vec3(vertex_color.truncate());
+        * vertex_color.truncate();
     let diffuse = base * (1.0 - material.metallic_factor).clamp(0.0, 1.0);
     let emissive_sample = material
         .emissive_texture
         .as_ref()
         .map_or(Vec4::ONE, |texture| texture.sample(uv));
-    let emissive = srgb_to_linear_vec3(material.emissive_factor)
+    // emissiveFactor is also authored in linear space; the emissive texture
+    // is the only value decoded here.
+    let emissive = material.emissive_factor
         * srgb_to_linear_vec3(emissive_sample.truncate())
         * bevyout_core::lighting::EMISSION_SCALE;
     MaterialSample {

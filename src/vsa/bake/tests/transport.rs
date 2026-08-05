@@ -36,8 +36,8 @@ fn material_sampling_applies_linear_diffuse_and_emissive_contracts_once() {
     };
     let sample = sample_material(&material, Vec2::ZERO, Vec4::ONE);
     assert!((sample.alpha - 1.0).abs() < f32::EPSILON);
-    assert!(sample.base_color.x > 0.2 && sample.base_color.x < 0.22);
-    assert!(sample.emissive.x > 0.002 && sample.emissive.x < 0.003);
+    assert!((sample.base_color.x - 0.5).abs() < f32::EPSILON);
+    assert!((sample.emissive.x - 0.005).abs() < f32::EPSILON);
 }
 
 #[test]

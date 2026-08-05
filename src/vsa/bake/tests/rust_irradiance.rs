@@ -368,7 +368,7 @@ fn white_lambertian_surface_receives_ambient_without_receiver_color_baking() {
     );
     // The receiver albedo participates exactly once in the Lambertian
     // response; it is not pre-multiplied into the ambient contract twice.
-    let expected = Vec3::from_array(bevyout_core::lighting::srgb_to_linear_rgb([0.5, 0.5, 0.5]));
+    let expected = Vec3::splat(0.5);
     assert!((radiance.x - expected.x).abs() < 1e-5);
     assert_eq!(radiance, expected);
 }
@@ -703,7 +703,7 @@ fn surface_and_volume_paths_share_static_diffuse_transport() {
         Vec3::NEG_Y,
         100.0,
     );
-    let base_color = bevyout_core::lighting::srgb_to_linear_rgb([0.7; 3]);
+    let base_color = [0.7; 3];
     let expected_volume_radiance =
         surface_irradiance * Vec3::from_array(base_color) / std::f32::consts::PI;
     assert!(surface_irradiance.max_element() > 0.0);

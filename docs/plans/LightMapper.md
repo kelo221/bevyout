@@ -490,8 +490,9 @@ and selectively its BRDF and light-sampling routines. Resolve the exact API at
 the adapter spike because the v7 branch and Bevy 0.19 do not necessarily expose
 identical symbol names.
 Bevyout must retain its own Fallout light metadata, ambient policy, and
-alpha-mask policy until the optional adapter supports the remaining material
-cases, along with UV/atlas/rasterization logic,
+alpha/transparency policy until the optional adapter supports its remaining
+texture-varying emitter and richer material cases, along with
+UV/atlas/rasterization logic,
 offline accumulation, denoising, dilation, cache, encoding, and manifest
 binding.
 
@@ -1123,9 +1124,10 @@ Unsupported adapter, CI, or headless  → CPU backend
 ```
 
 The CPU path remains mandatory for all supported platforms and is the numeric
-reference for GPU comparisons. Solari's remaining alpha-mask, emissive,
-environment, and custom-material gaps must be covered by bevyout-side policies
-or remain on the CPU path until the adapter handles them explicitly.
+reference for GPU comparisons. Solari's remaining texture-varying emitter,
+production-scale emitter lookup, and richer custom-material gaps must be
+covered by bevyout-side policies or remain on the CPU path until the adapter
+handles them explicitly.
 
 It should not require:
 
@@ -1548,35 +1550,115 @@ custom BVH/traversal implementation:
   alpha side table plus bilinearly sampled base-color alpha texels, skips masked
   ray hits below the authored cutoff for direct and one-bounce visibility, and
   keeps the conservative opaque fallback when the side table is absent. A
-  factor-mask hardware fixture is included; blended transport remains rejected.
+  factor-mask hardware fixture is included.
+* Added blended alpha transport to the Solari side table. Blend materials now
+  upload factor and base-color texture alpha, accumulate scalar transmittance
+  through bounded visibility layers, and continue the same path through a
+  partially covered hit instead of treating it as opaque. A hardware fixture
+  compares alpha `0`, `0.5`, and `1` against the CPU reference.
 * Extended the deterministic cosine path from one to four bounded secondary
   diffuse bounces. Each path carries the resolved hit albedo into the next
   bounce, skips alpha-masked layers at every depth, and preserves the existing
   zero-bounce direct result. A three-plane ambient fixture compares one and two
   bounces against the CPU linear-albedo reference on the current adapter.
-* Enabled bounded emissive-mesh transport for explicit Solari bounces. The
-  adapter reuses Solari's emissive light-source sampling and material emission
-  data, combines next-event and cosine-hit emission with power-heuristic
-  weights, and has a hardware fixture proving an authored emissive mesh reaches
-  a receiver. Translucent transport remains rejected.
+* Added a bevyout-owned emissive-triangle table for explicit Solari bounces.
+  Triangles are selected from an emitted-power CDF, sampled uniformly in area,
+  converted to a solid-angle PDF, visibility-tested through the same alpha
+  transmittance path, and combined with the cosine estimator using a power
+  heuristic. Hit-emission MIS uses the actual path origin and BSDF PDF rather
+  than Solari's area-measure helper. The current adapter stores a center sample
+  per emitter; textured or strongly vertex-varying emitters still need a more
+  detailed texture-aware sampler.
 * Added authored equirectangular HDR environment transport. Environment pixels
   are copied into a render-owned storage buffer; the shader preserves horizontal
   wrap and vertical clamp, evaluates a deterministic cosine irradiance estimate
   with alpha-aware visibility, and adds environment radiance when indirect paths
   escape. A constant-map hardware oracle matches the CPU `radiance × PI`
   contract for direct and one-bounce escape lighting.
+* A real-cell GPU acceptance bake completed for `000151e3` with the explicit
+  Solari backend (`--lightmap-min-samples 1 --lightmap-max-samples 1
+  --lightmap-variance-threshold 0 --lightmap-bounces 1
+  --lightmap-denoise-iterations 0`). It composed 65 static placements into 23
+  primitive pages, packed one `3996 × 3980` single-mip RGBA16F atlas, covered
+  772,053 texels, and completed in 28.91 seconds. The bake reported 746 GPU
+  tile misses/writes and no cache hits, proving dispatch, readback, cache
+  publication, atlas encoding, and manifest publication on a real prepared
+  cell rather than only on the ignored synthetic fixtures. The same command
+  also produced the existing shared CPU irradiance-volume artifact; that volume
+  is not being misreported as Solari output.
+* The live viewer loaded that prepared result through the local MCP/agent
+  bridge. A viewport capture shows the baked interior architecture and dynamic
+  `HD00MrHandyWadsworth`; the persistent local capture is
+  `.bevyout/screenshots/gpu_bake_solari.png`. This is visual runtime evidence
+  for the integrated path, not a cross-adapter parity gate or a production
+  quality bake.
+
+### Review correction — 2026-08-05
+
+The Solari 7 review found that the preceding bullets described a prototype as
+more physically complete than the code justified. The following corrections are
+now part of the implementation, and the older hardware-pass statements above
+are historical evidence from the pre-correction shader, not current acceptance
+evidence:
+
+* glTF `baseColorFactor`, `emissiveFactor`, and `COLOR_0` are now treated as
+  linear values in both CPU and Solari transport. Only sampled color textures
+  receive sRGB decoding. The material contract tests were updated accordingly.
+* All custom Solari transport and alpha-peel rays use closest-hit semantics
+  (`RAY_FLAG_NONE`). Solari proxy identity is carried explicitly through the
+  pinned 0.19 `ResolvedMaterial.reflectance` field; alpha, vertex-color, and
+  geometric-position side tables no longer assume compacted Solari instance
+  order. Geometric normals and an authored double-sided flag control face
+  acceptance and ray offsets.
+* The upstream Solari emissive sampler/MIS path remains disabled for this bake
+  prototype. Its 0.19 PDF is area-measure and cannot be compared directly with
+  the shader's solid-angle BSDF PDF; it also cannot apply bevyout alpha masks
+  to NEE emitter visibility. The adapter instead owns its solid-angle emitter
+  table and MIS, while the CPU reference remains authoritative for richer
+  texture-varying emitter sampling.
+* Environment radiance is evaluated at the current surface's direct vertex;
+  an indirect miss no longer adds it a second time. Constant maps therefore
+  use `radiance × PI`, not `radiance × 2PI`. Environment-CDF vertical jitter
+  uses the selected CDF interval residual, and cosine-path sampling uses a
+  radial jitter plus a global page/primitive/texel/sample seed identity.
+* Solari now accepts fixed sample counts greater than one, but still rejects
+  adaptive variance stopping. Its dispatch waits for two consecutive prepared
+  Solari scene frames before submitting work. The cache fingerprint includes
+  the backend identity and the exact `solari_bake.wgsl` hash; the unused
+  serialized `BakeJob.emission_scale` field was removed.
+* The source-verified lightmap container remains intentionally one-mip and
+  accepts NPOT dimensions such as `3996×3980`; power-of-two padding is not a
+  requirement. Cross-OS runtime verification of that NPOT one-mip asset is
+  still outstanding.
+* After these corrections, the ignored Solari matrix passes eight fixtures on
+  the current compatible adapter: direct/session, CPU parity, alpha mask,
+  blended alpha, constant environment, one and two authored diffuse bounces,
+  and emissive-mesh transport. This is adapter-local evidence, not a
+  representative-GPU release gate.
+
+This leaves the optional backend an experimental transport prototype. The
+feature build, source-contract tests, CPU analytical oracles, and the current
+compatible-adapter hardware fixtures are evidence for the implemented slice;
+cross-adapter parity and texture-varying emitter coverage remain open.
 
 Still required for the complete optional backend:
 
 * Run the deterministic multi-texel parity fixture across representative GPU
   families and promote it to a release gate once adapter coverage is stable.
-* Extend the bounded prototype to the remaining full lighting contract:
-  blended alpha transport, environment importance-CDF/MIS parity,
-  emissive-texture/alpha-aware parity, and full sample-count/depth parity. The
-  current GPU path supports zero through four opaque/alpha-mask diffuse bounces,
-  bounded emissive-mesh transport, and bounded authored environment escape with
-  the one-sample adapter contract; each extension must remain explicit rather
-  than silently changing the CPU reference meaning.
+* Rerun and then broaden hardware validation: direct, alpha-mask, linear
+  material/vertex-color, geometric-sidedness, multi-sample, environment, and
+  bounded-bounce fixtures must pass on representative adapters. The current
+  two-frame readiness fence is conservative but does not yet read back Solari's
+  compact instance counts.
+* Complete the remaining full-lighting-contract parity work. The current GPU
+  path supports zero through four bounded diffuse bounces, opaque/mask/blend
+  alpha transport, a bevyout-owned solid-angle emissive sample with MIS, and
+  direct authored-environment transport. It does not yet claim CPU-equivalent
+  texture-varying emitter sampling, production-scale emitter lookup cost, or
+  adaptive convergence.
+* Add stronger analytical fixtures for constant environments, emissive panels,
+  sidedness, texture/factor color spaces, and non-ring sample distributions;
+  keep the CPU path authoritative until those fixtures are hardware-verified.
 * Add capability-aware `Auto` selection only after GPU/CPU parity is proven;
   until then `Auto` stays on CPU and explicit `Solari` remains opt-in.
 * Keep the Solari adapter's material/light policy narrow and bevyout-owned; do

@@ -17,6 +17,9 @@ pub(crate) struct EnvironmentMap {
     importance_total: f32,
 }
 
+#[cfg(feature = "lightmap-gpu-solari")]
+pub(crate) type SolariEnvironmentData = (u32, u32, Arc<Vec<[f32; 3]>>, Arc<Vec<f32>>);
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct EnvironmentImportanceSample {
     pub(crate) direction: [f32; 3],
@@ -145,10 +148,17 @@ impl EnvironmentMap {
             }
         }
         let index = low.min(self.importance_cdf.len() - 1);
+        let cdf_previous = if index == 0 {
+            0.0
+        } else {
+            self.importance_cdf[index - 1]
+        };
+        let cdf_interval = (self.importance_cdf[index] - cdf_previous).max(f32::EPSILON);
+        let cdf_residual = ((target - cdf_previous) / cdf_interval).clamp(0.0, 1.0 - f32::EPSILON);
         let x = index % self.width as usize;
         let y = index / self.width as usize;
         let u = (x as f32 + u1.rem_euclid(1.0)) / self.width as f32;
-        let v = (y as f32 + u0.rem_euclid(1.0)) / self.height as f32;
+        let v = (y as f32 + cdf_residual) / self.height as f32;
         let direction = Self::direction_from_uv(u, v);
         EnvironmentImportanceSample {
             direction,
@@ -186,7 +196,7 @@ impl EnvironmentMap {
     }
 
     #[cfg(feature = "lightmap-gpu-solari")]
-    pub(crate) fn solari_data(&self) -> (u32, u32, Arc<Vec<[f32; 3]>>, Arc<Vec<f32>>) {
+    pub(crate) fn solari_data(&self) -> SolariEnvironmentData {
         (
             self.width,
             self.height,

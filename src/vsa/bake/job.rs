@@ -29,7 +29,6 @@ pub(crate) struct BakeJob {
     pub(crate) lightmap_tile_size: u32,
     pub(crate) lightmap_backend: String,
     pub(crate) static_batch_chunk_meters: f32,
-    pub(crate) emission_scale: f32,
     pub(crate) ambient_rgba: [f32; 4],
     pub(crate) lightmap_environment_map: Option<String>,
     pub(crate) cell_directional_rgba: [f32; 4],

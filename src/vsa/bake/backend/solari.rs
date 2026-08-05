@@ -13,6 +13,7 @@
 use super::super::JobLight;
 use super::super::environment::EnvironmentMap;
 use super::super::rust_scene::{AlphaMode, ComposedPrimitive, TransportMaterial};
+use super::super::transport::material::sample_material;
 use anyhow::{Context, Result, bail};
 use bevy::app::{App, Plugin, SubApps};
 use bevy::asset::{
@@ -142,6 +143,7 @@ fn build_alpha_scene(
     let mut vertex_records = Vec::with_capacity(primitives.len());
     let mut vertex_colors = Vec::new();
     let mut vertex_indices = Vec::new();
+    let mut vertex_positions = Vec::new();
     for primitive in primitives {
         if primitive.transport_colors.len() != primitive.positions.len() {
             bail!(
@@ -155,6 +157,8 @@ fn build_alpha_scene(
             .context("Solari vertex-color side table exceeded u32 indexing")?;
         let index_offset = u32::try_from(vertex_indices.len())
             .context("Solari vertex-index side table exceeded u32 indexing")?;
+        let position_offset = u32::try_from(vertex_positions.len())
+            .context("Solari vertex-position side table exceeded u32 indexing")?;
         vertex_colors.extend(
             primitive
                 .transport_colors
@@ -162,9 +166,16 @@ fn build_alpha_scene(
                 .map(|color| color.to_array()),
         );
         vertex_indices.extend(&primitive.indices);
+        vertex_positions.extend(
+            primitive
+                .positions
+                .iter()
+                .map(|position| [position.x, position.y, position.z, 0.0]),
+        );
         vertex_records.push(SolariBakeVertexRecord {
             color_offset,
             index_offset,
+            position_offset,
             vertex_count: u32::try_from(primitive.transport_colors.len())
                 .context("Solari primitive vertex count exceeded u32 indexing")?,
             index_count: u32::try_from(primitive.indices.len())
@@ -180,17 +191,13 @@ fn build_alpha_scene(
         let mode = match material.alpha_mode {
             AlphaMode::Opaque => 0,
             AlphaMode::Mask => 1,
-            AlphaMode::Blend => {
-                bail!(
-                    "Solari bake prototype supports alpha-mask materials but not blended transport"
-                );
-            }
+            AlphaMode::Blend => 2,
         };
         let mut data_offset = 0;
         let mut width = 0;
         let mut height = 0;
         let mut wrap = [0.0, 0.0];
-        if mode == 1
+        if mode != 0
             && let Some(texture) = material.base_color_texture.as_ref()
         {
             let image = texture.image();
@@ -214,6 +221,7 @@ fn build_alpha_scene(
         records.push(SolariBakeAlphaRecord {
             data_offset_width_height_mode: [data_offset, width, height, mode],
             base_alpha_cutoff_wrap: [material.base_color_factor.w, cutoff, wrap[0], wrap[1]],
+            flags: [u32::from(material.double_sided), 0, 0, 0],
         });
     }
     Ok(SolariBakeAlphaScene {
@@ -222,6 +230,148 @@ fn build_alpha_scene(
         vertex_records: Arc::new(vertex_records),
         vertex_colors: Arc::new(vertex_colors),
         vertex_indices: Arc::new(vertex_indices),
+        vertex_positions: Arc::new(vertex_positions),
+    })
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub(crate) struct SolariBakeEmissiveTriangle {
+    positions: [[f32; 4]; 3],
+    emission_and_area: [f32; 4],
+    selection_cdf_probability_flags: [f32; 4],
+    identity: [u32; 4],
+}
+
+#[derive(Clone, Debug, Default)]
+struct SolariBakeEmissiveScene {
+    triangles: Arc<Vec<SolariBakeEmissiveTriangle>>,
+    total_weight: f32,
+}
+
+fn build_emissive_scene(
+    primitives: &[ComposedPrimitive],
+    materials: &[TransportMaterial],
+) -> Result<SolariBakeEmissiveScene> {
+    struct Candidate {
+        positions: [[f32; 4]; 3],
+        emission: [f32; 3],
+        area: f32,
+        weight: f32,
+        double_sided: bool,
+        primitive_index: u32,
+        triangle_index: u32,
+    }
+
+    let mut candidates = Vec::new();
+    let mut total_weight = 0.0_f32;
+    for (primitive_index, primitive) in primitives.iter().enumerate() {
+        let material = materials.get(primitive.material).with_context(|| {
+            format!(
+                "Solari emissive material index {} is invalid for {}",
+                primitive.material, primitive.name
+            )
+        })?;
+        if primitive.uvs.len() != primitive.positions.len()
+            || primitive.transport_colors.len() != primitive.positions.len()
+        {
+            bail!(
+                "Solari emissive attributes have mismatched vertex counts for {}",
+                primitive.name
+            );
+        }
+        for (triangle_index, indices) in primitive.indices.chunks_exact(3).enumerate() {
+            let [a, b, c] = [
+                indices[0] as usize,
+                indices[1] as usize,
+                indices[2] as usize,
+            ];
+            let (Some(p0), Some(p1), Some(p2)) = (
+                primitive.positions.get(a),
+                primitive.positions.get(b),
+                primitive.positions.get(c),
+            ) else {
+                bail!(
+                    "Solari emissive index buffer references a missing vertex for {}",
+                    primitive.name
+                );
+            };
+            let cross = (*p1 - *p0).cross(*p2 - *p0);
+            let area = cross.length() * 0.5;
+            if !area.is_finite() || area <= 0.0 {
+                continue;
+            }
+            let uv = (primitive.uvs[a] + primitive.uvs[b] + primitive.uvs[c]) / 3.0;
+            let color = (primitive.transport_colors[a]
+                + primitive.transport_colors[b]
+                + primitive.transport_colors[c])
+                / 3.0;
+            let sample = sample_material(material, uv, color);
+            let opacity = if material.alpha_mode == AlphaMode::Blend {
+                sample.alpha
+            } else if material.alpha_mode == AlphaMode::Mask && sample.alpha < material.alpha_cutoff
+            {
+                0.0
+            } else {
+                1.0
+            };
+            let emission = sample.emissive * opacity;
+            let potential = sample
+                .emissive
+                .max_element()
+                .max(material.emissive_factor.max_element())
+                .max(if material.emissive_texture.is_some() {
+                    1.0e-6
+                } else {
+                    0.0
+                });
+            let weight = (area * potential.max(0.0)).max(0.0);
+            if weight <= 0.0 || !weight.is_finite() || emission.max_element() <= 0.0 {
+                continue;
+            }
+            total_weight += weight;
+            candidates.push(Candidate {
+                positions: [*p0, *p1, *p2]
+                    .map(|position| [position.x, position.y, position.z, 0.0]),
+                emission: emission.to_array(),
+                area,
+                weight,
+                double_sided: material.double_sided,
+                primitive_index: u32::try_from(primitive_index)
+                    .context("Solari emissive primitive index exceeded u32")?,
+                triangle_index: u32::try_from(triangle_index)
+                    .context("Solari emissive triangle index exceeded u32")?,
+            });
+        }
+    }
+    if !total_weight.is_finite() || total_weight <= 0.0 {
+        return Ok(SolariBakeEmissiveScene::default());
+    }
+    let mut cumulative_weight = 0.0_f32;
+    let triangles = candidates
+        .into_iter()
+        .map(|candidate| {
+            cumulative_weight += candidate.weight;
+            SolariBakeEmissiveTriangle {
+                positions: candidate.positions,
+                emission_and_area: [
+                    candidate.emission[0],
+                    candidate.emission[1],
+                    candidate.emission[2],
+                    candidate.area,
+                ],
+                selection_cdf_probability_flags: [
+                    cumulative_weight,
+                    candidate.weight / total_weight,
+                    if candidate.double_sided { 1.0 } else { 0.0 },
+                    0.0,
+                ],
+                identity: [candidate.primitive_index, candidate.triangle_index, 0, 0],
+            }
+        })
+        .collect();
+    Ok(SolariBakeEmissiveScene {
+        triangles: Arc::new(triangles),
+        total_weight,
     })
 }
 
@@ -235,6 +385,7 @@ pub(crate) const SOLARI_BAKE_MAX_BOUNCES: u32 = 4;
 pub(crate) struct SolariBakeTexel {
     pub(crate) position: [f32; 3],
     pub(crate) normal: [f32; 3],
+    pub(crate) spatial_index: u32,
 }
 
 /// A backend-neutral point/spot-light record. The color is already in the
@@ -258,24 +409,26 @@ pub(crate) struct SolariBakeDirectionalLight {
     pub(crate) illuminance: f32,
 }
 
-/// Alpha data that cannot be recovered from Solari's `Material` structure.
-/// The records are ordered exactly like the session's proxy primitives; the
-/// bake scene contains no other ray-traced instances, so Solari's instance
-/// index is the stable lookup key for this side table.
+/// Alpha and sidedness data that cannot be recovered from Solari's `Material`
+/// structure. The side-table ID is carried explicitly through the proxy
+/// material's reflectance field; it must not be inferred from Solari's
+/// compacted instance index.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub(crate) struct SolariBakeAlphaRecord {
     pub(crate) data_offset_width_height_mode: [u32; 4],
     pub(crate) base_alpha_cutoff_wrap: [f32; 4],
+    pub(crate) flags: [u32; 4],
 }
 
 /// Per-proxy offsets into the flattened transport-color and index side tables.
 /// Solari's resolved hit omits the primitive's vertex attributes, so the bake
-/// shader uses the raw ray's instance/primitive/barycentric data to recover
-/// the CPU transport color at the hit.
+/// shader uses the explicit side-table ID plus primitive/barycentric data to
+/// recover CPU transport colors and the geometric normal at the hit.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub(crate) struct SolariBakeVertexRecord {
     pub(crate) color_offset: u32,
     pub(crate) index_offset: u32,
+    pub(crate) position_offset: u32,
     pub(crate) vertex_count: u32,
     pub(crate) index_count: u32,
 }
@@ -287,6 +440,7 @@ struct SolariBakeAlphaScene {
     vertex_records: Arc<Vec<SolariBakeVertexRecord>>,
     vertex_colors: Arc<Vec<[f32; 4]>>,
     vertex_indices: Arc<Vec<u32>>,
+    vertex_positions: Arc<Vec<[f32; 4]>>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -331,6 +485,9 @@ pub(crate) struct SolariBakeRequest {
     pub(crate) vertex_records: Arc<Vec<SolariBakeVertexRecord>>,
     pub(crate) vertex_colors: Arc<Vec<[f32; 4]>>,
     pub(crate) vertex_indices: Arc<Vec<u32>>,
+    pub(crate) vertex_positions: Arc<Vec<[f32; 4]>>,
+    pub(crate) emissive_triangles: Arc<Vec<SolariBakeEmissiveTriangle>>,
+    pub(crate) emissive_total_weight: f32,
     pub(crate) environment: Option<SolariBakeEnvironment>,
     pub(crate) readback: SolariBakeReadback,
 }
@@ -358,6 +515,9 @@ impl SolariBakeRequest {
                 vertex_records: Arc::new(Vec::new()),
                 vertex_colors: Arc::new(Vec::new()),
                 vertex_indices: Arc::new(Vec::new()),
+                vertex_positions: Arc::new(Vec::new()),
+                emissive_triangles: Arc::new(Vec::new()),
+                emissive_total_weight: 0.0,
                 environment: None,
                 readback: readback.clone(),
             },
@@ -426,6 +586,7 @@ pub(crate) fn bake_direct_texels_with_environment(
 pub(crate) struct SolariBakeSession {
     sub_apps: SubApps,
     alpha_scene: SolariBakeAlphaScene,
+    emissive_scene: SolariBakeEmissiveScene,
 }
 
 impl SolariBakeSession {
@@ -434,9 +595,11 @@ impl SolariBakeSession {
         materials: &[TransportMaterial],
     ) -> Result<Self> {
         let alpha_scene = build_alpha_scene(primitives, materials)?;
+        let emissive_scene = build_emissive_scene(primitives, materials)?;
         let proxy_meshes = primitives
             .iter()
-            .map(|primitive| {
+            .enumerate()
+            .map(|(side_table_id, primitive)| {
                 let material = materials.get(primitive.material).with_context(|| {
                     format!(
                         "Solari proxy material index {} is invalid for {}",
@@ -446,6 +609,8 @@ impl SolariBakeSession {
                 Ok(SolariProxy {
                     mesh: build_proxy_mesh(primitive)?,
                     material: material.clone(),
+                    side_table_id: u32::try_from(side_table_id)
+                        .context("Solari proxy side-table ID exceeded u32")?,
                 })
             })
             .collect::<Result<Vec<_>>>()?;
@@ -486,6 +651,7 @@ impl SolariBakeSession {
         Ok(Self {
             sub_apps,
             alpha_scene,
+            emissive_scene,
         })
     }
 
@@ -566,6 +732,9 @@ impl SolariBakeSession {
         request.vertex_records = self.alpha_scene.vertex_records.clone();
         request.vertex_colors = self.alpha_scene.vertex_colors.clone();
         request.vertex_indices = self.alpha_scene.vertex_indices.clone();
+        request.vertex_positions = self.alpha_scene.vertex_positions.clone();
+        request.emissive_triangles = self.emissive_scene.triangles.clone();
+        request.emissive_total_weight = self.emissive_scene.total_weight;
         request.environment = environment.map(SolariBakeEnvironment::from_map);
         request.ambient = ambient;
         request.directional = directional;
@@ -669,6 +838,7 @@ fn point_lights(lights: &[JobLight]) -> Result<Vec<SolariBakeLight>> {
 struct SolariProxy {
     mesh: Mesh,
     material: TransportMaterial,
+    side_table_id: u32,
 }
 
 #[derive(Resource)]
@@ -683,7 +853,11 @@ fn spawn_solari_proxies(
 ) {
     for proxy in proxies.0.drain(..) {
         let mesh_handle = meshes.add(proxy.mesh);
-        let material_handle = materials.add(solari_material(&proxy.material, &mut images));
+        let material_handle = materials.add(solari_material(
+            &proxy.material,
+            proxy.side_table_id,
+            &mut images,
+        ));
         commands.spawn((
             Mesh3d(mesh_handle.clone()),
             MeshMaterial3d(material_handle),
@@ -693,20 +867,28 @@ fn spawn_solari_proxies(
     }
 }
 
-fn solari_material(source: &TransportMaterial, images: &mut Assets<Image>) -> StandardMaterial {
-    let base_color =
-        bevyout_core::lighting::srgb_to_linear_rgb(source.base_color_factor.truncate().to_array());
-    let emissive = bevyout_core::lighting::srgb_to_linear_rgb(source.emissive_factor.to_array())
+fn solari_material(
+    source: &TransportMaterial,
+    side_table_id: u32,
+    images: &mut Assets<Image>,
+) -> StandardMaterial {
+    let base_color = source.base_color_factor.truncate();
+    let emissive = source
+        .emissive_factor
         .map(|channel| channel * bevyout_core::lighting::EMISSION_SCALE);
     let mut material = StandardMaterial {
         base_color: Color::linear_rgba(
-            base_color[0],
-            base_color[1],
-            base_color[2],
+            base_color.x,
+            base_color.y,
+            base_color.z,
             source.base_color_factor.w,
         ),
         emissive: LinearRgba::new(emissive[0], emissive[1], emissive[2], 1.0),
         metallic: source.metallic_factor.clamp(0.0, 1.0),
+        // Solari 0.19 preserves reflectance in ResolvedMaterial. The custom
+        // bake shader uses this otherwise-unused field as an explicit proxy
+        // identity instead of assuming Solari's compacted instance order.
+        reflectance: side_table_id as f32,
         double_sided: source.double_sided,
         cull_mode: (!source.double_sided).then_some(bevy::render::render_resource::Face::Back),
         alpha_mode: match source.alpha_mode {
@@ -772,11 +954,14 @@ struct SolariBakeGpuResources {
     vertex_record_buffer: Buffer,
     vertex_color_buffer: Buffer,
     vertex_index_buffer: Buffer,
+    vertex_position_buffer: Buffer,
     environment_buffer: Buffer,
     environment_cdf_buffer: Buffer,
+    emissive_buffer: Buffer,
     output_buffer: Buffer,
     staging_buffer: Buffer,
     bind_group: Option<BindGroup>,
+    scene_binding_ready_frames: u32,
     submitted: bool,
     readback: SolariBakeReadback,
 }
@@ -846,6 +1031,8 @@ fn init_solari_bake_pipelines(
                 binding_types::storage_buffer_read_only_sized(false, None),
                 binding_types::storage_buffer_read_only_sized(false, None),
                 binding_types::storage_buffer_read_only_sized(false, None),
+                binding_types::storage_buffer_read_only_sized(false, None),
+                binding_types::storage_buffer_read_only_sized(false, None),
             ),
         ),
     );
@@ -898,7 +1085,7 @@ fn prepare_solari_bake_buffers(
                 texel.normal[0],
                 texel.normal[1],
                 texel.normal[2],
-                0.0,
+                f32::from_bits(texel.spatial_index),
             ]
         })
         .collect::<Vec<_>>();
@@ -963,6 +1150,8 @@ fn prepare_solari_bake_buffers(
         environment_cdf_words.len() as u32,
         u32::from(environment_constant),
         request.vertex_records.len() as u32,
+        request.emissive_triangles.len() as u32,
+        request.emissive_total_weight.to_bits(),
     ];
     let params_bytes = u32_bytes(&params);
     let directional_words = [
@@ -990,6 +1179,7 @@ fn prepare_solari_bake_buffers(
             u32_bytes(&record.data_offset_width_height_mode)
                 .into_iter()
                 .chain(f32_bytes(&record.base_alpha_cutoff_wrap))
+                .chain(u32_bytes(&record.flags))
         })
         .collect::<Vec<_>>();
     let alpha_texel_bytes = f32_bytes(&request.alpha_texels);
@@ -1000,6 +1190,7 @@ fn prepare_solari_bake_buffers(
             u32_bytes(&[
                 record.color_offset,
                 record.index_offset,
+                record.position_offset,
                 record.vertex_count,
                 record.index_count,
             ])
@@ -1012,8 +1203,27 @@ fn prepare_solari_bake_buffers(
         .collect::<Vec<_>>();
     let vertex_color_bytes = f32_bytes(&vertex_color_words);
     let vertex_index_bytes = u32_bytes(&request.vertex_indices);
+    let vertex_position_words = request
+        .vertex_positions
+        .iter()
+        .flat_map(|position| position.iter().copied())
+        .collect::<Vec<_>>();
+    let vertex_position_bytes = f32_bytes(&vertex_position_words);
     let environment_bytes = f32_bytes(&environment_words);
     let environment_cdf_bytes = f32_bytes(&environment_cdf_words);
+    let emissive_words = request
+        .emissive_triangles
+        .iter()
+        .flat_map(|triangle| {
+            triangle
+                .positions
+                .iter()
+                .flat_map(|position| position.iter().copied())
+                .chain(triangle.emission_and_area)
+                .chain(triangle.selection_cdf_probability_flags)
+                .chain(triangle.identity.into_iter().map(f32::from_bits))
+        })
+        .collect::<Vec<_>>();
     let output_size = (request.texels.len() as u64).saturating_mul(16).max(16);
     let texel_bytes = nonempty_bytes(texel_bytes);
     let mut light_bytes = nonempty_bytes(light_bytes);
@@ -1028,18 +1238,24 @@ fn prepare_solari_bake_buffers(
     // Keep every storage binding valid on adapters that validate the minimum
     // array element size rather than the logical element count.
     let mut alpha_material_bytes = nonempty_bytes(alpha_material_bytes);
-    alpha_material_bytes.resize(alpha_material_bytes.len().max(32), 0);
+    alpha_material_bytes.resize(alpha_material_bytes.len().max(48), 0);
     let mut alpha_texel_bytes = nonempty_bytes(alpha_texel_bytes);
     alpha_texel_bytes.resize(alpha_texel_bytes.len().max(16), 0);
     let mut vertex_record_bytes = nonempty_bytes(vertex_record_bytes);
-    vertex_record_bytes.resize(vertex_record_bytes.len().max(16), 0);
+    vertex_record_bytes.resize(vertex_record_bytes.len().max(20), 0);
     let mut vertex_color_bytes = nonempty_bytes(vertex_color_bytes);
     vertex_color_bytes.resize(vertex_color_bytes.len().max(16), 0);
     let mut vertex_index_bytes = nonempty_bytes(vertex_index_bytes);
     vertex_index_bytes.resize(vertex_index_bytes.len().max(16), 0);
+    let mut vertex_position_bytes = nonempty_bytes(vertex_position_bytes);
+    vertex_position_bytes.resize(vertex_position_bytes.len().max(16), 0);
     let environment_bytes = nonempty_bytes(environment_bytes);
     let mut environment_cdf_bytes = nonempty_bytes(environment_cdf_bytes);
     environment_cdf_bytes.resize(environment_cdf_bytes.len().max(16), 0);
+    let mut emissive_bytes = nonempty_bytes(f32_bytes(&emissive_words));
+    // The shader declares an array of 96-byte emissive records. Keep the
+    // storage binding valid even when a scene has no emissive triangles.
+    emissive_bytes.resize(emissive_bytes.len().max(96), 0);
     let texel_buffer = render_device.create_buffer_with_data(&BufferInitDescriptor {
         label: Some("solari bake texels"),
         contents: &texel_bytes,
@@ -1090,6 +1306,11 @@ fn prepare_solari_bake_buffers(
         contents: &vertex_index_bytes,
         usage: BufferUsages::STORAGE,
     });
+    let vertex_position_buffer = render_device.create_buffer_with_data(&BufferInitDescriptor {
+        label: Some("solari bake vertex positions"),
+        contents: &vertex_position_bytes,
+        usage: BufferUsages::STORAGE,
+    });
     let environment_buffer = render_device.create_buffer_with_data(&BufferInitDescriptor {
         label: Some("solari bake environment"),
         contents: &environment_bytes,
@@ -1098,6 +1319,11 @@ fn prepare_solari_bake_buffers(
     let environment_cdf_buffer = render_device.create_buffer_with_data(&BufferInitDescriptor {
         label: Some("solari bake environment importance cdf"),
         contents: &environment_cdf_bytes,
+        usage: BufferUsages::STORAGE,
+    });
+    let emissive_buffer = render_device.create_buffer_with_data(&BufferInitDescriptor {
+        label: Some("solari bake emissive triangles"),
+        contents: &emissive_bytes,
         usage: BufferUsages::STORAGE,
     });
     let output_buffer = render_device.create_buffer(&BufferDescriptor {
@@ -1126,11 +1352,14 @@ fn prepare_solari_bake_buffers(
         vertex_record_buffer,
         vertex_color_buffer,
         vertex_index_buffer,
+        vertex_position_buffer,
         environment_buffer,
         environment_cdf_buffer,
+        emissive_buffer,
         output_buffer,
         staging_buffer,
         bind_group: None,
+        scene_binding_ready_frames: 0,
         submitted: false,
         readback: request.readback.clone(),
     });
@@ -1156,8 +1385,17 @@ fn dispatch_solari_bake(
         return;
     };
     let Some(scene_bind_group) = scene_bindings.bind_group.as_ref() else {
+        gpu.scene_binding_ready_frames = 0;
         return;
     };
+    // Bevy Solari 0.19 rebuilds this bind group after compacting only the
+    // instances whose BLAS, mesh slices, and materials are ready. Require two
+    // consecutive prepared frames before dispatch so startup cannot bake a
+    // partial scene; the session owns a static proxy set after that point.
+    gpu.scene_binding_ready_frames = gpu.scene_binding_ready_frames.saturating_add(1);
+    if gpu.scene_binding_ready_frames < 2 {
+        return;
+    }
     if gpu.bind_group.is_none() {
         let bind_group = render_device.create_bind_group(
             "solari_bake_bind_group",
@@ -1174,8 +1412,10 @@ fn dispatch_solari_bake(
                 gpu.vertex_record_buffer.as_entire_binding(),
                 gpu.vertex_color_buffer.as_entire_binding(),
                 gpu.vertex_index_buffer.as_entire_binding(),
+                gpu.vertex_position_buffer.as_entire_binding(),
                 gpu.environment_buffer.as_entire_binding(),
                 gpu.environment_cdf_buffer.as_entire_binding(),
+                gpu.emissive_buffer.as_entire_binding(),
             )),
         );
         gpu.bind_group = Some(bind_group);

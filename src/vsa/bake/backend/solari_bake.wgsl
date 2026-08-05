@@ -1,21 +1,18 @@
 enable wgpu_ray_query;
 
 const MAX_BOUNCE_COUNT: u32 = 4u;
+const MAX_ALPHA_LAYERS: u32 = 8u;
 const ENVIRONMENT_SAMPLE_COUNT: u32 = 16u;
 const SOLARI_PI: f32 = 3.141592653589793;
 
 #import bevy_solari::scene_bindings::{
     trace_ray,
     resolve_ray_hit_full,
-    light_sources,
+    ResolvedMaterial,
     RAY_T_MIN,
     RAY_T_MAX,
 }
-#import bevy_solari::sampling::{
-    sample_random_light,
-    random_emissive_light_pdf,
-    power_heuristic,
-}
+#import bevy_solari::sampling::{power_heuristic}
 
 // Group 0 is Solari's RaytracingSceneBindings. Group 1 is intentionally
 // bevyout-owned so the offline texel/light contract stays independent of the
@@ -40,13 +37,24 @@ struct BakeDirectionalLight {
 struct BakeAlphaMaterial {
     data_offset_width_height_mode: vec4<u32>,
     base_alpha_cutoff_wrap: vec4<f32>,
+    flags: vec4<u32>,
 }
 
 struct BakeVertexRecord {
     color_offset: u32,
     index_offset: u32,
+    position_offset: u32,
     vertex_count: u32,
     index_count: u32,
+}
+
+struct BakeEmissiveTriangle {
+    position0: vec4<f32>,
+    position1: vec4<f32>,
+    position2: vec4<f32>,
+    emission_and_area: vec4<f32>,
+    selection_cdf_probability_flags: vec4<f32>,
+    identity: vec4<u32>,
 }
 
 @group(1) @binding(0) var<storage, read> texels: array<BakeTexel>;
@@ -60,8 +68,10 @@ struct BakeVertexRecord {
 @group(1) @binding(8) var<storage, read> vertex_records: array<BakeVertexRecord>;
 @group(1) @binding(9) var<storage, read> vertex_colors: array<vec4<f32>>;
 @group(1) @binding(10) var<storage, read> vertex_indices: array<u32>;
-@group(1) @binding(11) var<storage, read> environment_texels: array<vec4<f32>>;
-@group(1) @binding(12) var<storage, read> environment_cdf: array<f32>;
+@group(1) @binding(11) var<storage, read> vertex_positions: array<vec4<f32>>;
+@group(1) @binding(12) var<storage, read> environment_texels: array<vec4<f32>>;
+@group(1) @binding(13) var<storage, read> environment_cdf: array<f32>;
+@group(1) @binding(14) var<storage, read> emissive_triangles: array<BakeEmissiveTriangle>;
 
 @compute @workgroup_size(64, 1, 1)
 fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
@@ -73,16 +83,11 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 
     let texel = texels[texel_index];
     let normal = normalize(texel.normal.xyz);
-    var irradiance = direct_irradiance(texel.position.xyz, normal);
     let bounce_count = min(params[3], MAX_BOUNCE_COUNT);
+    var irradiance = direct_irradiance(texel.position.xyz, normal, bounce_count > 0u);
     if bounce_count > 0u {
         let sample_count = max(params[2], 1u);
-        let seed = params[4] ^ texel_index;
-        irradiance += emissive_irradiance(
-            texel.position.xyz + normal * RAY_T_MIN,
-            normal,
-            seed,
-        );
+        let seed = params[4] ^ bitcast<u32>(texel.normal.w);
         for (var sample_index = 0u; sample_index < sample_count; sample_index += 1u) {
             var path_position = texel.position.xyz + normal * RAY_T_MIN;
             var path_normal = normal;
@@ -94,11 +99,10 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
                     sample_index,
                     sample_count,
                 );
-                let bsdf_pdf = max(dot(path_normal, direction), 0.0) / SOLARI_PI;
                 var ray_origin = path_position;
                 var remaining = RAY_T_MAX;
                 var found_hit = false;
-                for (var layer = 0u; layer < 8u; layer += 1u) {
+                for (var layer = 0u; layer < MAX_ALPHA_LAYERS; layer += 1u) {
                     if remaining <= RAY_T_MIN {
                         break;
                     }
@@ -107,45 +111,86 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
                         direction,
                         RAY_T_MIN,
                         remaining,
-                        RAY_FLAG_TERMINATE_ON_FIRST_HIT,
+                        RAY_FLAG_NONE,
                     );
                     if ray.kind == RAY_QUERY_INTERSECTION_NONE {
-                        irradiance += SOLARI_PI * path_throughput
-                            * environment_radiance(direction)
-                            / f32(sample_count);
+                        // direct_irradiance already evaluates the authored
+                        // environment at the current surface. Do not add an
+                        // escaped environment sample a second time here.
                         break;
                     }
                     let hit = resolve_ray_hit_full(ray);
+                    let side_table_id = side_table_index(hit.material);
+                    if !hit_is_surface_usable(
+                        side_table_id,
+                        ray.primitive_index,
+                        direction,
+                    ) {
+                        let advance = max(ray.t + RAY_T_MIN, RAY_T_MIN);
+                        if advance >= remaining {
+                            break;
+                        }
+                        ray_origin += direction * advance;
+                        remaining -= advance;
+                        continue;
+                    }
                     let vertex_color = vertex_color_for_hit(
-                        ray.instance_index,
+                        side_table_id,
                         ray.primitive_index,
                         ray.barycentrics,
                     );
-                    if hit_blocks_ray(ray.instance_index, hit.uv, vertex_color.w) {
-                        let hit_normal = normalize(hit.world_normal);
+                    let opacity = hit_opacity(side_table_id, hit.uv, vertex_color.w);
+                    if opacity > 0.0 {
+                        let hit_normal = hit_surface_normal(
+                            side_table_id,
+                            ray.primitive_index,
+                            direction,
+                            hit.world_normal,
+                        );
                         let hit_diffuse = hit.material.base_color
-                            * srgb_to_linear_rgb(vertex_color.xyz)
+                            * vertex_color.xyz
                             * (1.0 - clamp(hit.material.metallic, 0.0, 1.0));
-                        let hit_direct =
-                            direct_irradiance(hit.world_position, hit_normal)
-                                + emissive_irradiance(
-                                    hit.world_position + hit_normal * RAY_T_MIN,
-                                    hit_normal,
-                                    seed ^ sample_index ^ bounce_index,
-                                );
-                        irradiance +=
-                            hit_direct * path_throughput * hit_diffuse
-                                / f32(sample_count);
+                        let hit_direct = direct_irradiance(hit.world_position, hit_normal, true);
+                        let emission_weight = hit_emission_weight(
+                            side_table_id,
+                            ray.primitive_index,
+                            hit.world_position,
+                            ray_origin,
+                            direction,
+                            max(dot(path_normal, direction), 0.0) / SOLARI_PI,
+                            hit.material.emissive,
+                        );
+                        irradiance += hit_direct
+                            * path_throughput
+                            * hit_diffuse
+                            * opacity
+                            / f32(sample_count);
                         if max(
                             hit.material.emissive.x,
                             max(hit.material.emissive.y, hit.material.emissive.z),
                         ) > 0.0 {
-                            let light_pdf = random_emissive_light_pdf(hit);
                             irradiance += SOLARI_PI
                                 * path_throughput
                                 * hit.material.emissive
-                                * power_heuristic(bsdf_pdf, light_pdf)
+                                * opacity
+                                * emission_weight
                                 / f32(sample_count);
+                        }
+                        if hit_is_blended(side_table_id) {
+                            path_throughput *= 1.0 - opacity;
+                            let advance = max(ray.t + RAY_T_MIN, RAY_T_MIN);
+                            if advance >= remaining {
+                                break;
+                            }
+                            ray_origin += direction * advance;
+                            remaining -= advance;
+                            if max(
+                                path_throughput.x,
+                                max(path_throughput.y, path_throughput.z),
+                            ) <= 0.001 {
+                                break;
+                            }
+                            continue;
                         }
                         path_throughput *= hit_diffuse;
                         path_position = hit.world_position + hit_normal * RAY_T_MIN;
@@ -169,7 +214,11 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     output[texel_index] = vec4<f32>(irradiance, 1.0);
 }
 
-fn direct_irradiance(position: vec3<f32>, normal: vec3<f32>) -> vec3<f32> {
+fn direct_irradiance(
+    position: vec3<f32>,
+    normal: vec3<f32>,
+    include_emissive: bool,
+) -> vec3<f32> {
     var irradiance = ambient[0].xyz + environment_irradiance(position, normal);
     let light_count = params[1];
     for (var light_index = 0u; light_index < light_count; light_index += 1u) {
@@ -203,52 +252,153 @@ fn direct_irradiance(position: vec3<f32>, normal: vec3<f32>) -> vec3<f32> {
             angular_factor = select(1.0, pow(blend, exponent), exponent > 0.0);
         }
 
-        if !ray_visible(
+        let visibility = ray_visibility(
             position + normal * RAY_T_MIN,
             direction,
             min(distance - RAY_T_MIN, RAY_T_MAX),
-        ) {
+        );
+        if visibility <= 0.0 {
             continue;
         }
 
         let range_factor = distance_squared / max(range * range, 0.0001);
         let range_smooth = pow(max(1.0 - range_factor * range_factor, 0.0), 2.0);
         irradiance += light.color.xyz * (range_smooth / max(distance_squared, 0.0001)) * cosine
-            * angular_factor;
+            * angular_factor
+            * visibility;
     }
     let directional = directional_lights[0];
     let directional_direction = normalize(directional.direction_and_illuminance.xyz);
     let directional_cosine = max(dot(normal, directional_direction), 0.0);
     if directional_cosine > 0.0 && directional.direction_and_illuminance.w > 0.0 {
-        if ray_visible(
+        let visibility = ray_visibility(
             position + normal * RAY_T_MIN,
             directional_direction,
             RAY_T_MAX,
-        ) {
+        );
+        if visibility > 0.0 {
             irradiance += directional.color.xyz
                 * directional.direction_and_illuminance.w
-                * directional_cosine;
+                * directional_cosine
+                * visibility;
         }
+    }
+    if include_emissive && params[11] > 0u {
+        irradiance += emissive_irradiance(position, normal);
     }
     return irradiance;
 }
 
-fn emissive_irradiance(position: vec3<f32>, normal: vec3<f32>, seed: u32) -> vec3<f32> {
-    if arrayLength(&light_sources) == 0u {
+fn emissive_irradiance(position: vec3<f32>, normal: vec3<f32>) -> vec3<f32> {
+    let count = params[11];
+    let total_weight = bitcast<f32>(params[12]);
+    if count == 0u || total_weight <= 0.0 {
         return vec3<f32>(0.0, 0.0, 0.0);
     }
-    var rng = seed;
-    let sample = sample_random_light(position, normal, &rng);
-    let cosine = max(dot(normal, sample.wi), 0.0);
-    if cosine <= 0.0 || sample.inverse_pdf <= 0.0 {
+    let seed = params[4]
+        ^ bitcast<u32>(position.x)
+        ^ bitcast<u32>(position.y)
+        ^ bitcast<u32>(position.z);
+    let cdf_target = unit_float(hash_u32(seed ^ 0x63d835f1u)) * total_weight;
+    var low = 0u;
+    var high = count;
+    for (var iteration = 0u; iteration < 32u; iteration += 1u) {
+        if low >= high {
+            break;
+        }
+        let middle = low + (high - low) / 2u;
+        if emissive_triangles[middle].selection_cdf_probability_flags.x > cdf_target {
+            high = middle;
+        } else {
+            low = middle + 1u;
+        }
+    }
+    let triangle = emissive_triangles[min(low, count - 1u)];
+    let square_root = sqrt(unit_float(hash_u32(seed ^ 0x9e3779b9u)));
+    let secondary = unit_float(hash_u32(seed ^ 0xd1b54a32u));
+    let barycentric = vec3<f32>(
+        1.0 - square_root,
+        square_root * (1.0 - secondary),
+        square_root * secondary,
+    );
+    let emitter_position = triangle.position0.xyz * barycentric.x
+        + triangle.position1.xyz * barycentric.y
+        + triangle.position2.xyz * barycentric.z;
+    let emitter_normal = normalize(cross(
+        triangle.position1.xyz - triangle.position0.xyz,
+        triangle.position2.xyz - triangle.position0.xyz,
+    ));
+    let to_emitter = emitter_position - position;
+    let distance_squared = dot(to_emitter, to_emitter);
+    if distance_squared <= 1.0e-6 || dot(emitter_normal, emitter_normal) <= 1.0e-8 {
         return vec3<f32>(0.0, 0.0, 0.0);
     }
-    let light_pdf = 1.0 / sample.inverse_pdf;
-    let bsdf_pdf = cosine / SOLARI_PI;
-    return sample.radiance
-        * sample.inverse_pdf
-        * cosine
-        * power_heuristic(light_pdf, bsdf_pdf);
+    let distance = sqrt(distance_squared);
+    let direction = to_emitter / distance;
+    let receiver_cosine = max(dot(normal, direction), 0.0);
+    var emitter_cosine = max(dot(emitter_normal, -direction), 0.0);
+    if triangle.selection_cdf_probability_flags.z > 0.5 {
+        emitter_cosine = abs(dot(emitter_normal, -direction));
+    }
+    let area = triangle.emission_and_area.w;
+    let selection_probability = triangle.selection_cdf_probability_flags.y;
+    let pdf = selection_probability * distance_squared / max(area * emitter_cosine, 1.0e-20);
+    if receiver_cosine <= 0.0 || emitter_cosine <= 0.0 || pdf <= 0.0 {
+        return vec3<f32>(0.0, 0.0, 0.0);
+    }
+    let visibility = ray_visibility(
+        position + normal * RAY_T_MIN,
+        direction,
+        min(distance - RAY_T_MIN, RAY_T_MAX),
+    );
+    if visibility <= 0.0 {
+        return vec3<f32>(0.0, 0.0, 0.0);
+    }
+    let bsdf_pdf = receiver_cosine / SOLARI_PI;
+    return triangle.emission_and_area.xyz
+        * receiver_cosine
+        * visibility
+        / pdf
+        * power_heuristic(pdf, bsdf_pdf);
+}
+
+fn hit_emission_weight(
+    side_table_id: u32,
+    primitive_index: u32,
+    hit_position: vec3<f32>,
+    ray_origin: vec3<f32>,
+    ray_direction: vec3<f32>,
+    bsdf_pdf: f32,
+    emission: vec3<f32>,
+) -> f32 {
+    if max(emission.x, max(emission.y, emission.z)) <= 0.0 {
+        return 1.0;
+    }
+    let count = params[11];
+    for (var index = 0u; index < count; index += 1u) {
+        let triangle = emissive_triangles[index];
+        if triangle.identity.x != side_table_id || triangle.identity.y != primitive_index {
+            continue;
+        }
+        let emitter_normal = normalize(cross(
+            triangle.position1.xyz - triangle.position0.xyz,
+            triangle.position2.xyz - triangle.position0.xyz,
+        ));
+        var emitter_cosine = max(dot(emitter_normal, -ray_direction), 0.0);
+        if triangle.selection_cdf_probability_flags.z > 0.5 {
+            emitter_cosine = abs(dot(emitter_normal, -ray_direction));
+        }
+        let distance_squared = dot(hit_position - ray_origin, hit_position - ray_origin);
+        let area = triangle.emission_and_area.w;
+        let pdf = triangle.selection_cdf_probability_flags.y
+            * distance_squared
+            / max(area * emitter_cosine, 1.0e-20);
+        if pdf > 0.0 {
+            return power_heuristic(bsdf_pdf, pdf);
+        }
+        break;
+    }
+    return 1.0;
 }
 
 fn environment_texel(x: i32, y: i32) -> vec3<f32> {
@@ -335,10 +485,16 @@ fn sample_environment_importance(u0: f32, u1: f32) -> EnvironmentImportanceSampl
         }
     }
     let index = min(low, count - 1u);
+    var previous_cdf = 0.0;
+    if index > 0u {
+        previous_cdf = environment_cdf[index - 1u];
+    }
+    let interval = max(environment_cdf[index] - previous_cdf, 1.0e-20);
+    let cdf_residual = clamp((cdf_target - previous_cdf) / interval, 0.0, 1.0 - 1.0e-7);
     let x = index % params[5];
     let y = index / params[5];
     let u = (f32(x) + (u1 - floor(u1))) / f32(params[5]);
-    let v = (f32(y) + (u0 - floor(u0))) / f32(params[6]);
+    let v = (f32(y) + cdf_residual) / f32(params[6]);
     let theta = v * SOLARI_PI;
     let phi = (u - 0.5) * 2.0 * SOLARI_PI;
     let radius = sin(theta);
@@ -395,25 +551,25 @@ fn environment_irradiance(position: vec3<f32>, normal: vec3<f32>) -> vec3<f32> {
         );
         let cosine = max(dot(normal, direction), 0.0);
         let pdf = cosine / SOLARI_PI;
-        if pdf > 0.0 && ray_visible(position + normal * RAY_T_MIN, direction, RAY_T_MAX) {
+        let cosine_visibility = ray_visibility(position + normal * RAY_T_MIN, direction, RAY_T_MAX);
+        if pdf > 0.0 && cosine_visibility > 0.0 {
             let environment_pdf = environment_importance_pdf(direction);
             let weight = power_heuristic(pdf, environment_pdf);
-            cosine_sum += environment_radiance(direction) * (cosine * weight / pdf);
+            cosine_sum += environment_radiance(direction) * (cosine * cosine_visibility * weight / pdf);
         }
         let environment_sample = sample_environment_importance(random_u, random_v);
         let environment_cosine = max(dot(normal, environment_sample.direction), 0.0);
-        if environment_cosine > 0.0
-            && environment_sample.pdf > 0.0
-            && ray_visible(
-                position + normal * RAY_T_MIN,
-                environment_sample.direction,
-                RAY_T_MAX,
-            )
+        let environment_visibility = ray_visibility(
+            position + normal * RAY_T_MIN,
+            environment_sample.direction,
+            RAY_T_MAX,
+        );
+        if environment_cosine > 0.0 && environment_sample.pdf > 0.0 && environment_visibility > 0.0
         {
             let cosine_pdf = environment_cosine / SOLARI_PI;
             let weight = power_heuristic(environment_sample.pdf, cosine_pdf);
             environment_sum += environment_sample.radiance
-                * (environment_cosine * weight / environment_sample.pdf);
+                * (environment_cosine * environment_visibility * weight / environment_sample.pdf);
         }
     }
     return (cosine_sum + environment_sum) / f32(ENVIRONMENT_SAMPLE_COUNT);
@@ -455,92 +611,162 @@ fn sample_alpha(material: BakeAlphaMaterial, uv: vec2<f32>) -> f32 {
         alpha_texel(data, x1, y1),
         tx,
     );
-    return mix(top, bottom, ty);
+    return mix(top, bottom, ty) * material.base_alpha_cutoff_wrap.x;
 }
 
 fn alpha_texel(data: vec4<u32>, x: u32, y: u32) -> f32 {
     return alpha_texels[data.x + y * data.y + x];
 }
 
-fn hit_blocks_ray(instance_index: u32, uv: vec2<f32>, vertex_alpha: f32) -> bool {
-    if instance_index >= arrayLength(&alpha_materials) {
+fn side_table_index(material: ResolvedMaterial) -> u32 {
+    return u32(max(material.reflectance, 0.0) + 0.5);
+}
+
+fn geometric_normal_for_hit(side_table_id: u32, primitive_index: u32) -> vec3<f32> {
+    if side_table_id >= arrayLength(&vertex_records) {
+        return vec3<f32>(0.0, 0.0, 0.0);
+    }
+    let record = vertex_records[side_table_id];
+    let triangle_offset = primitive_index * 3u;
+    if triangle_offset + 2u >= record.index_count {
+        return vec3<f32>(0.0, 0.0, 0.0);
+    }
+    let index_base = record.index_offset + triangle_offset;
+    let i0 = vertex_indices[index_base];
+    let i1 = vertex_indices[index_base + 1u];
+    let i2 = vertex_indices[index_base + 2u];
+    if i0 >= record.vertex_count || i1 >= record.vertex_count || i2 >= record.vertex_count {
+        return vec3<f32>(0.0, 0.0, 0.0);
+    }
+    let p0 = vertex_positions[record.position_offset + i0].xyz;
+    let p1 = vertex_positions[record.position_offset + i1].xyz;
+    let p2 = vertex_positions[record.position_offset + i2].xyz;
+    return normalize(cross(p1 - p0, p2 - p0));
+}
+
+fn hit_is_surface_usable(
+    side_table_id: u32,
+    primitive_index: u32,
+    ray_direction: vec3<f32>,
+) -> bool {
+    let geometric_normal = geometric_normal_for_hit(side_table_id, primitive_index);
+    if dot(geometric_normal, geometric_normal) <= 1.0e-8 {
+        return true;
+    }
+    if side_table_id >= arrayLength(&alpha_materials) {
+        return true;
+    }
+    let double_sided = alpha_materials[side_table_id].flags.x != 0u;
+    return double_sided || dot(geometric_normal, ray_direction) < 0.0;
+}
+
+fn hit_surface_normal(
+    side_table_id: u32,
+    primitive_index: u32,
+    ray_direction: vec3<f32>,
+    fallback: vec3<f32>,
+) -> vec3<f32> {
+    let geometric_normal = geometric_normal_for_hit(side_table_id, primitive_index);
+    if dot(geometric_normal, geometric_normal) <= 1.0e-8 {
+        return normalize(fallback);
+    }
+    if dot(geometric_normal, -ray_direction) < 0.0 {
+        return -geometric_normal;
+    }
+    return geometric_normal;
+}
+
+fn hit_opacity(side_table_id: u32, uv: vec2<f32>, vertex_alpha: f32) -> f32 {
+    if side_table_id >= arrayLength(&alpha_materials) {
         // A missing side-table entry is conservative: Solari's native opaque
         // material remains a blocker rather than becoming accidentally
         // transparent because the auxiliary table was not populated.
-        return true;
+        return 1.0;
     }
-    let material = alpha_materials[instance_index];
+    let material = alpha_materials[side_table_id];
     let mode = material.data_offset_width_height_mode.w;
     if mode == 0u {
-        return true;
+        return 1.0;
     }
-    return clamp(sample_alpha(material, uv) * vertex_alpha, 0.0, 1.0)
-        >= material.base_alpha_cutoff_wrap.y;
+    let alpha = clamp(
+        sample_alpha(material, uv) * vertex_alpha,
+        0.0,
+        1.0,
+    );
+    if mode == 1u {
+        return select(0.0, 1.0, alpha >= material.base_alpha_cutoff_wrap.y);
+    }
+    return alpha;
 }
 
-fn ray_visible(origin: vec3<f32>, direction: vec3<f32>, max_distance: f32) -> bool {
+fn hit_is_blended(side_table_id: u32) -> bool {
+    return side_table_id < arrayLength(&alpha_materials)
+        && alpha_materials[side_table_id].data_offset_width_height_mode.w == 2u;
+}
+
+fn ray_visibility(origin: vec3<f32>, direction: vec3<f32>, max_distance: f32) -> f32 {
     if max_distance <= RAY_T_MIN {
-        return true;
+        return 1.0;
     }
     var ray_origin = origin;
     var remaining = max_distance;
-    for (var layer = 0u; layer < 8u; layer += 1u) {
+    var visibility = 1.0;
+    for (var layer = 0u; layer < MAX_ALPHA_LAYERS; layer += 1u) {
         if remaining <= RAY_T_MIN {
-            return true;
+            return visibility;
         }
         let ray = trace_ray(
             ray_origin,
             direction,
             RAY_T_MIN,
             min(remaining, RAY_T_MAX),
-            RAY_FLAG_TERMINATE_ON_FIRST_HIT,
+            RAY_FLAG_NONE,
         );
         if ray.kind == RAY_QUERY_INTERSECTION_NONE {
-            return true;
+            return visibility;
         }
         let hit = resolve_ray_hit_full(ray);
+        let side_table_id = side_table_index(hit.material);
+        if !hit_is_surface_usable(side_table_id, ray.primitive_index, direction) {
+            let advance = max(ray.t + RAY_T_MIN, RAY_T_MIN);
+            if advance >= remaining {
+                return visibility;
+            }
+            ray_origin += direction * advance;
+            remaining -= advance;
+            continue;
+        }
         let vertex_color = vertex_color_for_hit(
-            ray.instance_index,
+            side_table_id,
             ray.primitive_index,
             ray.barycentrics,
         );
-        if hit_blocks_ray(ray.instance_index, hit.uv, vertex_color.w) {
-            return false;
+        let opacity = hit_opacity(side_table_id, hit.uv, vertex_color.w);
+        if opacity > 0.0 {
+            visibility *= 1.0 - opacity;
+            if visibility <= 0.001 {
+                return 0.0;
+            }
         }
         let advance = max(ray.t + RAY_T_MIN, RAY_T_MIN);
         if advance >= remaining {
-            return true;
+            return visibility;
         }
         ray_origin += direction * advance;
         remaining -= advance;
     }
-    return false;
-}
-
-fn srgb_channel_to_linear(value: f32) -> f32 {
-    if value <= 0.04045 {
-        return value / 12.92;
-    }
-    return pow((value + 0.055) / 1.055, 2.4);
-}
-
-fn srgb_to_linear_rgb(value: vec3<f32>) -> vec3<f32> {
-    return vec3<f32>(
-        srgb_channel_to_linear(value.x),
-        srgb_channel_to_linear(value.y),
-        srgb_channel_to_linear(value.z),
-    );
+    return visibility;
 }
 
 fn vertex_color_for_hit(
-    instance_index: u32,
+    side_table_id: u32,
     primitive_index: u32,
     barycentrics: vec2<f32>,
 ) -> vec4<f32> {
-    if instance_index >= params[10] {
+    if side_table_id >= params[10] {
         return vec4<f32>(1.0, 1.0, 1.0, 1.0);
     }
-    let record = vertex_records[instance_index];
+    let record = vertex_records[side_table_id];
     let triangle_offset = primitive_index * 3u;
     if triangle_offset + 2u >= record.index_count {
         return vec4<f32>(1.0, 1.0, 1.0, 1.0);
@@ -569,8 +795,9 @@ fn cosine_hemisphere_direction(
     sample_index: u32,
     sample_count: u32,
 ) -> vec3<f32> {
-    let u = (f32(sample_index) + 0.5) / f32(max(sample_count, 1u));
-    let scramble = hash_u32(seed);
+    let radial_jitter = unit_float(hash_u32(seed ^ 0x4f1b2d39u ^ sample_index));
+    let u = (f32(sample_index) + radial_jitter) / f32(max(sample_count, 1u));
+    let scramble = hash_u32(seed ^ 0xb7e15a94u);
     let v = f32(reverseBits(sample_index ^ scramble)) * 2.3283064e-10;
     let radius = sqrt(u);
     let angle = 6.283185307179586 * v;

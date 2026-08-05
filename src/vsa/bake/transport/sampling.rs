@@ -33,7 +33,11 @@ pub(crate) fn cosine_hemisphere_direction(
     sample: u32,
     count: u32,
 ) -> bevy::math::Vec3 {
-    let u = (sample as f32 + 0.5) / count.max(1) as f32;
+    // Stratify the radial dimension but jitter it for every spatial/sample
+    // identity. This keeps multi-sample convergence while avoiding the
+    // single-sample fixed-polar ring produced by a constant 0.5 offset.
+    let radial_jitter = (hash_u32(seed ^ 0x4f1b_2d39) as f32 + 0.5) * (1.0 / 4_294_967_296.0);
+    let u = (sample as f32 + radial_jitter) / count.max(1) as f32;
     let scramble = hash_u32(seed);
     let v = radical_inverse(sample ^ scramble);
     let radius = u.sqrt();
