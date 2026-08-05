@@ -12,6 +12,19 @@ The repository already has:
 
 The better design is therefore to **extend the current Rust baker into a shared surface-lightmap and irradiance-volume renderer**, rather than building a separate GPU-first subsystem beside it. ([GitHub][1])
 
+The Solari 7 review adds an important constraint to that direction: Solari should
+replace only the proposed custom GPU ray-tracing machinery. It must not replace
+the backend-independent lightmap frontend, the CPU reference backend, or the
+offline UV-texel accumulation model.
+
+```text
+Bevyout owns: UVs, atlas/texel maps, Fallout material and light policy,
+             offline accumulation, denoising, dilation, caching, KTX2,
+             manifest bindings, and CPU fallback.
+Solari owns:  optional GPU BLAS/TLAS construction, ray queries, hit/material
+             resolution, and reusable BRDF/light-sampling infrastructure.
+```
+
 ```text
 Prepared Fallout Scene
         │
@@ -51,19 +64,50 @@ GLB TEXCOORD_1 + PreparedBake Lightmap Bindings
 Bevy Lightmap Components
 ```
 
-## Important Changes From the Original Plan
 
-| Original proposal                                   | Recommended replacement                                                          |
-| --------------------------------------------------- | -------------------------------------------------------------------------------- |
-| GPU compute path tracer as the primary baker        | Deterministic CPU reference backend first; optional GPU backend later            |
-| UV-space position and normal G-buffer               | CPU-generated compact texel map with triangle IDs and barycentrics               |
-| One generic lightmap texture attached to every mesh | Multiple atlases with stable per-primitive bindings and `uv_rect`                |
-| Bake final material-colored radiance                | Bake the diffuse illumination factor without the receiver’s albedo               |
-| Surface lightmaps replacing the current baker       | Surface lightmaps plus the existing irradiance-volume system                     |
-| Old `xatlas-rs` dependency                          | Vendored upstream xatlas with a thin maintained Rust FFI                         |
-| Basis Universal as the default HDR format           | `RGBA16F + Zstd`, with RGB9E5 as an optional compact format                      |
-| OIDN as the production requirement                  | In-tree cross-platform denoiser; OIDN only as an optional feature                |
-| Required external `toktx` process                   | Initially supported fallback, eventually replaced by a small in-tree KTX2 writer |
+## Solari 7 review and impact on the current code
+
+Solari v7, as described by the [v7 change set][12] and its [tracking issue][13],
+is now the preferred source of GPU ray-tracing infrastructure when
+the optional backend is implemented: BLAS/TLAS construction, ray queries,
+scene/material binding, hit resolution, and reusable BRDF helpers. Its unified
+real-time ReSTIR lighting path is camera- and history-dependent, so it is not
+the lightmap baker. The camera-based path-tracing plugin is also a reference
+integrator to adapt, not a plugin to run unchanged for UV-atlas baking.
+
+The code already written does **not** need a Solari-driven rewrite. M0, the CPU
+transport module, UV1 generation, final GLB emission, CPU surface pages,
+manifest bindings, and Bevy `Lightmap` attachment are backend-independent work
+and remain valid. The opt-in adapter now has a tested headless ray-query
+session, but the default build still does not enable `bevy_solari`, final
+UV1-bearing meshes are not used as Solari proxies, and the CPU BVH remains the
+reference backend.
+
+The required future seam is instead:
+
+1. Define one backend contract consumed by the same bake scene, texel map,
+   material/light interpretation, deterministic seed convention, accumulation
+   format, and atlas layout.
+2. Keep the current CPU implementation behind that contract as the correctness
+   and cross-platform fallback.
+3. Add a Solari-only bake proxy representation. The final lightmapped mesh may
+   contain `TEXCOORD_1`; the Solari proxy must preserve the same triangles and
+   transforms while using Solari's currently supported
+   `POSITION/NORMAL/UV_0/TANGENT` vertex layout and no UV1.
+4. Dispatch a custom bevyout bake node over UV texels/surfels, using Solari's
+   scene bindings for rays and hits rather than a second custom GPU BVH.
+
+That seam belongs to Milestone 6. The current CPU implementation still has
+known planned limitations, including no partial light invalidation and no
+cross-adapter GPU/CPU statistical suite. A feature-gated Solari bake adapter now exists
+as a bounded zero-to-four-bounce dispatch/readback prototype and is wired into
+the CLI, tile cache, atlas, and manifest path; it is not yet the authoritative
+bake backend.
+Surface-lightmap recursion is now configurable from zero through eight
+secondary bounces, with two as the compatibility default. Adaptive convergence,
+an initial feature-guided denoiser, resumable raw transport tiles, explicit
+emissive-area sampling with MIS, and Russian roulette are now part of the CPU
+pipeline; they remain independent of Solari.
 
 ---
 
@@ -123,14 +167,24 @@ Muzzle flashes, explosions, animated lights:
 
 # 2. Correct the Current Bake Accuracy Problems
 
-The existing baker should be refactored before surface lightmaps are added.
+The original baker was to be refactored before surface lightmaps were added;
+that shared transport seam is now partly shipped and should remain the
+authority for both outputs.
 
-At present, the six-lobe volume samples visible surface radiance, but that surface radiance contains only direct point/directional light plus emissive contribution. There is no recursive multi-bounce transport. The bake job also carries `intensity_lumens`, while the current point-light calculation derives strength from radius and a hard-coded scale. Cell ambient is present in the bake job but is not passed into the current irradiance-bake call. ([GitHub][3])
+Historically, the six-lobe volume sampled visible surface radiance containing
+only direct point/directional light plus emissive contribution. The shared
+transport fixes below are now partly shipped: the CPU surface path has
+deterministic recursive diffuse transport with a configurable surface-bake
+depth, both bake paths receive cell ambient, point lights use the shared
+explicit-intensity/fallback conversion, emissive areas use explicit next-event
+sampling with MIS, and paths use Russian roulette after bounce three.
+([GitHub][3])
 
 Address these in the shared transport layer:
 
 1. Replace the hard-coded lighting scale with a common photometric conversion used by both the baker and runtime.
-2. Pass ambient/environment data into the integrator.
+2. Pass the prepared scalar ambient into the integrator, and support an
+   optional authored environment-radiance map as an additive escape source.
 3. Support point, spot, directional, and emissive-area light sampling.
 4. Implement recursive diffuse bounces.
 5. Use deterministic sampling and adaptive convergence.
@@ -266,7 +320,29 @@ Tile alignment:          4 texels
 
 A 4096 default is a safer baseline across desktop adapters than assuming every machine should receive 8192 textures.
 
-Add per-placement or per-model overrides:
+The current CLI exposes a global default plus keyed per-placement overrides:
+
+```text
+--lightmap-texels-per-meter 16
+--lightmap-density 000151e3=32
+--lightmap-environment-map lighting/interior.hdr
+```
+
+`--lightmap-environment-map` is an optional 2:1 equirectangular HDR radiance
+map. Its pixels are sampled in linear RGB with horizontal wrapping and
+vertical clamping. Receiver irradiance combines cosine-BSDF and
+luminance/solid-angle environment sampling with deterministic MIS, and the
+map is returned as radiance when an indirect ray escapes; prepared scalar cell
+ambient remains additive and authoritative when the option is omitted.
+
+The density range is 1–128 texels per metre. Overrides are keyed by the
+prepared reference FormID; duplicate keys are rejected. The selected density
+flows through scene composition, static batching, xatlas, binding metadata,
+and the bake fingerprint, so different densities cannot accidentally share one
+composed primitive or stale accumulation cache.
+
+The longer-term policy can still grow to include explicit exclusion and fixed
+tile overrides:
 
 ```rust
 pub enum LightmapResolutionOverride {
@@ -308,7 +384,8 @@ World-space attributes can then be reconstructed from the triangle and barycentr
 * Lower memory use.
 * Easy chart-edge detection.
 * Easy incremental tile caching.
-* The same texel map can later be uploaded to an optional GPU integrator.
+* The same texel map can later be consumed by either the CPU backend or an
+  optional Solari-backed GPU integrator.
 
 ## Rasterization requirements
 
@@ -327,9 +404,12 @@ A texel partly covered by a triangle should not be treated identically to a full
 
 ---
 
-# 7. Shared Ray-Tracing and Material Layer
+# 7. Shared Transport Contracts and Backend Boundary
 
-Refactor the reusable portions of `rust_irradiance.rs` into a shared transport module.
+Refactor the reusable portions of `rust_irradiance.rs` into a shared CPU
+transport module, then keep backend selection above it. The CPU BVH is the
+reference implementation; it is not the GPU representation to upload once
+Solari is used.
 
 ```text
 src/vsa/bake/
@@ -371,6 +451,54 @@ struct BakeMaterial {
     emissive_texture: Option<TextureId>,
 }
 ```
+
+The future backend boundary should be narrow and backend-neutral:
+
+```rust
+pub enum LightmapBackendPreference {
+    Auto,
+    Solari,
+    Cpu,
+}
+
+pub trait LightmapTraceBackend {
+    fn name(&self) -> &'static str;
+    fn is_available(&self) -> bool;
+    fn prepare_scene(&mut self, scene: &BakeScene) -> anyhow::Result<()>;
+    fn accumulate_tile(
+        &mut self,
+        tile: &BakeTile,
+        settings: &IntegratorSettings,
+        accumulation: &mut TileAccumulation,
+    ) -> anyhow::Result<()>;
+}
+```
+
+Both implementations must consume the same `BakeScene`, material sampling,
+Fallout light definitions, texel map, seed convention, output convention,
+atlas layout, and accumulation-cache format. `Auto` selects Solari only when
+its adapter reports the required hardware capabilities; otherwise it selects
+the CPU backend. An explicit `Solari` request must fail with a clear capability
+error rather than silently changing quality or falling back.
+
+## Solari reuse boundary
+
+The optional GPU adapter should reuse Solari's scene plugin/bindings (the
+current 0.19 public example uses `SolariPlugins`), BLAS/TLAS construction,
+scene bind group, ray-query helpers, hit resolution, material/texture lookup,
+and selectively its BRDF and light-sampling routines. Resolve the exact API at
+the adapter spike because the v7 branch and Bevy 0.19 do not necessarily expose
+identical symbol names.
+Bevyout must retain its own Fallout light metadata, ambient policy, and
+alpha-mask policy until the optional adapter supports the remaining material
+cases, along with UV/atlas/rasterization logic,
+offline accumulation, denoising, dilation, cache, encoding, and manifest
+binding.
+
+Do not use `SolariLightingPlugin`/unified ReSTIR as the authoritative bake
+integrator. Do not run the camera-space path tracer unchanged or project
+hundreds of camera views into UV space. The custom node's primary input is a
+valid lightmap texel with world position and normals, not a camera ray.
 
 ## Intersection improvements
 
@@ -483,9 +611,9 @@ The order should be:
 ```text
 Raw sampled chart texels
         ▼
-Feature-guided denoise
-        ▼
 Coverage resolve
+        ▼
+Feature-guided denoise
         ▼
 Chart-aware dilation
         ▼
@@ -549,7 +677,14 @@ Debug:
 
 KTX supports uncompressed GPU formats and Zstd supercompression separately from Basis Universal. Basis ETC1S/UASTC should not be the default for HDR lightmaps because it targets a different compression trade-off and can introduce visible block or range artifacts. ([GitHub][8])
 
-The existing pipeline already invokes the unified Khronos `ktx` tool and emits an RGB9E5-style HDR texture. That can remain as a transitional fallback while the baker gains an in-tree KTX2 writer. ([GitHub][9])
+The surface-lightmap and irradiance-volume paths now write and validate their
+required KTX2 containers in Rust. The current outputs are uncompressed; Zstd
+is still an optional production-compression step rather than a bake-time
+dependency. ([GitHub][9])
+
+This removes the external encoder from the `bake` command. Reflection-probe
+and prepared static-shadow tooling still expose their separate legacy KTX
+paths; those are not part of this surface/volume encoder slice.
 
 ## Cross-platform encoding plan
 
@@ -559,8 +694,9 @@ Support:
 
 ```text
 Internal raw HDR buffer
-    ├── External Khronos ktx executable, when configured
-    └── Uncompressed/debug output for tests
+    ├── In-tree uncompressed RGBA16F KTX2 lightmap output
+    ├── In-tree uncompressed RGB9E5 3D KTX2 irradiance-volume output
+    └── Raw/debug output for tests
 ```
 
 ### Final architecture
@@ -579,6 +715,14 @@ Avoid embedding the whole KTX-Software build as a mandatory dependency.
 ## Mipmaps
 
 Bevy’s current lightmap shader explicitly samples mip level zero, and its source notes that conventional mipmapping commonly causes UV-island leakage. Therefore, the first implementation should write one mip level and rely on adequate padding/dilation. ([GitHub][10])
+
+Atlas dimensions do not need to be powers of two on the supported Bevy/wgpu
+path. The reduced real-cell bake produced a `3996 × 3980` single-mip atlas,
+which loaded as `VK_FORMAT_R16G16B16A16_SFLOAT` with no supercompression.
+The relevant constraints are the device's maximum 2D texture dimensions and
+the gutter/`uv_rect` contract, not power-of-two sizing. If mipmaps are added
+later, they must be generated chart-by-chart with per-mip dilation; enabling
+ordinary atlas-wide mip generation would reintroduce island leakage.
 
 A later custom shader path can support chart-aware mip generation, where every mip level is generated separately within chart boundaries.
 
@@ -632,9 +776,24 @@ Suggested model:
 pub struct PreparedBake {
     pub scene_path: String,
     pub lightmaps: Vec<PreparedLightmapAtlas>,
+    pub lightmap_variance_pages: Vec<PreparedLightmapVariancePage>,
     pub lightmap_bindings: Vec<PreparedLightmapBinding>,
     pub irradiance_volume: Option<PreparedIrradianceVolume>,
     pub bake_settings: PreparedBakeSettings,
+}
+
+pub struct PreparedLightmapVariancePage {
+    pub primitive_key: String,
+    pub asset_path: String,
+    pub width: u32,
+    pub height: u32,
+    pub format: PreparedLightmapVarianceFormat,
+    pub content_hash: String,
+    pub covered_texels: u32,
+}
+
+pub enum PreparedLightmapVarianceFormat {
+    R32FloatRaw,
 }
 
 pub struct PreparedLightmapAtlas {
@@ -724,7 +883,10 @@ affects_lightmapped_mesh_diffuse: false
 
 or do not spawn those static lights at runtime at all.
 
-The current viewer creates static point/directional lighting that affects lightmapped diffuse and enables ambient/volume participation on lightmapped meshes. Those settings must change once direct and indirect diffuse are stored in the surface texture, or static surfaces will be lit more than once. ([GitHub][11])
+The current viewer creates prepared point/spot/directional lighting, but the
+static direct diffuse path now sets `affects_lightmapped_mesh_diffuse: false`
+when lightmap pages exist and disables ambient/volume diffuse on those meshes.
+This prevents static surfaces from being lit more than once. ([GitHub][11])
 
 Reflection probes can remain active for specular. The current reflection-probe configuration already avoids applying its diffuse contribution to lightmapped meshes. ([GitHub][11])
 
@@ -737,6 +899,7 @@ src/vsa/bake/
 ├── mod.rs
 ├── settings.rs
 ├── fingerprint.rs
+├── backend.rs                 # backend-neutral selection and contracts
 │
 ├── transport/
 │   ├── mod.rs
@@ -768,6 +931,14 @@ src/vsa/bake/
     └── encode.rs
 ```
 
+Optional GPU implementation (behind `lightmap-gpu-solari`):
+
+```text
+src/vsa/bake/backend/
+├── cpu.rs
+└── solari.rs                  # Bevy render adapter, not core transport
+```
+
 Repository-specific edits:
 
 | File or area                          | Change                                                             |
@@ -777,6 +948,8 @@ Repository-specific edits:
 | `crates/bevyout-core/src/manifest.rs` | Add atlas and binding structures                                   |
 | `src/viewer/scene.rs`                 | Attach lightmaps and disable duplicate diffuse sources             |
 | `src/cli.rs`                          | Add lightmap settings and quality presets                          |
+| `src/vsa/bake/backend.rs`             | Select CPU or optional Solari backend through one contract          |
+| `src/vsa/bake/backend/solari.rs`      | Build UV1-free Solari bake proxies and texel accumulation           |
 | Static placement classification       | Require immutable geometry for surface baking                      |
 | Bake fingerprinting                   | Include UV, integrator, denoiser, atlas, and encoder revisions     |
 
@@ -807,12 +980,15 @@ Additional useful controls:
 --lightmap-no-ambient
 --lightmap-variance-threshold <value>
 --lightmap-max-pages <count>
+--lightmap-density <FORM_ID=TEXELS_PER_METER>
 --lightmap-debug-uv
 --lightmap-debug-samples
 --lightmap-debug-variance
 --lightmap-resume
---lightmap-force-repack
+--lightmap-tile-size <power-of-two>
+--lightmap-denoise-iterations <0..5>
 --lightmap-force-retrace
+--lightmap-force-repack
 ```
 
 Keep the CPU backend as the default and reference implementation:
@@ -821,11 +997,25 @@ Keep the CPU backend as the default and reference implementation:
 --bake-backend cpu
 ```
 
-An optional later backend can use:
+The optional Solari backend is explicit during its prototype phase:
 
 ```text
---bake-backend gpu
+--bake-backend solari
 ```
+
+Expose it only when the build includes:
+
+```toml
+[features]
+lightmap-gpu-solari = ["bevy/bevy_solari"]
+```
+
+The feature must remain off in the default game build. `Auto` still resolves to
+the CPU reference path; a feature-enabled explicit `Solari` request attempts
+the adapter and returns a clear capability or unsupported-input error. A build
+without the feature rejects it before baking. Bevy 0.19 already exposes the
+feature, but Solari remains experimental, so the adapter should stay narrow and
+disposable when bevyout migrates to Bevy 0.20.
 
 Both backends must consume the same:
 
@@ -872,11 +1062,32 @@ Separate fingerprints:
 This permits:
 
 * Continuing an interrupted bake.
-* Increasing sample count without discarding previous accumulation.
 * Re-encoding without retracing.
 * Re-denoising without rebaking.
 * Reusing UV layouts after lighting changes.
 * Rebaking only affected atlas pages or spatial tiles.
+
+### Shipped amendments — 2026-08-05
+
+* The CPU bake now writes sparse raw transport tiles to
+  `baked/lightmap-accumulation/` and validates each tile with a cache
+  fingerprint, dimensions, identity, and checksum. Publication is temporary
+  file plus rename, so an interrupted write is never treated as complete.
+* `--lightmap-tile-size` controls the deterministic tile edge and
+  `--lightmap-force-retrace` clears the accumulation root. Re-running the same
+  bake resumes completed tiles before denoising, atlas packing, and encoding.
+* The cache now separates the shared scene/transport identity from each
+  primitive's relevant point/spot-light set. A light edit only invalidates
+  primitive pages whose bounds intersect the changed light range; distant
+  primitive pages retain their tile payloads. Corrupt or stale tile payloads
+  remain misses, while unrelated valid tiles are preserved.
+* CI now runs a focused miniature CPU bake on every Windows, macOS, and Linux
+  test job. The synthetic triangle exercises UV1 rasterization, composed GLB
+  `TEXCOORD_1` emission, accumulation tile publication and resume hits, atlas
+  packing, the production primitive-to-atlas binding projection, RGBA16F KTX2
+  writing/reading, and finite texel validation without requiring Fallout data,
+  Blender, or an external KTX executable. The focused check is deliberately a
+  small cross-platform bake smoke test rather than a real-cell acceptance bake.
 
 ---
 
@@ -899,6 +1110,22 @@ The mandatory path should depend only on:
 * Vendored xatlas compiled by `cc`.
 * Pure-Rust image, Zstd, and KTX2 writing.
 * Bevy’s existing runtime texture loading.
+
+The optional Solari backend additionally requires hardware ray queries,
+buffer/texture binding arrays, non-uniform indexing, and partially bound
+binding arrays. Its availability is therefore capability- and driver-based,
+not merely OS-based:
+
+```text
+Supported Windows/Linux adapter       → optional Solari backend
+Supported Apple Silicon / Bevy 0.20  → optional Solari backend when available
+Unsupported adapter, CI, or headless  → CPU backend
+```
+
+The CPU path remains mandatory for all supported platforms and is the numeric
+reference for GPU comparisons. Solari's remaining alpha-mask, emissive,
+environment, and custom-material gaps must be covered by bevyout-side policies
+or remain on the CPU path until the adapter handles them explicitly.
 
 It should not require:
 
@@ -938,6 +1165,14 @@ Each CI job should:
 8. Check every valid texel is finite.
 9. Compare lighting against reference tolerances.
 10. Confirm no Blender executable is queried or invoked.
+
+The current matrix implements the miniature-bake portion with
+`cargo test --locked --lib miniature_surface_bake_produces_finite_ktx2` and
+also runs the production binding projection with
+`cargo test --locked --lib lightmap_binding_projection_preserves_primitive_identity_and_uv_rect`
+after the full locked test run. These fixtures are synthetic and CPU-only by
+design; hardware-dependent Solari parity remains an ignored local acceptance
+probe.
 
 Use exact hashes for:
 
@@ -1031,6 +1266,37 @@ Render once with the static runtime lights removed and once with the baked-only 
 
 **Result:** Existing volume baking becomes more physically consistent before lightmaps are introduced.
 
+### Shipped amendments — 2026-08-04
+
+* Added the Bevy-free `bevyout-core::lighting` contract for point-light
+  intensity conversion, sRGB-to-linear conversion, ambient irradiance, and
+  cell directional-light validation.
+* Threaded prepared ambient lighting into Rust irradiance and reflection-probe
+  tracing, with deterministic scene/sample seeds independent of Rayon order.
+* Extracted shared CPU material sampling and added white-Lambertian, escaped
+  ambient, material, and deterministic-sampling fixtures.
+* Added numeric explicit/fallback point-light parity and a colored-wall
+  Cornell-box fixture for direct-transport regression coverage.
+* Surface and volume ray origins now use bounded scale-aware offsets derived
+  from coordinate precision plus local triangle extent, with NaN-safe fallback
+  and a translated close-blocker regression test.
+* Viewer point lights now preserve prepared intensity values when the runtime
+  lighting scale changes. Bake and reflection-probe revisions were bumped for
+  the changed lighting meaning.
+
+### Shipped amendments — 2026-08-05
+
+* Added a small in-tree KTX2 writer for linear RGBA16F surface atlases and
+  RGB9E5 3D irradiance volumes. Both outputs write one explicit level and are
+  parser-validated without invoking KTX-Software; the bake revision records
+  the new container semantics.
+* Point-light visibility now measures its shadow-ray limit from the shifted
+  ray origin, with an oblique blocker regression covering the scale-aware
+  bias path.
+* The Bevy irradiance-volume shader now imports the lightmapped-diffuse flag
+  it consumes. A bounded real-cell viewer load completed without the prior
+  shader compilation error.
+
 ## Milestone 1 — UV1 and Runtime Binding
 
 * Vendor xatlas.
@@ -1039,9 +1305,19 @@ Render once with the static runtime lights removed and once with the baked-only 
 * Emit GLB `TEXCOORD_1`.
 * Add primitive binding IDs.
 * Extend `PreparedBake`.
-* Attach a diagnostic checkerboard lightmap in Bevy.
+* Attach prepared lightmap pages in Bevy through stable primitive extras.
 
 **Result:** Correct native UV and manifest pipeline on all three operating systems.
+
+### Shipped amendments — 2026-08-04
+
+* Vendored upstream xatlas behind `crates/bevyout-xatlas`, with deterministic
+  seam-vertex remapping for every composed vertex attribute.
+* Composed primitives now emit normalized UV1, generated page dimensions,
+  stable binding IDs, and GLB primitive/node extras; the prepared bake manifest
+  records page and binding metadata.
+* The viewer resolves each binding to its prepared KTX2 atlas page and attaches
+  Bevy `Lightmap` components after the GLTF scene creates mesh entities.
 
 ## Milestone 2 — Direct Surface Lighting
 
@@ -1052,50 +1328,264 @@ Render once with the static runtime lights removed and once with the baked-only 
 * Disable runtime duplicate diffuse.
 * Add chart-aware dilation.
 
-**Result:** Usable noise-free direct baked lighting and static shadows.
+### Shipped amendments — 2026-08-04
+
+* Added deterministic UV-space rasterization with barycentric position and
+  shading-normal reconstruction, conservative mask handling, and per-primitive
+  RGBA16F pages.
+* Interior texels use one center evaluation while UV-boundary texels resolve
+  deterministic 2x2 quarter-pixel coverage, keeping transport cost focused on
+  actual chart edges.
+* Surface texels store shared direct incident irradiance divided by PI, so
+  runtime material albedo remains authoritative; point and directional
+  visibility uses the existing BVH transport path.
+* xatlas chart IDs now survive UV remapping into the bake-only primitive data;
+  rasterization rejects cross-chart triangles/overlap and performs conservative
+  chart-aware dilation within the configured padding radius without bridging
+  neighboring chart fronts.
+* Deterministic shelf packing now combines the primitive pages into one or more
+  RGBA16F atlas pages with gutter texels; `PreparedLightmapBinding::uv_rect`
+  records each primitive's atlas region while UV1 remains local to that region.
+* Pages are encoded and parser-validated in Rust as linear
+  `R16G16B16A16_SFLOAT` single-mip KTX2 files; the in-tree writer is valid for
+  NPOT atlas dimensions and recorded with content hashes and one-to-one
+  bindings. The irradiance-volume RGB9E5 export uses the same in-tree KTX2
+  writer with explicit 3D level metadata.
+* Runtime global ambient, irradiance-volume diffuse, and static point/
+  directional diffuse are excluded from lightmapped meshes when pages exist;
+  dynamic/non-lightmapped meshes retain those sources.
+* Prepared `LIGH` records now retain the FO3 spot flag (`0x200`), falloff
+  exponent, and full-cone FOV (degrees in the source record, radians in the
+  prepared manifest). CPU transport applies the oriented cone and falloff;
+  the viewer creates Bevy `SpotLight` entities with the same `-Z` orientation
+  and cone limits. Static prepared/native cubemap shadows remain explicitly
+  point-only until a separate cone-shadow artifact exists.
+
+* The surface path now adds four deterministic cosine-weighted samples and two
+  secondary diffuse bounces by default. Each covered texel now uses a deterministic
+  Welford RGB estimator with configurable minimum/maximum samples and a
+  relative-variance stopping rule; the reduced development preset is 4..32
+  samples and records adaptive telemetry in the bake log.
+
+### Shipped amendments — 2026-08-05
+
+* Covered texels now pass through a deterministic feature-guided À-Trous
+  denoiser before dilation. Chart ownership and invalid texels are hard
+  barriers; position, normal, material, relative variance, coverage, and
+  luminance guide the filter. `--lightmap-denoise-iterations 0` disables it and
+  the default is one pass; the selected revision is recorded in prepared bake
+  metadata.
+* The current surface output remains one-mip uncompressed RGBA16F KTX2. The
+  raw pre-denoise accumulation cache can resume completed tiles, and
+  primitive-scoped light fingerprints preserve unaffected pages when distant
+  point/spot lights change. Optional Zstd compression remains subsequent work.
+* Surface transport depth is now controlled by `--lightmap-bounces 0..8`,
+  defaults to two, and is recorded in both the bake job and prepared bake
+  settings. The recursive transport and two-bounce emissive fixture remain
+  deterministic at the default.
+
+**Result:** Usable direct plus configurable recursive baked lighting and static
+shadows.
 
 ## Milestone 3 — Multi-Bounce GI
 
-* Add recursive diffuse transport.
-* Add emissive-triangle sampling.
-* Add environment/cell ambient.
-* Add Russian roulette.
-* Add adaptive sampling.
-* Add variance output.
+### Shipped amendments — 2026-08-04
+
+* Surface pages call the shared CPU transport with a deterministic scene seed,
+  four cosine-weighted samples, and the configured number of secondary diffuse
+  bounces (two by default).
+* Secondary hits use the same material/light policy as direct transport and
+  include emissive material contribution; escaped indirect rays do not add the
+  ambient environment a second time.
+* A two-bounce emissive-panel fixture proves indirect transfer through a
+  diffuse intermediate surface.
+
+### Shipped amendments — 2026-08-05
+
+* The CPU transport now builds a deterministic emitted-power distribution over
+  emissive triangles and performs one explicit area-light next-event sample at
+  each diffuse transport vertex. The estimator accounts for triangle area,
+  selection probability, exact solid-angle PDFs, both-sided emission, alpha
+  policy, and shadow visibility. A power-heuristic MIS weight combines this
+  sample with cosine-path emitter hits, so small emitters do not depend on a
+  cosine ray landing on them and overlapping paths are not double-counted.
+* Russian roulette starts after the third transport bounce, uses a stable path
+  variate, and divides surviving paths by their survival probability. The
+  transport/integrator revisions were bumped so old accumulation tiles cannot
+  be reused under the new estimator.
+* Every primitive now persists a pre-denoise
+  `lightmap-variance-XXXX.r32f.raw` page. Covered texels contain relative
+  variance of the adaptive mean; uncovered texels contain NaN. These pages are
+  now first-class `PreparedBake.lightmap_variance_pages` artifacts with stable
+  primitive keys, dimensions, coverage counts, and content hashes. Authored
+  environment-map sampling is now additive to the scalar cell-ambient
+  contract: escaped surface/volume rays read HDR radiance, while receivers
+  use deterministic cosine-weighted environment irradiance.
+* Authored environment maps now also build a deterministic
+  luminance/solid-angle distribution. Direct receiver irradiance combines
+  cosine-BSDF and environment samples with a power-heuristic MIS weight, and
+  both strategies use the existing alpha-aware visibility path. The
+  integrator and bake revisions were bumped so prior accumulation tiles cannot
+  be reused under the changed estimator.
 
 **Result:** Actual global illumination and color bleeding rather than only direct surface radiance.
 
 ## Milestone 4 — Production Denoising and Caching
 
-* Implement guided À-Trous denoising.
-* Add tile accumulation cache.
-* Add resume support.
-* Add partial invalidation.
-* Add debug visualizations.
-* Add per-model density overrides.
+### Shipped amendments — 2026-08-05
+
+* The first in-tree feature-guided À-Trous denoiser is shipped and runs before
+  chart-aware dilation, with deterministic iteration control and chart,
+  position, normal, material, variance, coverage, and luminance guidance.
+* Raw pre-denoise surface transport is now cached as sparse, atomically
+  published per-primitive tiles under each baked scene. The shared cache
+  identity covers prepared geometry, content-addressed GLB bytes,
+  transport/sampling settings, seed, and tile layout; each primitive adds the
+  signatures of its relevant point/spot lights. Denoiser and KTX encoding stay
+  outside the cache identity. A real-cell bake wrote 223 tiles in about 75.7
+  seconds; the identical repeat reused all 223 in about 7.7 seconds.
+* Global `--lightmap-texels-per-meter` and repeated
+  `--lightmap-density FORM_ID=TEXELS_PER_METER` controls are shipped. Density
+  participates in primitive batching, xatlas chart generation, binding metadata,
+  and cache identity; duplicate or unknown FormID overrides fail validation.
+* Primitive-scoped light fingerprints now provide partial invalidation for
+  distant point/spot-light edits; the bake revision and cache format were
+  bumped so existing whole-scene caches are rebuilt once under the new model.
+* `--lightmap-debug-uv`, `--lightmap-debug-samples`, and
+  `--lightmap-debug-variance` now write deterministic per-primitive PNGs under
+  `baked/lightmaps/debug/`. They visualize chart ownership/coverage, adaptive
+  sample counts, and normalized relative variance before denoising and dilation.
+* The raw variance pages are retained as published bake artifacts rather than
+  treated as untracked debug output; stale manifests are rejected by the bumped
+  bake and manifest revisions.
 
 **Result:** Production-quality and practical rebake iteration.
 
 ## Milestone 5 — Irradiance-Volume Unification
 
-* Move volume baking to the shared integrator.
-* Match material and light interpretation.
-* Exclude lightmapped geometry as volume receivers while retaining it as transport geometry.
-* Validate dynamic/static agreement.
+### Shipped amendments — 2026-08-04
+
+* Irradiance-volume probe rays now use the same surface transport entry point
+  as lightmap texels, including the shared material policy, scale-aware ray
+  offsets, deterministic seed convention, and fixed two-bounce diffuse path.
+* The volume retains its own probe sampling density and ambient escape behavior.
+
+### Shipped amendments — 2026-08-05
+
+* The volume output is now produced by the in-tree RGB9E5 KTX2 writer rather
+  than an external executable. Runtime loading was exercised on the real
+  `000151e3` scene after the shader import fix.
+* A single runtime lightmap policy now drives prepared-scene startup, active
+  cell refresh, day/night refresh, and prepared point/spot lights. When a bake
+  contains surface pages, ambient, irradiance-volume, and static direct-light
+  diffuse are excluded from lightmapped meshes while dynamic/non-lightmapped
+  meshes retain those sources; the CPU BVH still keeps the geometry as
+  transport geometry.
+* A focused transport fixture compares the surface-lightmap incident
+  irradiance with the irradiance-volume ray-hit path after the same sRGB
+  material conversion and Lambertian division.
+* Live acceptance completed on the real `000151e3` viewer scene: the bridge
+  reported `GlobalAmbientLight.affects_lightmapped_meshes = false`, loaded 24
+  lightmap atlas entities, and rendered dynamic `HD00MrHandyWadsworth`
+  alongside the baked interior architecture in the captured scene view. The
+  remaining limitation is visual/manual comparison rather than an unverified
+  runtime binding.
 
 **Result:** Static architecture and dynamic actors occupy the same lighting solution.
 
 ## Milestone 6 — Optional GPU Backend
 
-Only after the CPU version is correct:
+Only after the CPU version, atlas layout, cache format, and material/light
+contract are correct. The GPU backend is now Solari-backed rather than a
+custom BVH/traversal implementation:
 
-* Upload the same texel map and flattened BVH to wgpu.
-* Implement compute traversal and accumulation.
-* Keep the CPU backend as fallback and correctness reference.
-* Compare GPU output statistically against CPU fixtures.
-* Avoid hardware ray-tracing APIs.
+### Shipped amendments — 2026-08-05
 
-**Result:** Faster baking where compute support is suitable, without sacrificing Windows/macOS/Linux availability.
+* Added the backend-selection seam and `--bake-backend auto|cpu|solari` CLI
+  contract. `cpu` remains the default and `auto` currently resolves to it.
+  Feature-enabled explicit `solari` requests now enter the adapter; builds
+  without `lightmap-gpu-solari` reject them deterministically. The default
+  build still does not enable `bevy_solari`.
+* Added the opt-in `lightmap-gpu-solari` feature and compiled it against the
+  pinned Bevy 0.19 API. The prototype boundary uses
+  `SolariPlugins::required_wgpu_features()`, exposes the public
+  `RaytracingScenePlugin` BLAS/TLAS seam, and builds UV1-free proxy meshes with
+  Solari's exact `POSITION/NORMAL/UV_0/TANGENT` contract. No realtime ReSTIR
+  plugin is enabled.
+* Added a bake-only `SolariBakePlugin` and `solari_bake.wgsl` compute node.
+  It dispatches over explicit world-position/normal UV texels, consumes
+  bevyout-owned point, spot, ambient, and directional lighting records, uses Solari
+  ray queries for visibility, and schedules a `map_buffer_on_submit` readback
+  into a shared result slot. The headless session reuses the scene across
+  bounded lightmap tiles; cache hits bypass dispatch and misses write the same
+  pre-denoise tile payload consumed by the CPU path.
+* The ignored hardware acceptance test was run successfully on the current
+  compatible adapter: BLAS/TLAS creation, shader compilation, ray-query
+  dispatch, and GPU readback all completed for a direct-light triangle fixture.
+  The test remains ignored for cross-machine CI because ray-query support is
+  hardware-dependent.
+* Added a second ignored hardware fixture comparing five deterministic texels
+  on the same point-light triangle against the CPU direct-irradiance reference,
+  then repeating the comparison for the matching spotlight cone. The fixture
+  records maximum and mean RGB error under a documented `1e-3` maximum
+  tolerance; the current adapter passed. It remains a parity probe, not yet a
+  release gate for every GPU family.
+* Solari proxy materials now come from the composed scene rather than an
+  unconditional white placeholder. Opaque base-color factors and authored
+  base-color textures are projected into Bevy's Solari material table, and the
+  bake shader resolves the first hit through Solari's material bindings.
+  Explicit `--lightmap-bounces 1` now evaluates one deterministic cosine
+  diffuse bounce and applies the secondary hit's diffuse albedo while keeping
+  the receiver albedo out of the stored lightmap. An ignored hardware fixture
+  compares that path against the CPU reference on a two-surface material
+  fixture; the current adapter passed.
+* Tightened baked receiver and prepared point-shadow eligibility: a placement
+  must be both `PreparedPhysicsClassification::Static` and
+  `PreparedRuntimeMutability::Immutable`; kinematic, enable-group,
+  script-addressable, and unknown placements cannot leave baked lighting or
+  shadow silhouettes behind.
+* Added Solari alpha-mask traversal. The adapter now uploads a primitive-ordered
+  alpha side table plus bilinearly sampled base-color alpha texels, skips masked
+  ray hits below the authored cutoff for direct and one-bounce visibility, and
+  keeps the conservative opaque fallback when the side table is absent. A
+  factor-mask hardware fixture is included; blended transport remains rejected.
+* Extended the deterministic cosine path from one to four bounded secondary
+  diffuse bounces. Each path carries the resolved hit albedo into the next
+  bounce, skips alpha-masked layers at every depth, and preserves the existing
+  zero-bounce direct result. A three-plane ambient fixture compares one and two
+  bounces against the CPU linear-albedo reference on the current adapter.
+* Enabled bounded emissive-mesh transport for explicit Solari bounces. The
+  adapter reuses Solari's emissive light-source sampling and material emission
+  data, combines next-event and cosine-hit emission with power-heuristic
+  weights, and has a hardware fixture proving an authored emissive mesh reaches
+  a receiver. Translucent transport remains rejected.
+* Added authored equirectangular HDR environment transport. Environment pixels
+  are copied into a render-owned storage buffer; the shader preserves horizontal
+  wrap and vertical clamp, evaluates a deterministic cosine irradiance estimate
+  with alpha-aware visibility, and adds environment radiance when indirect paths
+  escape. A constant-map hardware oracle matches the CPU `radiance × PI`
+  contract for direct and one-bounce escape lighting.
+
+Still required for the complete optional backend:
+
+* Run the deterministic multi-texel parity fixture across representative GPU
+  families and promote it to a release gate once adapter coverage is stable.
+* Extend the bounded prototype to the remaining full lighting contract:
+  blended alpha transport, environment importance-CDF/MIS parity,
+  emissive-texture/alpha-aware parity, and full sample-count/depth parity. The
+  current GPU path supports zero through four opaque/alpha-mask diffuse bounces,
+  bounded emissive-mesh transport, and bounded authored environment escape with
+  the one-sample adapter contract; each extension must remain explicit rather
+  than silently changing the CPU reference meaning.
+* Add capability-aware `Auto` selection only after GPU/CPU parity is proven;
+  until then `Auto` stays on CPU and explicit `Solari` remains opt-in.
+* Keep the Solari adapter's material/light policy narrow and bevyout-owned; do
+  not reuse camera-space path tracing, exposure, temporal reservoirs, or the
+  real-time ReSTIR path as bake authority.
+
+**Result:** Faster baking on capable adapters while preserving deterministic,
+cross-platform CPU baking and without maintaining a custom GPU acceleration
+structure.
 
 ---
 
@@ -1116,10 +1606,19 @@ The implementation is complete when:
 * Interrupted bakes can resume by tile.
 * The final production path does not require an external KTX executable.
 * CI runs a real miniature bake on all three operating systems.
+* If the optional GPU backend is enabled, it uses Solari scene infrastructure,
+  never a second custom BVH or camera-projected lightmap path.
 
 The central architectural decision should be:
 
 > **Make the existing deterministic Rust baker the authoritative transport system. Add surface lightmaps as a second output of that system, retain irradiance volumes for dynamic objects, and treat the GPU implementation as an optional acceleration backend rather than a platform requirement.**
+
+The Solari-specific form of that decision is:
+
+> **Reuse Solari for GPU scene/ray infrastructure, but keep bevyout's UV-texel
+> offline integrator, Fallout lighting policy, postprocessing, cache, output,
+> runtime binding, and CPU fallback. Do not use Solari's real-time ReSTIR path
+> or camera-space path tracer unchanged as the lightmap baker.**
 
 [1]: https://github.com/kelo221/bevyout "https://github.com/kelo221/bevyout"
 [2]: https://raw.githubusercontent.com/bevyengine/bevy/v0.19.0/crates/bevy_pbr/src/render/pbr_functions.wgsl "https://raw.githubusercontent.com/bevyengine/bevy/v0.19.0/crates/bevy_pbr/src/render/pbr_functions.wgsl"
@@ -1132,3 +1631,5 @@ The central architectural decision should be:
 [9]: https://raw.githubusercontent.com/kelo221/bevyout/master/src/vsa/bake/mod.rs "https://raw.githubusercontent.com/kelo221/bevyout/master/src/vsa/bake/mod.rs"
 [10]: https://raw.githubusercontent.com/bevyengine/bevy/v0.19.0/crates/bevy_pbr/src/lightmap/lightmap.wgsl "https://raw.githubusercontent.com/bevyengine/bevy/v0.19.0/crates/bevy_pbr/src/lightmap/lightmap.wgsl"
 [11]: https://raw.githubusercontent.com/kelo221/bevyout/master/src/viewer/scene.rs "https://raw.githubusercontent.com/kelo221/bevyout/master/src/viewer/scene.rs"
+[12]: https://github.com/bevyengine/bevy/pull/24767 "Solari v7 by JMS55"
+[13]: https://github.com/bevyengine/bevy/issues/20203 "Solari tracking issue"

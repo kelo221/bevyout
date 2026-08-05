@@ -3,6 +3,7 @@ use super::*;
 fn open_sheet_fragment(material: usize) -> ComposedPrimitive {
     ComposedPrimitive {
         name: "paper_sheet".into(),
+        primitive_key: "fixture/paper_sheet".into(),
         reference_form_ids: vec![1],
         material,
         positions: vec![Vec3::ZERO, Vec3::X, Vec3::new(1.0, 1.0, 0.0), Vec3::Y],
@@ -11,6 +12,11 @@ fn open_sheet_fragment(material: usize) -> ComposedPrimitive {
         colors: vec![Vec4::ONE; 4],
         transport_colors: vec![Vec4::ONE; 4],
         indices: vec![0, 1, 2, 0, 2, 3],
+        uv1: Vec::new(),
+        uv1_chart_ids: Vec::new(),
+        lightmap_texels_per_meter: 16.0,
+        lightmap_dimensions: [0, 0],
+        lightmap_binding_id: None,
     }
 }
 
@@ -30,6 +36,7 @@ fn alpha_sampling_wraps_with_gltf_upper_left_origin() {
 fn local_thickness_map_marks_a_thin_closed_surface_as_transmissive() {
     let fragment = ComposedPrimitive {
         name: "thin_panel".into(),
+        primitive_key: "fixture/thin_panel".into(),
         reference_form_ids: vec![1],
         material: 0,
         positions: vec![
@@ -59,6 +66,11 @@ fn local_thickness_map_marks_a_thin_closed_surface_as_transmissive() {
         colors: vec![Vec4::ONE; 8],
         transport_colors: vec![Vec4::ONE; 8],
         indices: vec![0, 1, 2, 0, 2, 3, 4, 6, 5, 4, 7, 6],
+        uv1: Vec::new(),
+        uv1_chart_ids: Vec::new(),
+        lightmap_texels_per_meter: 16.0,
+        lightmap_dimensions: [0, 0],
+        lightmap_binding_id: None,
     };
     let image = local_thickness_map(&fragment).expect("closed surface has a thickness map");
     let maximum_transmission = image.pixels().map(|pixel| pixel[3]).max().unwrap_or(0);
@@ -102,6 +114,7 @@ fn metallic_materials_do_not_generate_local_thickness_maps() {
 fn batching_offsets_indices_and_preserves_reference_ids() {
     let fragment = |name: &str, reference| ComposedPrimitive {
         name: name.into(),
+        primitive_key: format!("fixture/{name}"),
         reference_form_ids: vec![reference],
         material: 0,
         positions: vec![Vec3::ZERO, Vec3::X, Vec3::Y],
@@ -110,11 +123,39 @@ fn batching_offsets_indices_and_preserves_reference_ids() {
         colors: vec![Vec4::ONE; 3],
         transport_colors: vec![Vec4::ONE; 3],
         indices: vec![0, 1, 2],
+        uv1: Vec::new(),
+        uv1_chart_ids: Vec::new(),
+        lightmap_texels_per_meter: 16.0,
+        lightmap_dimensions: [0, 0],
+        lightmap_binding_id: None,
     };
     let (batched, stats) = batch_fragments(vec![fragment("a", 1), fragment("b", 2)], 64.0);
     assert_eq!(stats.batches_created, 1);
     assert_eq!(batched[0].indices, vec![0, 1, 2, 3, 4, 5]);
     assert_eq!(batched[0].reference_form_ids, vec![1, 2]);
+}
+
+#[test]
+fn batching_keeps_different_lightmap_densities_in_separate_primitives() {
+    let fragment = |name: &str, density| {
+        let mut fragment = open_sheet_fragment(0);
+        fragment.name = name.into();
+        fragment.primitive_key = format!("fixture/{name}");
+        fragment.lightmap_texels_per_meter = density;
+        fragment
+    };
+    let (batched, stats) =
+        batch_fragments(vec![fragment("low", 8.0), fragment("high", 32.0)], 64.0);
+
+    assert_eq!(stats.batches_created, 0);
+    assert_eq!(batched.len(), 2);
+    assert_eq!(
+        batched
+            .iter()
+            .map(|primitive| primitive.lightmap_texels_per_meter)
+            .collect::<Vec<_>>(),
+        [32.0, 8.0]
+    );
 }
 
 #[test]
@@ -155,6 +196,7 @@ fn floor_quad(
     };
     ComposedPrimitive {
         name: name.into(),
+        primitive_key: format!("fixture/{name}"),
         reference_form_ids: vec![reference_form_id],
         material: 0,
         positions,
@@ -163,6 +205,11 @@ fn floor_quad(
         colors: vec![Vec4::new(1.0, 0.5, 0.25, 1.0); 4],
         transport_colors: vec![Vec4::ONE; 4],
         indices,
+        uv1: Vec::new(),
+        uv1_chart_ids: Vec::new(),
+        lightmap_texels_per_meter: 16.0,
+        lightmap_dimensions: [0, 0],
+        lightmap_binding_id: None,
     }
 }
 
@@ -173,6 +220,7 @@ fn triangle_fragment(
 ) -> ComposedPrimitive {
     ComposedPrimitive {
         name: name.into(),
+        primitive_key: format!("fixture/{name}"),
         reference_form_ids: vec![reference_form_id],
         material: 0,
         positions: positions.into(),
@@ -181,6 +229,11 @@ fn triangle_fragment(
         colors: vec![Vec4::ONE; 3],
         transport_colors: vec![Vec4::ONE; 3],
         indices: vec![0, 1, 2],
+        uv1: Vec::new(),
+        uv1_chart_ids: Vec::new(),
+        lightmap_texels_per_meter: 16.0,
+        lightmap_dimensions: [0, 0],
+        lightmap_binding_id: None,
     }
 }
 

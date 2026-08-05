@@ -2,7 +2,7 @@ use anyhow::{Result, bail};
 use bevy::prelude::Resource;
 use serde::{Deserialize, Serialize};
 
-pub(crate) const CURRENT_MANIFEST_SCHEMA_VERSION: u32 = 24;
+pub(crate) const CURRENT_MANIFEST_SCHEMA_VERSION: u32 = 27;
 /// Gates *manifest schema/meaning* compatibility for a cached `scene.ron`
 /// (checked by `compatibility::ensure_prepared_manifest_compatible` against
 /// `manifest.prepare_revision`, independent of
@@ -34,11 +34,11 @@ pub(crate) const CURRENT_MANIFEST_SCHEMA_VERSION: u32 = 24;
 /// marker retention now change prepared placement meaning.
 /// Bumped for Lane C issue #290: authored IDLE definitions and their
 /// animation-catalog meaning are now part of prepared content.
-pub(crate) const CURRENT_PREPARE_REVISION: &str = "prepare-v25-m4-static-facegen-reconstruction";
-pub(crate) const CURRENT_BAKE_REVISION: &str = "rust-cpu-irradiance-v16-material-extensions-local-thickness-emissive-quarter-cap-shader-emission-gate-v2-physical-effect-bulb-v1-effect-emission-control-v1-light-card-promotion-v1-env-light-emission-v1-17f5769";
+pub(crate) const CURRENT_PREPARE_REVISION: &str =
+    "prepare-v26-m4-static-facegen-reconstruction-spot-light-metadata-v2";
+pub(crate) const CURRENT_BAKE_REVISION: &str = "rust-cpu-irradiance-v16-material-extensions-local-thickness-emissive-quarter-cap-shader-emission-gate-v2-physical-effect-bulb-v1-effect-emission-control-v1-light-card-promotion-v1-env-light-emission-v1-17f5769-lighting-contract-v1-uv1-vendored-xatlas-v1-direct-surface-lightmaps-v7-edge-supersample-two-bounce-shared-volume-geometry-aware-ray-bias-invalid-normal-v1-in-tree-rgba16f-rgb9e5-ktx2-v1-adaptive-sampling-v1-feature-guided-atrous-denoise-v1-spot-cone-v1-configurable-bounces-v1-density-overrides-v1-partial-primitive-light-invalidation-v1-debug-images-v1-area-emissive-mis-rr-variance-v1-variance-manifest-v1-environment-map-hdr-v1-environment-mis-v1";
 pub(crate) const STATIC_POINT_SHADOW_REVISION: &str = "bvh-d32-v8-light-cards-v1";
-pub(crate) const REFLECTION_PROBE_REVISION: &str =
-    "nav-room-farthest-v2-rgb9e5-64-eye-1p65-spacing-12-cap-16-specular-only";
+pub(crate) const REFLECTION_PROBE_REVISION: &str = "nav-room-farthest-v2-rgb9e5-64-eye-1p65-spacing-12-cap-16-specular-only-lighting-contract-v1-spot-cone-v1";
 
 pub(crate) use bevyout_core::manifest::*;
 

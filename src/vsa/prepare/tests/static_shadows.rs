@@ -63,6 +63,8 @@ fn light(reference_form_id: u32) -> PreparedLight {
         intensity_lumens: 1_000.0,
         kind: "point".into(),
         flags: 0,
+        spot_fov_radians: 0.0,
+        spot_falloff_exponent: 0.0,
         initially_enabled: true,
     }
 }
@@ -154,6 +156,11 @@ fn caster_filter_excludes_dynamic_physics_and_actor_objects() {
                 placement(&format!("candidate-{semantic_index}-{physics_index}.glb"));
             candidate.reference_form_id =
                 (semantic_index * physics_classes.len() + physics_index + 1) as u32;
+            candidate.mutability = match &semantic {
+                PreparedSemantic::Static => PreparedRuntimeMutability::Immutable,
+                PreparedSemantic::Unsupported => PreparedRuntimeMutability::Unknown,
+                _ => PreparedRuntimeMutability::ScriptAddressable,
+            };
             candidate.semantic = semantic.clone();
             candidate.physics_classification = physics_classification;
             placements.push(candidate);
@@ -161,9 +168,9 @@ fn caster_filter_excludes_dynamic_physics_and_actor_objects() {
     }
 
     let casters = sorted_shadow_casters(&placements);
-    // Static and kinematic placements remain eligible except pickups and
-    // actors; all dynamic placements are excluded as well.
-    assert_eq!(casters.len(), 10);
+    // Only physically static, runtime-immutable placements remain eligible;
+    // all movable, mutable, pickup, and actor placements are excluded.
+    assert_eq!(casters.len(), 1);
     assert!(
         casters
             .iter()
@@ -175,14 +182,9 @@ fn caster_filter_excludes_dynamic_physics_and_actor_objects() {
             PreparedSemantic::Npc(_) | PreparedSemantic::Creature(_)
         )
     }));
-    assert!(
-        casters
-            .iter()
-            .any(|placement| placement.physics_classification
-                == PreparedPhysicsClassification::Kinematic)
-    );
     assert!(casters.iter().all(|placement| {
-        placement.physics_classification != PreparedPhysicsClassification::Dynamic
+        placement.physics_classification == PreparedPhysicsClassification::Static
+            && placement.mutability == PreparedRuntimeMutability::Immutable
     }));
 }
 
@@ -276,14 +278,7 @@ fn caster_filter_excludes_rclightbox01_across_representative_classes() {
     placements.push(ordinary_activator);
 
     let casters = sorted_shadow_casters(&placements);
-    assert_eq!(casters.len(), 1);
-    assert_eq!(casters[0].reference_form_id, 100);
-    assert_eq!(casters[0].base_form_id, 10);
-    assert_eq!(casters[0].semantic, PreparedSemantic::Activator);
-    assert_eq!(
-        casters[0].physics_classification,
-        PreparedPhysicsClassification::Kinematic
-    );
+    assert!(casters.is_empty());
 }
 
 #[test]
@@ -302,6 +297,17 @@ fn light_layers_are_deterministic_and_include_disabled_lights() {
 
     let duplicates = [light(10), light(10)];
     assert!(sorted_shadow_lights(&duplicates).is_err());
+}
+
+#[test]
+fn static_point_shadow_policy_excludes_spot_lights_even_with_point_kind() {
+    let mut flagged = light(40);
+    flagged.flags = 0x200;
+    let mut typed = light(41);
+    typed.kind = "spot".into();
+    typed.spot_fov_radians = std::f32::consts::FRAC_PI_2;
+
+    assert!(sorted_shadow_lights(&[flagged, typed]).unwrap().is_empty());
 }
 
 #[test]

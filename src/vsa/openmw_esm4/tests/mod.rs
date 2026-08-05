@@ -11,6 +11,39 @@ fn parse_plugin(bytes: &[u8], target_cell: u32) -> Result<ParsedPlugin> {
 }
 
 #[test]
+fn light_data_decodes_spot_flags_falloff_and_fov() {
+    let mut data = vec![0_u8; 32];
+    data[4..8].copy_from_slice(&1234_u32.to_le_bytes());
+    data[8..12].copy_from_slice(&[10, 20, 30, 255]);
+    data[12..16].copy_from_slice(&0x600_u32.to_le_bytes());
+    data[16..20].copy_from_slice(&2.5_f32.to_le_bytes());
+    data[20..24].copy_from_slice(&75.0_f32.to_le_bytes());
+
+    let light = parse_light_data(&[direct_subrecord("DATA", data)]).expect("valid LIGH DATA");
+    assert_eq!(light.radius, 1234.0);
+    assert_eq!(
+        light.color_rgba,
+        [10.0 / 255.0, 20.0 / 255.0, 30.0 / 255.0, 1.0]
+    );
+    assert_eq!(light.flags, 0x600);
+    assert_eq!(light.falloff_exponent, 2.5);
+    assert_eq!(light.fov, 75.0);
+}
+
+#[test]
+fn light_data_keeps_legacy_twelve_byte_point_layout_compatible() {
+    let mut data = vec![0_u8; 12];
+    data[4..8].copy_from_slice(&42_u32.to_le_bytes());
+    data[8..12].copy_from_slice(&[255, 128, 0, 255]);
+
+    let light = parse_light_data(&[direct_subrecord("DATA", data)]).expect("legacy LIGH DATA");
+    assert_eq!(light.radius, 42.0);
+    assert_eq!(light.flags, 0);
+    assert_eq!(light.falloff_exponent, 0.0);
+    assert_eq!(light.fov, 0.0);
+}
+
+#[test]
 fn land_preserves_height_normal_color_and_texture_assignment_shape() {
     let mut heights = vec![0_u8; 33 * 33];
     heights[0] = 8;

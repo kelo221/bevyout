@@ -1,5 +1,99 @@
 use super::*;
 use bevy::ecs::world::CommandQueue;
+use bevy::math::{Rect, Vec2};
+use bevyout_core::manifest::{PreparedBake, PreparedLightmapAtlas, PreparedLightmapFormat};
+
+#[test]
+fn lightmap_runtime_policy_keeps_dynamic_diffuse_and_excludes_baked_static_diffuse() {
+    assert!(runtime_lightmapped_diffuse_enabled(None));
+
+    let empty_bake = PreparedBake {
+        bake_revision: None,
+        source_fingerprint: "fixture".into(),
+        scene_path: "scene.glb".into(),
+        lightmaps: Vec::new(),
+        lightmap_variance_pages: Vec::new(),
+        lightmap_bindings: Vec::new(),
+        bake_settings: Default::default(),
+        irradiance_volume: None,
+    };
+    assert!(runtime_lightmapped_diffuse_enabled(Some(&empty_bake)));
+
+    let surface_bake = PreparedBake {
+        lightmaps: vec![PreparedLightmapAtlas {
+            asset_path: "baked/lightmap.ktx2".into(),
+            width: 3996,
+            height: 3980,
+            format: PreparedLightmapFormat::Rgba16Float,
+            content_hash: "fixture".into(),
+        }],
+        ..empty_bake
+    };
+    assert!(!runtime_lightmapped_diffuse_enabled(Some(&surface_bake)));
+}
+
+#[test]
+fn prepared_lightmaps_attach_only_under_baked_static_root() {
+    let mut app = App::new();
+    app.insert_resource(PreparedLightmap {
+        bindings: std::collections::HashMap::from([(
+            7,
+            PreparedLightmapBinding {
+                image: Handle::default(),
+                uv_rect: Rect::from_corners(Vec2::ZERO, Vec2::ONE),
+            },
+        )]),
+    });
+    app.add_systems(Update, attach_prepared_lightmaps);
+
+    let static_root = app.world_mut().spawn(BakedStaticSceneRoot).id();
+    let dynamic_root = app.world_mut().spawn_empty().id();
+    let static_mesh = app
+        .world_mut()
+        .spawn((
+            Mesh3d::default(),
+            MeshMaterial3d::<StandardMaterial>::default(),
+            GltfExtras {
+                value: r#"{"bevyout":{"lightmap_binding":7}}"#.into(),
+            },
+            ChildOf(static_root),
+        ))
+        .id();
+    let dynamic_mesh = app
+        .world_mut()
+        .spawn((
+            Mesh3d::default(),
+            MeshMaterial3d::<StandardMaterial>::default(),
+            GltfExtras {
+                value: r#"{"bevyout":{"lightmap_binding":7}}"#.into(),
+            },
+            ChildOf(dynamic_root),
+        ))
+        .id();
+
+    app.update();
+
+    assert!(app.world().entity(static_mesh).contains::<Lightmap>());
+    assert!(
+        app.world()
+            .entity(static_mesh)
+            .contains::<PreparedLightmapAttached>()
+    );
+    assert!(!app.world().entity(dynamic_mesh).contains::<Lightmap>());
+    assert!(
+        !app.world()
+            .entity(dynamic_mesh)
+            .contains::<PreparedLightmapAttached>()
+    );
+}
+
+#[test]
+fn prepared_lightmap_binding_reads_primitive_extras() {
+    let extras = GltfExtras {
+        value: r#"{"bevyout":{"primitive_key":"fixture/quad","lightmap_binding":42}}"#.into(),
+    };
+    assert_eq!(diagnostic_lightmap_binding_id(&extras), Some(42));
+}
 
 /// A minimal placement matching `world::persist::tests::placement`'s
 /// shape (same crate, different module -- kept local since that one is

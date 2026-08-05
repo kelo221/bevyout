@@ -311,7 +311,80 @@ pub struct PreparedBake {
     pub source_fingerprint: String,
     pub scene_path: String,
     #[serde(default)]
+    pub lightmaps: Vec<PreparedLightmapAtlas>,
+    #[serde(default)]
+    pub lightmap_variance_pages: Vec<PreparedLightmapVariancePage>,
+    #[serde(default)]
+    pub lightmap_bindings: Vec<PreparedLightmapBinding>,
+    #[serde(default)]
+    pub bake_settings: PreparedBakeSettings,
+    #[serde(default)]
     pub irradiance_volume: Option<PreparedIrradianceVolume>,
+}
+
+/// Pre-denoise per-primitive relative-variance output produced alongside the
+/// surface lightmap pages. These pages are an inspection/quality artifact, not
+/// a runtime diffuse input.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct PreparedLightmapVariancePage {
+    pub primitive_key: String,
+    pub asset_path: String,
+    pub width: u32,
+    pub height: u32,
+    pub format: PreparedLightmapVarianceFormat,
+    pub content_hash: String,
+    pub covered_texels: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum PreparedLightmapVarianceFormat {
+    R32FloatRaw,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PreparedLightmapAtlas {
+    pub asset_path: String,
+    pub width: u32,
+    pub height: u32,
+    pub format: PreparedLightmapFormat,
+    pub content_hash: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PreparedLightmapBinding {
+    pub binding_id: u32,
+    pub primitive_key: String,
+    pub atlas_index: u16,
+    pub uv_rect: [f32; 4],
+    pub texels_per_meter: f32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum PreparedLightmapFormat {
+    Rgba16Float,
+    Rgb9e5,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct PreparedBakeSettings {
+    #[serde(default)]
+    pub integrator_revision: String,
+    #[serde(default)]
+    pub xatlas_revision: String,
+    #[serde(default)]
+    pub uv_layout_fingerprint: String,
+    #[serde(default)]
+    pub material_fingerprint: String,
+    #[serde(default)]
+    pub light_fingerprint: String,
+    #[serde(default)]
+    pub sample_count: u32,
+    #[serde(default)]
+    pub bounce_count: u32,
+    #[serde(default)]
+    pub denoiser_revision: String,
+    #[serde(default)]
+    pub encoder_revision: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -861,6 +934,12 @@ pub struct PreparedLight {
     pub kind: String,
     #[serde(default)]
     pub flags: u32,
+    /// Spotlight full cone angle in radians. Zero for point lights.
+    #[serde(default)]
+    pub spot_fov_radians: f32,
+    /// Spotlight angular falloff exponent from the source LIGH DATA.
+    #[serde(default)]
+    pub spot_falloff_exponent: f32,
     #[serde(default = "default_true")]
     pub initially_enabled: bool,
 }

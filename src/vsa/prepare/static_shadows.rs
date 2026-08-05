@@ -19,8 +19,9 @@ use sha2::{Digest, Sha256};
 
 use super::super::manifest::is_pickup_record_kind;
 use super::{
-    Diagnostic, PreparedLight, PreparedPhysicsClassification, PreparedPlacement, PreparedSemantic,
-    PreparedStaticPointShadowLight, PreparedStaticPointShadows, STATIC_POINT_SHADOW_REVISION,
+    Diagnostic, PreparedLight, PreparedPhysicsClassification, PreparedPlacement,
+    PreparedRuntimeMutability, PreparedSemantic, PreparedStaticPointShadowLight,
+    PreparedStaticPointShadows, STATIC_POINT_SHADOW_REVISION,
 };
 use crate::vsa::bake::{
     find_unified_ktx_tool, ktx_supports_input_file_lists, relative_asset_path, tail,
@@ -199,7 +200,8 @@ fn is_static_shadow_caster(placement: &PreparedPlacement) -> bool {
         // Movable bodies must not leave a baked silhouette behind when they
         // are pushed. Their current pose is handled by the runtime shadow
         // pass instead.
-        && placement.physics_classification != PreparedPhysicsClassification::Dynamic
+        && placement.physics_classification == PreparedPhysicsClassification::Static
+        && placement.mutability == PreparedRuntimeMutability::Immutable
         && !matches!(
             placement.semantic,
             PreparedSemantic::Door(_)
@@ -218,6 +220,7 @@ fn sorted_shadow_lights(lights: &[PreparedLight]) -> Result<Vec<&PreparedLight>>
             light.radius.is_finite()
                 && light.radius > STATIC_POINT_SHADOW_NEAR_Z
                 && (light.kind.is_empty() || light.kind.eq_ignore_ascii_case("point"))
+                && light.flags & 0x200 == 0
         })
         .collect::<Vec<_>>();
     lights.sort_by_key(|light| (light.reference_form_id, light.base_form_id));

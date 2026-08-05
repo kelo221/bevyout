@@ -33,6 +33,9 @@ use crate::cli::{ActorAnimationConverter, BakeArgs, PrepareArgs, RenderArgs, Vie
 #[cfg(test)]
 use crate::vsa::PREPARED_CONVERTER_REVISION;
 use bevyout_core::actor_animation::{PreparedActorAnimationKind, PreparedActorAnimationSet};
+pub(crate) use bevyout_core::lighting::{
+    CELL_DIRECTIONAL_ILLUMINANCE, DEFAULT_LIGHTING_SCALE, point_light_intensity,
+};
 
 use crate::vsa::{
     ACTOR_ANIMATION_CATALOG_REVISION, CellInfo, FO3_SCALE, ITEM_CATALOG_REVISION, ImageSpaceInfo,
@@ -102,8 +105,6 @@ pub(crate) use lighting::*;
 pub use ragdoll_lab::ragdoll_lab;
 pub(crate) use scene::*;
 
-const DEFAULT_LIGHTING_SCALE: f32 = 128.0;
-const CELL_DIRECTIONAL_ILLUMINANCE: f32 = 10_000.0;
 const DEFAULT_FOG_STRENGTH: f32 = 0.01;
 const RENDER_REPORT_HISTORY: usize = 600;
 /// Runtime point-shadow cubemap face size. Prepared/baked shadow artifacts
@@ -738,8 +739,22 @@ fn bake_for_render(args: &RenderArgs, cache_dir: &Path) -> Result<()> {
         all_interiors: false,
         retry_failed: false,
         cache_dir: Some(cache_dir.to_path_buf()),
+        lightmap_backend: crate::cli::LightmapBackendPreference::Cpu,
+        lightmap_environment_map: None,
         irradiance_spacing_meters: 8.0,
         irradiance_samples: 64,
+        lightmap_min_samples: 4,
+        lightmap_max_samples: 32,
+        lightmap_variance_threshold: 0.01,
+        lightmap_bounces: 2,
+        lightmap_texels_per_meter: 16.0,
+        lightmap_density_overrides: Vec::new(),
+        lightmap_debug_uv: false,
+        lightmap_debug_samples: false,
+        lightmap_debug_variance: false,
+        lightmap_denoise_iterations: 1,
+        lightmap_tile_size: 128,
+        lightmap_force_retrace: false,
         static_batch_chunk_meters: 64.0,
         toktx: args.toktx.clone(),
         force: false,

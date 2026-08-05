@@ -1,5 +1,57 @@
 use super::super::manifest::PreparedRuntimeMutability;
+use super::lightmap::{LightmapAtlas, LightmapPage};
+use super::rust_scene::synthetic_lightmap_scene_for_test;
 use super::*;
+
+#[test]
+fn lightmap_binding_projection_preserves_primitive_identity_and_uv_rect() {
+    let scene = synthetic_lightmap_scene_for_test();
+    let pages = vec![LightmapPage {
+        primitive_index: 0,
+        width: 8,
+        height: 6,
+        raw_path: "synthetic.raw".into(),
+        covered_texels: 12,
+        dilated_texels: 9,
+        atlas_index: 0,
+        atlas_offset: [2, 3],
+    }];
+    let atlases = vec![LightmapAtlas {
+        width: 16,
+        height: 20,
+        raw_path: "synthetic.ktx2".into(),
+        content_hash: "hash".into(),
+    }];
+
+    let bindings = build_lightmap_bindings(&scene, &pages, &atlases).unwrap();
+
+    assert_eq!(bindings.len(), 1);
+    assert_eq!(bindings[0].binding_id, 1);
+    assert_eq!(bindings[0].primitive_key, "fixture/synthetic_triangle");
+    assert_eq!(bindings[0].atlas_index, 0);
+    assert_eq!(bindings[0].uv_rect, [0.125, 0.15, 0.625, 0.45]);
+    assert_eq!(bindings[0].texels_per_meter, 4.0);
+}
+
+#[test]
+fn duplicate_lightmap_density_overrides_are_rejected() {
+    let overrides = vec![
+        crate::cli::LightmapDensityOverrideArg {
+            reference_form_id: 0x151e3,
+            texels_per_meter: 16.0,
+        },
+        crate::cli::LightmapDensityOverrideArg {
+            reference_form_id: 0x151e3,
+            texels_per_meter: 32.0,
+        },
+    ];
+    let error = validate_lightmap_density_overrides(&overrides).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("duplicate lightmap density override")
+    );
+}
 
 #[test]
 fn bake_job_emits_resolved_cell_directional_light() {
@@ -14,6 +66,15 @@ fn bake_job_emits_resolved_cell_directional_light() {
         0.0
     );
 }
+
+#[path = "transport.rs"]
+mod transport;
+
+#[path = "denoise.rs"]
+mod denoise;
+
+#[path = "ktx2.rs"]
+mod ktx2;
 
 #[test]
 fn only_static_semantics_are_batchable() {
@@ -57,6 +118,22 @@ fn only_static_semantics_are_batchable() {
     dynamic_placement.physics_classification = PreparedPhysicsClassification::Dynamic;
     assert!(!is_bake_static(&dynamic_placement));
     assert!(!is_batchable_static(&dynamic_placement));
+
+    for mutability in [
+        PreparedRuntimeMutability::EnableGroup,
+        PreparedRuntimeMutability::ScriptAddressable,
+        PreparedRuntimeMutability::Unknown,
+    ] {
+        let mut mutable_placement = placement(PreparedSemantic::Static);
+        mutable_placement.mutability = mutability;
+        assert!(!is_bake_static(&mutable_placement));
+        assert!(!is_batchable_static(&mutable_placement));
+    }
+
+    let mut kinematic_placement = placement(PreparedSemantic::Static);
+    kinematic_placement.physics_classification = PreparedPhysicsClassification::Kinematic;
+    assert!(!is_bake_static(&kinematic_placement));
+    assert!(!is_batchable_static(&kinematic_placement));
 }
 
 #[test]
@@ -276,34 +353,5 @@ fn find_ktx_tool_errors_on_a_nonexistent_explicit_path() {
         std::process::id()
     ));
     let error = find_ktx_tool(Some(missing)).unwrap_err();
-    assert!(error.to_string().contains("does not exist"));
-}
-
-#[test]
-fn find_irradiance_ktx_tool_rejects_legacy_toktx_before_checking_existence() {
-    // A path named "toktx" is rejected for being the wrong tool even
-    // though the path itself does not exist; this must not depend on
-    // any real KTX-Software install.
-    let missing = std::env::temp_dir().join(format!(
-        "bevyout-missing-toktx-{}-does-not-exist",
-        std::process::id()
-    ));
-    let error = find_irradiance_ktx_tool(Some(missing)).unwrap_err();
-    assert!(
-        error
-            .to_string()
-            .contains("requires the unified KTX executable")
-    );
-}
-
-#[test]
-fn find_irradiance_ktx_tool_errors_when_unified_path_is_missing() {
-    // The file stem must be exactly "ktx" for `ktx_tool_kind` to classify
-    // it as the unified tool; nest it under a directory that does not
-    // exist so the path itself is guaranteed missing.
-    let named_ktx = std::env::temp_dir()
-        .join(format!("bevyout-missing-ktx-dir-{}", std::process::id()))
-        .join("ktx.exe");
-    let error = find_irradiance_ktx_tool(Some(named_ktx)).unwrap_err();
     assert!(error.to_string().contains("does not exist"));
 }

@@ -82,12 +82,44 @@ fn prepared_artifact_versions_require_exact_pipeline_identity() {
         bake_revision: Some("bake-old".into()),
         source_fingerprint: "fingerprint".into(),
         scene_path: "scenes/00000001/baked/scene.glb".into(),
+        lightmaps: Vec::new(),
+        lightmap_variance_pages: Vec::new(),
+        lightmap_bindings: Vec::new(),
+        bake_settings: Default::default(),
         irradiance_volume: None,
     });
     let error = ensure_baked_scene_compatible(&stale_bake)
         .unwrap_err()
         .to_string();
     assert!(error.contains("bake revision"));
+}
+
+#[test]
+fn prepared_bake_variance_pages_round_trip_as_published_artifacts() {
+    let page = PreparedLightmapVariancePage {
+        primitive_key: "cell:000151e3/primitive:0".into(),
+        asset_path: "scenes/000151e3/baked/lightmaps/lightmap-variance-0000.r32f.raw".into(),
+        width: 8,
+        height: 4,
+        format: PreparedLightmapVarianceFormat::R32FloatRaw,
+        content_hash: "variance-hash".into(),
+        covered_texels: 17,
+    };
+    let bake = PreparedBake {
+        bake_revision: Some("bake-variance-v1".into()),
+        source_fingerprint: "fingerprint".into(),
+        scene_path: "scenes/000151e3/baked/scene.glb".into(),
+        lightmaps: Vec::new(),
+        lightmap_variance_pages: vec![page.clone()],
+        lightmap_bindings: Vec::new(),
+        bake_settings: Default::default(),
+        irradiance_volume: None,
+    };
+    let decoded: PreparedBake = ron::de::from_str(
+        &ron::ser::to_string_pretty(&bake, ron::ser::PrettyConfig::default()).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(decoded.lightmap_variance_pages, vec![page]);
 }
 
 #[test]

@@ -1,15 +1,16 @@
 use super::*;
-
-const CELL_DIRECTIONAL_ILLUMINANCE: f32 = 10_000.0;
+use bevyout_core::lighting::{
+    AUTHORED_LIGHTING_SCALE, cell_directional_illuminance as resolve_cell_directional_illuminance,
+    point_light_intensity,
+};
+use std::collections::BTreeMap;
 
 pub(crate) fn cell_directional_illuminance(lighting: &PreparedCellLighting) -> f32 {
-    let luminance =
-        lighting.directional_rgba[0] + lighting.directional_rgba[1] + lighting.directional_rgba[2];
-    if !luminance.is_finite() || luminance <= f32::EPSILON {
-        0.0
-    } else {
-        CELL_DIRECTIONAL_ILLUMINANCE
-    }
+    resolve_cell_directional_illuminance(lighting.directional_rgba)
+}
+
+pub(crate) fn authored_point_light_intensity(radius: f32, intensity_lumens: f32) -> f32 {
+    point_light_intensity(radius, intensity_lumens, AUTHORED_LIGHTING_SCALE)
 }
 
 #[derive(Debug, Serialize)]
@@ -18,9 +19,19 @@ pub(crate) struct BakeJob {
     pub(crate) output_scene: String,
     pub(crate) irradiance_spacing_meters: f32,
     pub(crate) irradiance_samples: u32,
+    pub(crate) lightmap_min_samples: u32,
+    pub(crate) lightmap_max_samples: u32,
+    pub(crate) lightmap_variance_threshold: f32,
+    pub(crate) lightmap_bounces: u32,
+    pub(crate) lightmap_texels_per_meter: f32,
+    pub(crate) lightmap_density_overrides: BTreeMap<u32, f32>,
+    pub(crate) lightmap_denoise_iterations: u32,
+    pub(crate) lightmap_tile_size: u32,
+    pub(crate) lightmap_backend: String,
     pub(crate) static_batch_chunk_meters: f32,
     pub(crate) emission_scale: f32,
     pub(crate) ambient_rgba: [f32; 4],
+    pub(crate) lightmap_environment_map: Option<String>,
     pub(crate) cell_directional_rgba: [f32; 4],
     pub(crate) cell_directional_rotation_xyzw: [f32; 4],
     pub(crate) cell_directional_illuminance: f32,
@@ -47,6 +58,9 @@ pub(crate) struct JobLight {
     pub(crate) radius: f32,
     pub(crate) intensity_lumens: f32,
     pub(crate) kind: String,
+    pub(crate) flags: u32,
+    pub(crate) spot_fov_radians: f32,
+    pub(crate) spot_falloff_exponent: f32,
 }
 
 #[derive(Debug, Clone, Copy)]

@@ -3481,6 +3481,10 @@ async fn given_bake_recorded(
             bake_revision: Some(revision),
             source_fingerprint: job_fingerprint,
             scene_path: "scenes/00000001/baked/scene.glb".into(),
+            lightmaps: Vec::new(),
+            lightmap_variance_pages: Vec::new(),
+            lightmap_bindings: Vec::new(),
+            bake_settings: Default::default(),
             irradiance_volume: None,
         }),
     );
@@ -3507,6 +3511,10 @@ async fn given_bake_validity(world: &mut BevyoutWorld, hex: String, validity: St
         bake_revision: Some(recorded_revision.into()),
         source_fingerprint: BAKE_CURRENT_JOB_FINGERPRINT.into(),
         scene_path: "scenes/00000001/baked/scene.glb".into(),
+        lightmaps: Vec::new(),
+        lightmap_variance_pages: Vec::new(),
+        lightmap_bindings: Vec::new(),
+        bake_settings: Default::default(),
         irradiance_volume: None,
     };
     let valid = bake_plan::bake_is_valid(

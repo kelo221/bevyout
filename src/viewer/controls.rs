@@ -186,6 +186,12 @@ pub(crate) struct IrradianceIntensity(pub(crate) f32);
 #[derive(Resource)]
 pub(crate) struct AmbientScale(pub(crate) f32);
 
+#[derive(Component, Clone, Copy)]
+pub(crate) struct PreparedPointLightIntensity {
+    pub(crate) radius: f32,
+    pub(crate) intensity_lumens: f32,
+}
+
 #[derive(Resource)]
 pub(crate) struct FogStrength(pub(crate) f32);
 
@@ -650,7 +656,8 @@ pub(crate) fn apply_lighting_scale(
     ambient_scale: Res<AmbientScale>,
     disabled: Res<LightsDisabled>,
     mut ambient: ResMut<GlobalAmbientLight>,
-    mut points: Query<&mut PointLight>,
+    mut points: Query<(&mut PointLight, Option<&PreparedPointLightIntensity>)>,
+    mut spots: Query<(&mut SpotLight, Option<&PreparedPointLightIntensity>)>,
     mut directionals: Query<(&CellDirectionalLight, &mut DirectionalLight)>,
 ) {
     if !lighting.is_changed() && !ambient_scale.is_changed() && !disabled.is_changed() {
@@ -661,11 +668,24 @@ pub(crate) fn apply_lighting_scale(
     } else {
         25.0 * lighting.0 * ambient_scale.0
     };
-    for mut light in &mut points {
+    for (mut light, prepared) in &mut points {
         light.intensity = if disabled.0 {
             0.0
         } else {
-            light.range * light.range * 2.0 * lighting.0
+            let (radius, intensity_lumens) = prepared.map_or((light.range, 0.0), |prepared| {
+                (prepared.radius, prepared.intensity_lumens)
+            });
+            point_light_intensity(radius, intensity_lumens, lighting.0)
+        };
+    }
+    for (mut light, prepared) in &mut spots {
+        light.intensity = if disabled.0 {
+            0.0
+        } else {
+            let (radius, intensity_lumens) = prepared.map_or((light.range, 0.0), |prepared| {
+                (prepared.radius, prepared.intensity_lumens)
+            });
+            point_light_intensity(radius, intensity_lumens, lighting.0)
         };
     }
     for (cell_light, mut light) in &mut directionals {

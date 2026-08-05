@@ -387,7 +387,11 @@ pub(crate) fn run_view(manifest_path: PathBuf, options: RunViewOptions) -> Resul
         )
         .add_systems(
             Update,
-            (apply_realtime_shadow_light, mark_prepared_shadow_meshes)
+            (
+                apply_realtime_shadow_light,
+                mark_prepared_shadow_meshes,
+                attach_prepared_lightmaps,
+            )
                 .run_if(in_state(AppState::InGame)),
         )
         .add_systems(

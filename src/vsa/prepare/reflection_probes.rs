@@ -13,8 +13,8 @@ use super::{
     PreparedReflectionProbeSet, REFLECTION_PROBE_REVISION, ReflectionProbeLayout,
 };
 use crate::vsa::bake::{
-    JobLight, JobPlacement, cell_directional_illuminance, find_unified_ktx_tool, is_bake_static,
-    ktx_supports_input_file_lists,
+    JobLight, JobPlacement, authored_point_light_intensity, cell_directional_illuminance,
+    find_unified_ktx_tool, is_bake_static, ktx_supports_input_file_lists,
     rust_irradiance::{DirectionalBakeLight, trace_reflection_cubemap},
     rust_scene,
 };
@@ -78,12 +78,11 @@ pub(crate) fn prepare_reflection_probes(
             rotation_xyzw: light.rotation_xyzw,
             color_rgba: light.color_rgba,
             radius: light.radius.max(0.01),
-            intensity_lumens: if light.intensity_lumens > 0.0 {
-                light.intensity_lumens
-            } else {
-                light.radius * light.radius * 2.0 * 8192.0
-            },
+            intensity_lumens: authored_point_light_intensity(light.radius, light.intensity_lumens),
             kind: light.kind.clone(),
+            flags: light.flags,
+            spot_fov_radians: light.spot_fov_radians,
+            spot_falloff_exponent: light.spot_falloff_exponent,
         })
         .collect::<Vec<_>>();
     let fingerprint = reflection_fingerprint(
@@ -172,6 +171,8 @@ pub(crate) fn prepare_reflection_probes(
             &scene,
             &job_lights,
             &directional,
+            lighting.ambient_rgba,
+            None,
             layout.capture_translation,
             REFLECTION_PROBE_FACE_RESOLUTION,
         )?;
@@ -298,10 +299,16 @@ fn reflection_fingerprint(
             .into_iter()
             .chain(light.rotation_xyzw)
             .chain(light.color_rgba)
-            .chain([light.radius, light.intensity_lumens])
+            .chain([
+                light.radius,
+                light.intensity_lumens,
+                light.spot_fov_radians,
+                light.spot_falloff_exponent,
+            ])
         {
             hash.update(value.to_le_bytes());
         }
+        hash.update(light.flags.to_le_bytes());
         hash.update(light.kind.as_bytes());
     }
     for value in lighting

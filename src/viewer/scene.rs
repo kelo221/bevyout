@@ -10,16 +10,18 @@ use super::world::{ResidentCell, ResidentCells, ResidentState};
 use super::*;
 use crate::vsa::PreparedPlacement;
 use bevy::asset::RenderAssetUsages;
-use bevy::gltf::GltfMaterialExtras;
-use bevy::image::{CompressedImageFormats, ImageSampler, ImageType};
+use bevy::gltf::{GltfExtras, GltfMaterialExtras};
+use bevy::image::{CompressedImageFormats, Image, ImageSampler, ImageType};
 use bevy::light::{
     EnvironmentMapLight, FogVolume, LightProbe, NotShadowCaster, ParallaxCorrection, VolumetricFog,
     VolumetricLight,
 };
-use bevy::pbr::{MeshMaterial3d, StandardMaterial};
+use bevy::math::Rect;
+use bevy::pbr::{Lightmap, MeshMaterial3d, StandardMaterial};
 use bevy::post_process::bloom::{BloomCompositeMode, BloomPrefilter};
 use bevy::post_process::effect_stack::{ChromaticAberration, LensDistortion, Vignette};
 use bevy::render::render_resource::TextureFormat;
+use bevyout_core::manifest::PreparedBake;
 use serde::Deserialize;
 
 #[derive(Component)]
@@ -39,8 +41,41 @@ pub(crate) struct CellVolumetricFog;
 
 #[derive(Component)]
 pub(crate) struct PreparedReflectionProbe;
+
+#[derive(Resource)]
+pub(crate) struct PreparedLightmap {
+    pub(crate) bindings: HashMap<u32, PreparedLightmapBinding>,
+}
+
+#[derive(Component)]
+pub(crate) struct PreparedLightmapAttached;
+
+pub(crate) struct PreparedLightmapBinding {
+    pub(crate) image: Handle<Image>,
+    pub(crate) uv_rect: Rect,
+}
+
+/// Whether the shared runtime diffuse sources may still affect meshes in the
+/// active prepared scene. A non-empty surface-lightmap set owns static diffuse
+/// on the baked scene; dynamic and non-lightmapped meshes retain the sources
+/// because Bevy applies this flag only to lightmapped meshes.
+pub(crate) fn runtime_lightmapped_diffuse_enabled(bake: Option<&PreparedBake>) -> bool {
+    bake.is_none_or(|bake| bake.lightmaps.is_empty())
+}
+
 pub(crate) const PREPARED_REFLECTION_PROBE_INTENSITY: f32 = 0.025;
 pub(crate) const DEFAULT_REFLECTION_PROBE_STRENGTH: f32 = 100.0;
+
+fn prepared_light_is_spot(light: &bevyout_core::manifest::PreparedLight) -> bool {
+    let authored_spot = light.kind.eq_ignore_ascii_case("spot") || light.flags & 0x200 != 0;
+    authored_spot && light.spot_fov_radians.is_finite() && light.spot_fov_radians > f32::EPSILON
+}
+
+fn prepared_spot_angles(light: &bevyout_core::manifest::PreparedLight) -> (f32, f32) {
+    let outer =
+        (light.spot_fov_radians * 0.5).clamp(f32::EPSILON, std::f32::consts::FRAC_PI_2 - 0.0001);
+    ((outer * 0.8).min(outer), outer)
+}
 
 #[derive(Debug, Deserialize)]
 struct FalloutMaterialExtra {
@@ -301,6 +336,71 @@ pub(crate) fn mark_prepared_shadow_meshes(
     }
 }
 
+fn diagnostic_lightmap_binding_id(extras: &GltfExtras) -> Option<u32> {
+    let root: serde_json::Value = serde_json::from_str(&extras.value).ok()?;
+    root.get("bevyout")?
+        .get("lightmap_binding")?
+        .as_u64()
+        .and_then(|binding| u32::try_from(binding).ok())
+}
+
+/// Attaches prepared HDR surface lightmaps to generated static meshes. The
+/// binding ID comes from primitive extras, so Bevy entity or mesh ordering is
+/// never used to associate an atlas page with a primitive.
+#[allow(clippy::type_complexity)]
+pub(crate) fn attach_prepared_lightmaps(
+    mut commands: Commands,
+    prepared: Option<Res<PreparedLightmap>>,
+    roots: Query<Entity, With<BakedStaticSceneRoot>>,
+    parents: Query<&ChildOf>,
+    meshes: Query<
+        (Entity, Option<&GltfExtras>),
+        (
+            With<Mesh3d>,
+            With<MeshMaterial3d<StandardMaterial>>,
+            Without<Lightmap>,
+            Without<PreparedLightmapAttached>,
+        ),
+    >,
+) {
+    let Some(prepared) = prepared else {
+        return;
+    };
+    let roots = roots.iter().collect::<HashSet<_>>();
+    for (entity, extras) in &meshes {
+        let mut ancestor = entity;
+        let mut under_baked_root = false;
+        loop {
+            if roots.contains(&ancestor) {
+                under_baked_root = true;
+                break;
+            }
+            let Ok(parent) = parents.get(ancestor) else {
+                break;
+            };
+            ancestor = parent.parent();
+        }
+        if !under_baked_root {
+            continue;
+        }
+        let Some(binding_id) = extras.and_then(diagnostic_lightmap_binding_id) else {
+            continue;
+        };
+        let Some(binding) = prepared.bindings.get(&binding_id) else {
+            warn!("GLB lightmap binding {binding_id} is absent from PreparedBake");
+            continue;
+        };
+        commands.entity(entity).insert((
+            Lightmap {
+                image: binding.image.clone(),
+                uv_rect: binding.uv_rect,
+                bicubic_sampling: false,
+            },
+            PreparedLightmapAttached,
+        ));
+    }
+}
+
 const DEFAULT_BLOOM_INTENSITY: f32 = 0.2;
 const DEFAULT_BLOOM_THRESHOLD: f32 = 0.05;
 const DEFAULT_BLOOM_SOFTNESS: f32 = 0.2;
@@ -449,6 +549,7 @@ pub(crate) fn spawn_prepared_scene(
         });
     let (initial_yaw, initial_pitch, _) = initial_camera_transform.rotation.to_euler(EulerRot::YXZ);
     let cell_lighting = effective_lighting(&manifest.cell);
+    let lightmapped_diffuse_enabled = runtime_lightmapped_diffuse_enabled(manifest.bake.as_ref());
     let (color_grading, auto_exposure) =
         camera_post_processing(manifest.cell.image_space.as_ref(), &mut compensation_curves);
     let mut camera = commands.spawn((
@@ -514,7 +615,7 @@ pub(crate) fn spawn_prepared_scene(
             cell_lighting.ambient_rgba[2],
         ),
         brightness: 25.0 * lighting.0 * ambient_scale.0,
-        affects_lightmapped_meshes: true,
+        affects_lightmapped_meshes: lightmapped_diffuse_enabled,
     });
     let directional_luminance = cell_lighting.directional_rgba[0]
         + cell_lighting.directional_rgba[1]
@@ -533,7 +634,7 @@ pub(crate) fn spawn_prepared_scene(
                     cell_lighting.directional_rgba[2],
                 ),
                 illuminance: scaled_directional_illuminance(base_illuminance, lighting.0, false),
-                affects_lightmapped_mesh_diffuse: true,
+                affects_lightmapped_mesh_diffuse: lightmapped_diffuse_enabled,
                 shadow_maps_enabled: false,
                 ..default()
             },
@@ -629,6 +730,42 @@ pub(crate) fn spawn_prepared_scene(
     let prepared_shadow_available = prepared_shadow_runtime.cpu_loaded;
     let mut attached_shadow_lights = 0_u32;
     if let Some(bake) = &manifest.bake {
+        if !bake.lightmaps.is_empty() && !bake.lightmap_bindings.is_empty() {
+            let atlas_images = bake
+                .lightmaps
+                .iter()
+                .enumerate()
+                .map(|(index, atlas)| {
+                    (
+                        u16::try_from(index).unwrap_or(u16::MAX),
+                        asset_server.load::<Image>(atlas.asset_path.clone()),
+                    )
+                })
+                .collect::<HashMap<_, _>>();
+            let mut bindings = HashMap::new();
+            for binding in &bake.lightmap_bindings {
+                let Some(image) = atlas_images.get(&binding.atlas_index) else {
+                    warn!(
+                        "PreparedBake lightmap binding {} references missing atlas {}",
+                        binding.binding_id, binding.atlas_index
+                    );
+                    continue;
+                };
+                bindings.insert(
+                    binding.binding_id,
+                    PreparedLightmapBinding {
+                        image: image.clone(),
+                        uv_rect: Rect::from_corners(
+                            Vec2::new(binding.uv_rect[0], binding.uv_rect[1]),
+                            Vec2::new(binding.uv_rect[2], binding.uv_rect[3]),
+                        ),
+                    },
+                );
+            }
+            if !bindings.is_empty() {
+                commands.insert_resource(PreparedLightmap { bindings });
+            }
+        }
         let mut baked_root = commands.spawn((
             WorldAssetRoot(
                 asset_server.load(GltfAssetLabel::Scene(0).from_asset(bake.scene_path.clone())),
@@ -644,7 +781,7 @@ pub(crate) fn spawn_prepared_scene(
                 IrradianceVolume {
                     voxels: asset_server.load(volume.asset_path.clone()),
                     intensity: volume.intensity,
-                    affects_lightmapped_meshes: true,
+                    affects_lightmapped_meshes: lightmapped_diffuse_enabled,
                 },
                 Transform {
                     translation: Vec3::from_array(volume.translation),
@@ -688,26 +825,56 @@ pub(crate) fn spawn_prepared_scene(
         if !light.initially_enabled {
             continue;
         }
+        let is_spot = prepared_light_is_spot(light);
         let mut light_entity = commands.spawn((
-            PointLight {
-                intensity: light.radius * light.radius * 2.0 * lighting.0,
+            PreparedPointLightIntensity {
+                radius: light.radius,
+                intensity_lumens: light.intensity_lumens,
+            },
+            Transform::from_translation(Vec3::from_array(light.translation))
+                .with_rotation(Quat::from_array(light.rotation_xyzw)),
+            ChildOf(root),
+        ));
+        if is_spot {
+            let (inner_angle, outer_angle) = prepared_spot_angles(light);
+            light_entity.insert(SpotLight {
+                intensity: point_light_intensity(light.radius, light.intensity_lumens, lighting.0),
                 range: light.radius,
                 color: Color::srgb(
                     light.color_rgba[0],
                     light.color_rgba[1],
                     light.color_rgba[2],
                 ),
-                affects_lightmapped_mesh_diffuse: true,
+                inner_angle,
+                outer_angle,
+                affects_lightmapped_mesh_diffuse: lightmapped_diffuse_enabled,
                 shadow_maps_enabled: false,
                 ..default()
-            },
-            Transform::from_translation(Vec3::from_array(light.translation)),
-            RealtimeShadowCandidate {
-                reference_form_id: light.reference_form_id,
-            },
-            ChildOf(root),
-        ));
-        if let Some(shadow) = prepared_shadow_records.get(&light.reference_form_id) {
+            });
+        } else {
+            light_entity.insert((
+                PointLight {
+                    intensity: point_light_intensity(
+                        light.radius,
+                        light.intensity_lumens,
+                        lighting.0,
+                    ),
+                    range: light.radius,
+                    color: Color::srgb(
+                        light.color_rgba[0],
+                        light.color_rgba[1],
+                        light.color_rgba[2],
+                    ),
+                    affects_lightmapped_mesh_diffuse: lightmapped_diffuse_enabled,
+                    shadow_maps_enabled: false,
+                    ..default()
+                },
+                RealtimeShadowCandidate {
+                    reference_form_id: light.reference_form_id,
+                },
+            ));
+        }
+        if !is_spot && let Some(shadow) = prepared_shadow_records.get(&light.reference_form_id) {
             light_entity.insert(BakedPointLightShadow {
                 layer: shadow.layer,
                 baked_translation: Vec3::from_array(shadow.translation),
@@ -820,26 +987,65 @@ pub(crate) fn spawn_cell_lights(
     root: Entity,
     lighting_scale: f32,
 ) {
+    let lightmapped_diffuse_enabled = runtime_lightmapped_diffuse_enabled(manifest.bake.as_ref());
     for light in &manifest.lights {
         if !light.initially_enabled {
             continue;
         }
-        commands.spawn((
-            PointLight {
-                intensity: light.radius * light.radius * 2.0 * lighting_scale,
-                range: light.radius,
-                color: Color::srgb(
-                    light.color_rgba[0],
-                    light.color_rgba[1],
-                    light.color_rgba[2],
-                ),
-                affects_lightmapped_mesh_diffuse: true,
-                shadow_maps_enabled: false,
-                ..default()
+        let is_spot = prepared_light_is_spot(light);
+        let mut light_entity = commands.spawn((
+            PreparedPointLightIntensity {
+                radius: light.radius,
+                intensity_lumens: light.intensity_lumens,
             },
-            Transform::from_translation(Vec3::from_array(light.translation)),
             ChildOf(root),
         ));
+        if is_spot {
+            let (inner_angle, outer_angle) = prepared_spot_angles(light);
+            light_entity.insert((
+                SpotLight {
+                    intensity: point_light_intensity(
+                        light.radius,
+                        light.intensity_lumens,
+                        lighting_scale,
+                    ),
+                    range: light.radius,
+                    color: Color::srgb(
+                        light.color_rgba[0],
+                        light.color_rgba[1],
+                        light.color_rgba[2],
+                    ),
+                    inner_angle,
+                    outer_angle,
+                    affects_lightmapped_mesh_diffuse: lightmapped_diffuse_enabled,
+                    shadow_maps_enabled: false,
+                    ..default()
+                },
+                Transform::from_translation(Vec3::from_array(light.translation))
+                    .with_rotation(Quat::from_array(light.rotation_xyzw)),
+            ));
+        } else {
+            light_entity.insert((
+                PointLight {
+                    intensity: point_light_intensity(
+                        light.radius,
+                        light.intensity_lumens,
+                        lighting_scale,
+                    ),
+                    range: light.radius,
+                    color: Color::srgb(
+                        light.color_rgba[0],
+                        light.color_rgba[1],
+                        light.color_rgba[2],
+                    ),
+                    affects_lightmapped_mesh_diffuse: lightmapped_diffuse_enabled,
+                    shadow_maps_enabled: false,
+                    ..default()
+                },
+                Transform::from_translation(Vec3::from_array(light.translation))
+                    .with_rotation(Quat::from_array(light.rotation_xyzw)),
+            ));
+        }
     }
 }
 
@@ -1226,6 +1432,12 @@ pub(crate) fn refresh_environment_for_active_cell(world: &mut World) {
     let lighting_scale = world.resource::<LightingScale>().0;
     let ambient_scale = world.resource::<AmbientScale>().0;
     let fog_strength = world.resource::<FogStrength>().0;
+    let lightmapped_diffuse_enabled = runtime_lightmapped_diffuse_enabled(
+        world
+            .resource::<crate::viewer::LoadedSceneManifest>()
+            .bake
+            .as_ref(),
+    );
     let cell_lighting = effective_lighting(&cell);
     world.insert_resource(image_space_emission_multiplier(cell.image_space.as_ref()));
 
@@ -1236,7 +1448,7 @@ pub(crate) fn refresh_environment_for_active_cell(world: &mut World) {
             cell_lighting.ambient_rgba[2],
         ),
         brightness: 25.0 * lighting_scale * ambient_scale,
-        affects_lightmapped_meshes: true,
+        affects_lightmapped_meshes: lightmapped_diffuse_enabled,
     });
 
     if let Some(fog) = distance_fog(&cell_lighting, fog_strength) {
@@ -1267,6 +1479,7 @@ pub(crate) fn refresh_environment_for_active_cell(world: &mut World) {
         );
         light.illuminance =
             scaled_directional_illuminance(base_illuminance, lighting_scale, disabled);
+        light.affects_lightmapped_mesh_diffuse = lightmapped_diffuse_enabled;
         cell_light.base_illuminance = base_illuminance;
         transform.rotation = Quat::from_array(cell_lighting.directional_rotation_xyzw());
     }

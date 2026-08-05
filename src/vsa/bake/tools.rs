@@ -1,6 +1,7 @@
 //! External KTX tool discovery helpers.
 
 use super::*;
+use std::process::Command;
 
 pub(crate) fn find_ktx_tool(explicit: Option<PathBuf>) -> Result<Option<KtxTool>> {
     if let Some(path) = explicit {
@@ -99,10 +100,6 @@ pub(crate) fn ktx_supports_input_file_lists(path: &Path) -> bool {
         .find(|part| !part.is_empty())
         .and_then(|major| major.parse::<u32>().ok())
         .is_some_and(|major| major >= 5)
-}
-
-pub(crate) fn find_irradiance_ktx_tool(explicit: Option<PathBuf>) -> Result<KtxTool> {
-    find_unified_ktx_tool(explicit)
 }
 
 pub(crate) fn ktx_tool_kind(path: &Path) -> KtxToolKind {
