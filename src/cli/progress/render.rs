@@ -15,7 +15,6 @@ pub(crate) struct ProgressRenderer {
     writer: Box<dyn Write + Send>,
     interval: Duration,
     last_render: Option<Instant>,
-    last_tty_width: usize,
 }
 
 impl ProgressRenderer {
@@ -37,7 +36,6 @@ impl ProgressRenderer {
             writer: Box::new(writer),
             interval,
             last_render: None,
-            last_tty_width: 0,
         }
     }
 
@@ -57,14 +55,10 @@ impl ProgressRenderer {
         let line = format_snapshot(snapshot);
         match self.kind {
             RenderKind::Tty => {
-                let width = line.chars().count();
-                let trailing_spaces = self.last_tty_width.saturating_sub(width);
                 if snapshot.finished {
-                    write!(self.writer, "\r{line}{:trailing_spaces$}\n", "")?;
-                    self.last_tty_width = 0;
+                    write!(self.writer, "\r\x1b[2K{line}\n")?;
                 } else {
-                    write!(self.writer, "\r{line}{:trailing_spaces$}", "")?;
-                    self.last_tty_width = width + trailing_spaces;
+                    write!(self.writer, "\r\x1b[2K{line}")?;
                 }
             }
             RenderKind::Plain => writeln!(self.writer, "{line}")?,

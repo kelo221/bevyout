@@ -147,6 +147,8 @@ fn force_clear_removes_only_owned_cache_files() {
     )
     .unwrap();
     fs::write(root.join("page_notes.txt"), b"keep notes").unwrap();
+    let unicode_name = "page_000é_tile_000_0000.bin";
+    fs::write(root.join(unicode_name), b"keep unicode").unwrap();
     fs::write(root.join("other.tmp"), b"keep unrelated temporary").unwrap();
 
     let mut cleared = TileCache::open(&root, "fingerprint-b", true).unwrap();
@@ -163,6 +165,7 @@ fn force_clear_removes_only_owned_cache_files() {
         fs::read(root.join("other.tmp")).unwrap(),
         b"keep unrelated temporary"
     );
+    assert_eq!(fs::read(root.join(unicode_name)).unwrap(), b"keep unicode");
     let _ = fs::remove_dir_all(root);
 }
 

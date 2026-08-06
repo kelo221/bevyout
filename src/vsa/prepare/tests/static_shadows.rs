@@ -59,7 +59,12 @@ fn flat_overlays_do_not_enter_prepared_point_shadow_geometry() {
     assert!(!is_static_shadow_caster(&overlay));
 
     overlay.editor_id = Some("ChainLinkFence01".into());
+    overlay.asset_path = Some("assets/chainlinkfence01.glb".into());
     assert!(is_static_shadow_caster(&overlay));
+
+    overlay.editor_id = None;
+    overlay.asset_path = Some("assets/stain01.glb".into());
+    assert!(!is_static_shadow_caster(&overlay));
 }
 
 fn light(reference_form_id: u32) -> PreparedLight {

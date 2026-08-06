@@ -86,7 +86,11 @@ fn flat_overlays_are_not_folded_into_the_lightmapped_static_scene() {
     };
     assert!(!is_bake_static(&placement));
     placement.editor_id = Some("VaultWall01".into());
+    placement.asset_path = Some("assets/vaultwall01.glb".into());
     assert!(is_bake_static(&placement));
+    placement.editor_id = None;
+    placement.asset_path = Some("assets/stain01.glb".into());
+    assert!(!is_bake_static(&placement));
 }
 
 #[test]

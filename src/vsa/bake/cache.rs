@@ -299,13 +299,14 @@ fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
 }
 
 fn is_owned_cache_name(name: &str) -> bool {
-    name == "cache.meta"
-        || (name.starts_with("page_")
-            && name.ends_with(".bin")
-            && name.len() == "page_0000_tile_0000_0000.bin".len()
-            && name[5..9].chars().all(|c| c.is_ascii_digit())
-            && name[15..19].chars().all(|c| c.is_ascii_digit())
-            && name[20..24].chars().all(|c| c.is_ascii_digit()))
+    name.is_ascii()
+        && (name == "cache.meta"
+            || (name.starts_with("page_")
+                && name.ends_with(".bin")
+                && name.len() == "page_0000_tile_0000_0000.bin".len()
+                && name[5..9].chars().all(|c| c.is_ascii_digit())
+                && name[15..19].chars().all(|c| c.is_ascii_digit())
+                && name[20..24].chars().all(|c| c.is_ascii_digit())))
 }
 
 fn clear_cache_entries(root: &Path) -> Result<()> {

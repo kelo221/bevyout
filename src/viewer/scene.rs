@@ -217,7 +217,21 @@ pub(crate) fn configure_fallout_surface_materials(
         };
         let surface_kind = fallout_surface_kind(&metadata, mesh_name.map(|name| name.0.as_str()));
         let overlay_kind = fallout_overlay_kind(mesh_name.map(|name| name.0.as_str()));
-        let Some(mut material) = materials.get_mut(&material_handle.0) else {
+        let material_handle = if overlay_kind != crate::vsa::FalloutOverlayKind::None {
+            let Some(material) = materials.get(&material_handle.0).cloned() else {
+                // The scene entity can arrive before its material asset. Leave it
+                // unmarked so the next frame can configure it once loaded.
+                continue;
+            };
+            let isolated = materials.add(material);
+            commands
+                .entity(entity)
+                .insert(MeshMaterial3d(isolated.clone()));
+            isolated
+        } else {
+            material_handle.0.clone()
+        };
+        let Some(mut material) = materials.get_mut(&material_handle) else {
             // The scene entity can arrive before its material asset. Leave it
             // unmarked so the next frame can configure it once loaded.
             continue;

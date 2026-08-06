@@ -225,8 +225,10 @@ fn is_static_shadow_caster(placement: &PreparedPlacement) -> bool {
         )
         && !is_pickup_record_kind(&placement.base_kind)
         && placement.base_form_id != RCLIGHTBOX01_BASE_FORM_ID
-        && crate::vsa::classify_fallout_overlay(placement.editor_id.as_deref(), None)
-            == crate::vsa::FalloutOverlayKind::None
+        && crate::vsa::classify_fallout_overlay(
+            placement.editor_id.as_deref(),
+            placement.asset_path.as_deref(),
+        ) == crate::vsa::FalloutOverlayKind::None
 }
 
 fn sorted_shadow_lights(lights: &[PreparedLight]) -> Result<Vec<&PreparedLight>> {

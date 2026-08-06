@@ -352,17 +352,37 @@ fn flat_overlay_materials_get_depth_bias_and_stains_lose_reflections() {
             },
         ))
         .id();
+    app.world_mut().spawn((
+        Mesh3d::default(),
+        MeshMaterial3d(stain.clone()),
+        GltfMaterialExtras {
+            value: serde_json::json!({
+                "bevyout_fallout_material": { "shader_type": 1 }
+            })
+            .to_string(),
+        },
+    ));
 
     app.update();
-    let material = app
+    let overlay_handle = app
         .world()
-        .resource::<Assets<StandardMaterial>>()
-        .get(&stain)
-        .unwrap();
+        .entity(entity)
+        .get::<MeshMaterial3d<StandardMaterial>>()
+        .unwrap()
+        .0
+        .clone();
+    assert_ne!(overlay_handle, stain);
+    let materials = app.world().resource::<Assets<StandardMaterial>>();
+    let material = materials.get(&overlay_handle).unwrap();
     assert_eq!(material.depth_bias, FALLOUT_OVERLAY_DEPTH_BIAS);
     assert_eq!(material.reflectance, FALLOUT_DECAL_REFLECTANCE);
     assert_eq!(material.metallic, 0.0);
     assert_eq!(material.perceptual_roughness, 1.0);
+    let shared_material = materials.get(&stain).unwrap();
+    assert_eq!(shared_material.depth_bias, 0.0);
+    assert_eq!(shared_material.reflectance, 0.7);
+    assert_eq!(shared_material.metallic, 0.6);
+    assert_eq!(shared_material.perceptual_roughness, 0.2);
     assert!(app.world().entity(entity).contains::<NotShadowCaster>());
 }
 

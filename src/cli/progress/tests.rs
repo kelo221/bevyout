@@ -161,11 +161,14 @@ fn reporter_tty_updates_one_line_and_finishes_with_a_newline() {
     let text = output(&bytes);
     assert!(text.contains('\r'));
     assert_eq!(text.matches('\n').count(), 1);
-    assert!(!text.contains('\u{1b}'));
-    let final_frame = text.rsplit('\r').next().unwrap();
+    assert_eq!(
+        text.matches("\r\u{1b}[2K").count(),
+        text.matches('\r').count()
+    );
+    let final_frame = text.rsplit("\r\u{1b}[2K").next().unwrap();
     assert!(final_frame.starts_with("Bake | work 0"));
     assert!(final_frame.ends_with('\n'));
-    assert!(final_frame.trim_end_matches([' ', '\n']).len() < final_frame.len() - 1);
+    assert!(!final_frame.ends_with(" \n"));
 }
 
 #[test]
