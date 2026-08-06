@@ -67,6 +67,9 @@ mod time_of_day {
 #[path = "../src/vsa/prepare/reflection_probe_distribution.rs"]
 mod reflection_probe_distribution;
 
+#[path = "../src/vsa/overlay_policy.rs"]
+mod overlay_policy;
+
 // These files are pulled in verbatim and cover far more ground than the three
 // pure seams this suite drives (placement math, cell selectors, manifest
 // (de)serialization, conversion-profile selection). Everything else in them
@@ -1204,6 +1207,17 @@ struct BevyoutWorld {
 
     // -- actor_fallback.feature (M4 static NPC FaceGen reconstruction) --
     facegen_feature: FaceGenFeatureState,
+
+    // -- asset_materials.feature legacy world shading --
+    legacy_chan_master_strength: f32,
+    legacy_glossiness_exponent: Option<f32>,
+    legacy_micro_roughness: Option<f32>,
+    legacy_chan_weight: Option<f32>,
+
+    // -- fallout_overlays.feature --
+    fallout_overlay_editor_id: Option<String>,
+    fallout_overlay_model: Option<String>,
+    fallout_overlay_kind: Option<overlay_policy::FalloutOverlayKind>,
 }
 
 fn synthetic_dialogue_source() -> dialogue::DialogueSource {
@@ -3481,6 +3495,10 @@ async fn given_bake_recorded(
             bake_revision: Some(revision),
             source_fingerprint: job_fingerprint,
             scene_path: "scenes/00000001/baked/scene.glb".into(),
+            lightmaps: Vec::new(),
+            lightmap_variance_pages: Vec::new(),
+            lightmap_bindings: Vec::new(),
+            bake_settings: Default::default(),
             irradiance_volume: None,
         }),
     );
@@ -3507,6 +3525,10 @@ async fn given_bake_validity(world: &mut BevyoutWorld, hex: String, validity: St
         bake_revision: Some(recorded_revision.into()),
         source_fingerprint: BAKE_CURRENT_JOB_FINGERPRINT.into(),
         scene_path: "scenes/00000001/baked/scene.glb".into(),
+        lightmaps: Vec::new(),
+        lightmap_variance_pages: Vec::new(),
+        lightmap_bindings: Vec::new(),
+        bake_settings: Default::default(),
         irradiance_volume: None,
     };
     let valid = bake_plan::bake_is_valid(
@@ -17104,4 +17126,103 @@ async fn then_combined_facegen_coefficient_is(
     };
     let actual = resolved.coefficients.geometry_symmetric[index];
     assert!((actual - expected).abs() < 1.0e-6, "{actual} != {expected}");
+}
+
+// -- asset_materials.feature legacy world shading --
+
+#[given(regex = r"^the master Chan strength is (-?[\d.]+)$")]
+async fn given_master_chan_strength(world: &mut BevyoutWorld, strength: f32) {
+    world.legacy_chan_master_strength = strength;
+}
+
+#[given(regex = r"^a legacy Fallout material with glossiness exponent (-?[\d.]+)$")]
+async fn given_legacy_glossiness_exponent(world: &mut BevyoutWorld, exponent: f32) {
+    world.legacy_glossiness_exponent = Some(exponent);
+}
+
+#[given("a legacy Fallout material with a non-finite glossiness exponent")]
+async fn given_non_finite_legacy_glossiness_exponent(world: &mut BevyoutWorld) {
+    world.legacy_glossiness_exponent = Some(f32::NAN);
+}
+
+#[when("its legacy world shading policy is evaluated")]
+async fn when_legacy_world_shading_policy_is_evaluated(world: &mut BevyoutWorld) {
+    let exponent = assets::sanitized_glossiness_exponent(
+        world
+            .legacy_glossiness_exponent
+            .or(world.material_glossiness.flatten()),
+    );
+    world.legacy_glossiness_exponent = Some(exponent);
+    world.legacy_micro_roughness = Some(assets::legacy_micro_roughness_from_glossiness(Some(
+        exponent,
+    )));
+    world.legacy_chan_weight = Some(assets::legacy_chan_weight(
+        Some(exponent),
+        world.legacy_chan_master_strength,
+    ));
+}
+
+#[then(regex = r"^its preserved glossiness exponent is approximately ([\d.]+)$")]
+async fn then_preserved_glossiness_exponent_is(world: &mut BevyoutWorld, expected: f32) {
+    let actual = world
+        .legacy_glossiness_exponent
+        .expect("legacy glossiness exponent should be evaluated");
+    assert!((actual - expected).abs() < 1.0e-6, "{actual} != {expected}");
+}
+
+#[then(regex = r"^its legacy micro-roughness is approximately ([\d.]+)$")]
+async fn then_legacy_micro_roughness_is(world: &mut BevyoutWorld, expected: f32) {
+    let actual = world
+        .legacy_micro_roughness
+        .expect("legacy micro-roughness should be evaluated");
+    assert!((actual - expected).abs() < 1.0e-3, "{actual} != {expected}");
+}
+
+#[then(regex = r"^its automatic Chan weight is approximately ([\d.]+)$")]
+async fn then_effective_chan_weight_is(world: &mut BevyoutWorld, expected: f32) {
+    let actual = world
+        .legacy_chan_weight
+        .expect("legacy Chan weight should be evaluated");
+    assert!((actual - expected).abs() < 1.0e-3, "{actual} != {expected}");
+}
+
+// -- fallout_overlays.feature --
+
+#[given(regex = r#"^a Fallout static named \"([^\"]+)\" using model \"([^\"]+)\"$"#)]
+async fn given_fallout_overlay_candidate(
+    world: &mut BevyoutWorld,
+    editor_id: String,
+    model: String,
+) {
+    world.fallout_overlay_editor_id = Some(editor_id);
+    world.fallout_overlay_model = Some(model);
+}
+
+#[when("its flat-overlay policy is evaluated")]
+async fn when_flat_overlay_policy_is_evaluated(world: &mut BevyoutWorld) {
+    world.fallout_overlay_kind = Some(overlay_policy::classify_fallout_overlay(
+        world.fallout_overlay_editor_id.as_deref(),
+        world.fallout_overlay_model.as_deref(),
+    ));
+}
+
+#[then(regex = r#"^its overlay kind is \"([^\"]+)\"$"#)]
+async fn then_overlay_kind_is(world: &mut BevyoutWorld, expected: String) {
+    let actual = match world
+        .fallout_overlay_kind
+        .expect("overlay policy not evaluated")
+    {
+        overlay_policy::FalloutOverlayKind::None => "none",
+        overlay_policy::FalloutOverlayKind::Decal => "decal",
+        overlay_policy::FalloutOverlayKind::Debris => "debris",
+    };
+    assert_eq!(actual, expected);
+}
+
+#[then("the placement is excluded from static lighting inputs")]
+async fn then_overlay_is_excluded_from_static_lighting(world: &mut BevyoutWorld) {
+    assert_ne!(
+        world.fallout_overlay_kind,
+        Some(overlay_policy::FalloutOverlayKind::None)
+    );
 }

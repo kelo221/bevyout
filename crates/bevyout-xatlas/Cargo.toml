@@ -1,0 +1,11 @@
+[package]
+name = "bevyout-xatlas"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.87"
+license = "MIT"
+description = "Small maintained Rust FFI boundary for vendored xatlas"
+build = "build.rs"
+
+[build-dependencies]
+cc = "1.0"

@@ -46,6 +46,30 @@ pub(crate) struct SampledTexture {
 }
 
 impl SampledTexture {
+    #[cfg(all(test, feature = "lightmap-gpu-solari"))]
+    pub(crate) fn from_test_image(image: RgbaImage) -> Self {
+        Self {
+            image: Arc::new(image),
+            wrap_s: WrapMode::Clamp,
+            wrap_t: WrapMode::Clamp,
+        }
+    }
+
+    #[cfg(feature = "lightmap-gpu-solari")]
+    pub(crate) fn image(&self) -> &RgbaImage {
+        &self.image
+    }
+
+    #[cfg(feature = "lightmap-gpu-solari")]
+    pub(crate) fn wrap_codes(&self) -> [u32; 2] {
+        let code = |mode| match mode {
+            WrapMode::Clamp => 0,
+            WrapMode::Repeat => 1,
+            WrapMode::Mirror => 2,
+        };
+        [code(self.wrap_s), code(self.wrap_t)]
+    }
+
     pub(crate) fn sample(&self, uv: Vec2) -> Vec4 {
         let wrap = |value: f32, mode: WrapMode| match mode {
             WrapMode::Clamp => value.clamp(0.0, 1.0),
@@ -115,6 +139,7 @@ impl Default for TransportMaterial {
 #[derive(Clone, Debug)]
 pub(crate) struct ComposedPrimitive {
     pub(crate) name: String,
+    pub(crate) primitive_key: String,
     pub(crate) reference_form_ids: Vec<u32>,
     pub(crate) material: usize,
     pub(crate) positions: Vec<Vec3>,
@@ -123,6 +148,11 @@ pub(crate) struct ComposedPrimitive {
     pub(crate) colors: Vec<Vec4>,
     pub(crate) transport_colors: Vec<Vec4>,
     pub(crate) indices: Vec<u32>,
+    pub(crate) uv1: Vec<Vec2>,
+    pub(crate) uv1_chart_ids: Vec<u32>,
+    pub(crate) lightmap_texels_per_meter: f32,
+    pub(crate) lightmap_dimensions: [u32; 2],
+    pub(crate) lightmap_binding_id: Option<u32>,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -168,9 +198,58 @@ pub(crate) struct RustBakeScene {
     resources: OutputResources,
 }
 
+#[cfg(test)]
+pub(crate) fn synthetic_lightmap_scene_for_test() -> RustBakeScene {
+    let positions = vec![
+        Vec3::new(-1.0, -1.0, 0.0),
+        Vec3::new(1.0, -1.0, 0.0),
+        Vec3::new(0.0, 1.0, 0.0),
+    ];
+    let uvs = vec![Vec2::ZERO, Vec2::X, Vec2::new(0.5, 1.0)];
+    let mut resources = OutputResources::default();
+    resources.materials.push(json!({
+        "name": "synthetic_white",
+        "pbrMetallicRoughness": {
+            "baseColorFactor": [1.0, 1.0, 1.0, 1.0],
+            "metallicFactor": 0.0,
+            "roughnessFactor": 1.0
+        }
+    }));
+    resources
+        .transport_materials
+        .push(TransportMaterial::default());
+    RustBakeScene {
+        primitives: vec![ComposedPrimitive {
+            name: "synthetic_triangle".into(),
+            primitive_key: "fixture/synthetic_triangle".into(),
+            reference_form_ids: vec![1],
+            material: 0,
+            positions,
+            normals: vec![Vec3::Z; 3],
+            uvs: uvs.clone(),
+            colors: vec![Vec4::ONE; 3],
+            transport_colors: vec![Vec4::ONE; 3],
+            indices: vec![0, 1, 2],
+            uv1: uvs,
+            uv1_chart_ids: vec![0; 3],
+            lightmap_texels_per_meter: 4.0,
+            lightmap_dimensions: [8, 8],
+            lightmap_binding_id: Some(1),
+        }],
+        materials: vec![TransportMaterial::default()],
+        bounds: SceneBounds {
+            minimum: Vec3::new(-1.0, -1.0, 0.0),
+            maximum: Vec3::new(1.0, 1.0, 0.0),
+        },
+        batching: BatchingStats::default(),
+        resources,
+    }
+}
+
 #[derive(Clone)]
 struct SourcePrimitive {
     name: String,
+    source_node_identity: String,
     material: usize,
     positions: Vec<Vec3>,
     normals: Vec<Vec3>,
@@ -617,6 +696,39 @@ pub(crate) fn compose_scene(
     placements: &[JobPlacement],
     chunk_size: f32,
 ) -> Result<RustBakeScene> {
+    compose_scene_with_lightmap_density(
+        asset_root,
+        placements,
+        chunk_size,
+        16.0,
+        &BTreeMap::new(),
+        &mut Vec::new(),
+    )
+}
+
+pub(crate) fn compose_scene_with_lightmap_density(
+    asset_root: &Path,
+    placements: &[JobPlacement],
+    chunk_size: f32,
+    default_texels_per_meter: f32,
+    density_overrides: &BTreeMap<u32, f32>,
+    density_warnings: &mut Vec<String>,
+) -> Result<RustBakeScene> {
+    let default_texels_per_meter =
+        validated_texels_per_meter(default_texels_per_meter, "default", density_warnings);
+    let density_overrides = density_overrides
+        .iter()
+        .map(|(form_id, value)| {
+            (
+                *form_id,
+                validated_texels_per_meter(
+                    *value,
+                    &format!("FormID {form_id:08x}"),
+                    density_warnings,
+                ),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
     let mut resources = OutputResources::default();
     let mut asset_cache = HashMap::<String, LoadedAsset>::new();
     let mut fragments = Vec::new();
@@ -660,9 +772,20 @@ pub(crate) fn compose_scene(
             if positions.is_empty() || primitive.indices.len() < 3 {
                 continue;
             }
+            let lightmap_texels_per_meter = density_overrides
+                .get(&placement.reference_form_id)
+                .copied()
+                .unwrap_or(default_texels_per_meter);
             *contribution.entry(placement.reference_form_id).or_default() += 1;
             fragments.push(ComposedPrimitive {
                 name: format!("{}_{:08x}", primitive.name, placement.reference_form_id),
+                primitive_key: format!(
+                    "ref:{:08x}/asset:{}/source:{}/primitive:{}",
+                    placement.reference_form_id,
+                    placement.asset_path,
+                    primitive.source_node_identity,
+                    primitive.name
+                ),
                 reference_form_ids: vec![placement.reference_form_id],
                 material: primitive.material,
                 positions,
@@ -675,6 +798,11 @@ pub(crate) fn compose_scene(
                     primitive.colors.clone()
                 },
                 indices: primitive.indices.clone(),
+                uv1: Vec::new(),
+                uv1_chart_ids: Vec::new(),
+                lightmap_texels_per_meter,
+                lightmap_dimensions: [0, 0],
+                lightmap_binding_id: None,
             });
         }
     }
@@ -695,7 +823,15 @@ pub(crate) fn compose_scene(
     let visual_objects_before = fragments.len();
     let render_primitives_before = fragments.len();
     let materials_before = source_material_count;
-    let (primitives, mut batching) = batch_fragments(fragments, chunk_size);
+    let (mut primitives, mut batching) = batch_fragments(fragments, chunk_size);
+    for primitive in &mut primitives {
+        super::lightmap_uv::unwrap_primitive(primitive).with_context(|| {
+            format!(
+                "native lightmap UV generation failed for composed primitive {}",
+                primitive.name
+            )
+        })?;
+    }
     batching.visual_objects_before = visual_objects_before;
     batching.render_primitives_before = render_primitives_before;
     batching.materials_before = materials_before;
@@ -745,6 +881,12 @@ impl RustBakeScene {
                 &primitive.uvs,
                 Some(34962),
             );
+            let uv1_accessor = push_vec2_accessor(
+                &mut self.resources,
+                &mut accessors,
+                &primitive.uv1,
+                Some(34962),
+            );
             let color_accessor = push_vec4_accessor(
                 &mut self.resources,
                 &mut accessors,
@@ -761,11 +903,18 @@ impl RustBakeScene {
                         "POSITION": position_accessor,
                         "NORMAL": normal_accessor,
                         "TEXCOORD_0": uv_accessor,
+                        "TEXCOORD_1": uv1_accessor,
                         "COLOR_0": color_accessor
                     },
                     "indices": index_accessor,
                     "material": primitive.material,
-                    "mode": 4
+                    "mode": 4,
+                    "extras": {
+                        "bevyout": {
+                            "primitive_key": primitive.primitive_key,
+                            "lightmap_binding": primitive.lightmap_binding_id
+                        }
+                    }
                 }]
             }));
             nodes.push(json!({
@@ -773,7 +922,11 @@ impl RustBakeScene {
                 "mesh": mesh_index,
                 "extras": {
                     "bevyout_reference_form_ids": primitive.reference_form_ids,
-                    "bevyout_batch_size": primitive.reference_form_ids.len()
+                    "bevyout_batch_size": primitive.reference_form_ids.len(),
+                    "bevyout": {
+                        "primitive_key": primitive.primitive_key,
+                        "lightmap_binding": primitive.lightmap_binding_id
+                    }
                 }
             }));
         }
@@ -1077,6 +1230,11 @@ fn collect_node_primitives(
                 .context("GLB primitive material could not be resolved")?;
             output.push(SourcePrimitive {
                 name: format!("{}_{}", mesh.name().unwrap_or("mesh"), primitive_index),
+                source_node_identity: format!(
+                    "node:{}/mesh:{}/primitive:{primitive_index}",
+                    node.index(),
+                    mesh.index()
+                ),
                 material,
                 positions,
                 normals,
@@ -1975,7 +2133,7 @@ fn batch_fragments(
     fragments: Vec<ComposedPrimitive>,
     chunk_size: f32,
 ) -> (Vec<ComposedPrimitive>, BatchingStats) {
-    let mut groups = BTreeMap::<(i32, i32, i32, usize), Vec<ComposedPrimitive>>::new();
+    let mut groups = BTreeMap::<(i32, i32, i32, usize, u32), Vec<ComposedPrimitive>>::new();
     let mut passthrough = Vec::new();
     let mut excluded_large = 0;
     for fragment in fragments {
@@ -1989,13 +2147,19 @@ fn batch_fragments(
         let center = bounds.center();
         let chunk = (center / chunk_size).floor().as_ivec3();
         groups
-            .entry((chunk.x, chunk.y, chunk.z, fragment.material))
+            .entry((
+                chunk.x,
+                chunk.y,
+                chunk.z,
+                fragment.material,
+                fragment.lightmap_texels_per_meter.to_bits(),
+            ))
             .or_default()
             .push(fragment);
     }
     let mut batches_created = 0;
     let mut largest_batch = 0;
-    for ((x, y, z, material), mut group) in groups {
+    for ((x, y, z, material, density_bits), mut group) in groups {
         group.sort_by(|left, right| left.name.cmp(&right.name));
         if group.len() == 1 {
             passthrough.push(group.pop().expect("single item"));
@@ -2004,7 +2168,8 @@ fn batch_fragments(
         largest_batch = largest_batch.max(group.len());
         batches_created += 1;
         let mut output = ComposedPrimitive {
-            name: format!("batch_{x}_{y}_{z}_{material}"),
+            name: format!("batch_{x}_{y}_{z}_{material}_{density_bits}"),
+            primitive_key: String::new(),
             reference_form_ids: Vec::new(),
             material,
             positions: Vec::new(),
@@ -2013,7 +2178,21 @@ fn batch_fragments(
             colors: Vec::new(),
             transport_colors: Vec::new(),
             indices: Vec::new(),
+            uv1: Vec::new(),
+            uv1_chart_ids: Vec::new(),
+            lightmap_texels_per_meter: f32::from_bits(density_bits),
+            lightmap_dimensions: [0, 0],
+            lightmap_binding_id: None,
         };
+        let child_keys = group
+            .iter()
+            .map(|fragment| fragment.primitive_key.as_str())
+            .collect::<Vec<_>>()
+            .join("|");
+        output.primitive_key = format!(
+            "batch:{x}:{y}:{z}:{material}:{:016x}",
+            stable_key_hash(&child_keys)
+        );
         for fragment in group {
             let base = output.positions.len() as u32;
             output
@@ -2043,6 +2222,28 @@ fn batch_fragments(
         ..Default::default()
     };
     (passthrough, stats)
+}
+
+fn validated_texels_per_meter(value: f32, source: &str, warnings: &mut Vec<String>) -> f32 {
+    if !value.is_finite() || value <= 0.0 {
+        warnings.push(format!(
+            "warning: invalid lightmap density for {source}: requested {value}, applied 16"
+        ));
+        return 16.0;
+    }
+    let applied = value.clamp(1.0, 128.0);
+    if applied != value {
+        warnings.push(format!(
+            "warning: out-of-range lightmap density for {source}: requested {value}, applied {applied}"
+        ));
+    }
+    applied
+}
+
+fn stable_key_hash(value: &str) -> u64 {
+    value.bytes().fold(0xcbf2_9ce4_8422_2325_u64, |hash, byte| {
+        (hash ^ u64::from(byte)).wrapping_mul(0x1000_0000_01b3)
+    })
 }
 
 fn scene_bounds(primitives: &[ComposedPrimitive]) -> Result<SceneBounds> {

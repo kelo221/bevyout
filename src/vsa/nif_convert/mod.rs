@@ -23,10 +23,12 @@ use serde::Serialize;
 
 use crate::cli::{NifConversionMode, NifConvertArgs};
 
+#[cfg(test)]
+use super::assets::patch_glb_material_policy;
 use super::assets::{
     MetallicMaterialTable, RootTransformPolicy, fallout_specular_texture_path,
-    flip_directx_normal_y_texel, load_archives, patch_glb_material_policy,
-    perceptual_roughness_from_glossiness, resolve_asset,
+    flip_directx_normal_y_texel, load_archives, patch_glb_material_policy_with_glossiness,
+    perceptual_roughness_from_glossiness, resolve_asset, sanitized_glossiness_exponent,
 };
 use super::physics::{
     PHYSICS_ASSET_SCHEMA_VERSION, PreparedPhysicsAsset, PreparedPhysicsBody, PreparedPhysicsJoint,
@@ -66,7 +68,7 @@ struct ReportIssue {
     message: String,
 }
 
-pub(crate) const NATIVE_NIF_REPORT_REVISION: &str = "nifty-fo3-native-v10-normal-y-v1-specular-normal-alpha-v1-fallout-shader-semantics-v1-emissive-quarter-cap-v1-shader-emission-gate-v2-physical-effect-bulb-v1-effect-emission-control-v1-light-card-promotion-v1-env-light-emission-v1-17f5769-skin-anim-xyzw-v1-audio-cues-v1-havok-joints-v1-com-frame-v1";
+pub(crate) const NATIVE_NIF_REPORT_REVISION: &str = "nifty-fo3-native-v10-normal-y-v1-specular-normal-alpha-v1-fallout-shader-semantics-v2-emissive-quarter-cap-v1-shader-emission-gate-v2-physical-effect-bulb-v1-effect-emission-control-v1-light-card-promotion-v1-env-light-emission-v1-17f5769-pbr-material-v4-skin-anim-xyzw-v1-audio-cues-v1-havok-joints-v1-com-frame-v1";
 
 pub(crate) struct NifConversionRequest<'a> {
     pub(crate) source_name: &'a str,
@@ -92,6 +94,7 @@ pub(crate) struct NifConversionResult {
 pub(crate) struct ActorSceneConversionRequest<'a> {
     pub(crate) source_name: &'a str,
     pub(crate) scene: nif::fo3::Scene,
+    pub(crate) glossiness_exponents: Vec<f32>,
     pub(crate) skeleton_document: &'a nif::fo3::Document,
     pub(crate) output: &'a Path,
     pub(crate) physics_output: &'a Path,
@@ -388,7 +391,7 @@ pub(crate) fn convert_nif(request: NifConversionRequest<'_>) -> Result<NifConver
         document.blocks.len()
     ));
     let mut scene = nif::fo3::extract_scene(&document).context("extracting NIF scene")?;
-    apply_native_material_policy(&document, &mut scene)?;
+    let glossiness_exponents = apply_native_material_policy(&document, &mut scene)?;
     let record_zero_non_identity = scene
         .nodes
         .iter()
@@ -462,9 +465,10 @@ pub(crate) fn convert_nif(request: NifConversionRequest<'_>) -> Result<NifConver
         record_zero_non_identity,
         usize::from(corrected_root_transform),
     )?;
-    output.bytes = patch_glb_material_policy(
+    output.bytes = patch_glb_material_policy_with_glossiness(
         &output.bytes,
         &MetallicMaterialTable::built_in().map_err(anyhow::Error::msg)?,
+        Some(&glossiness_exponents),
     )?;
     output.bytes = super::assets::transcode_glb_images_to_ktx2(&output.bytes)
         .context("transcoding embedded GLB textures to KTX2")?;
@@ -649,9 +653,10 @@ pub(crate) fn convert_actor_scene(
         false,
         0,
     )?;
-    output.bytes = patch_glb_material_policy(
+    output.bytes = patch_glb_material_policy_with_glossiness(
         &output.bytes,
         &MetallicMaterialTable::built_in().map_err(anyhow::Error::msg)?,
+        Some(&request.glossiness_exponents),
     )?;
     output.bytes = super::assets::transcode_glb_images_to_ktx2(&output.bytes)
         .context("transcoding native actor GLB textures to KTX2")?;
@@ -857,8 +862,9 @@ fn resolve_textures(
 pub(crate) fn apply_native_material_policy(
     document: &nif::fo3::Document,
     scene: &mut nif::fo3::Scene,
-) -> Result<()> {
+) -> Result<Vec<f32>> {
     apply_fallout_specular_texture_policy(&mut scene.materials);
+    let mut glossiness_exponents = vec![sanitized_glossiness_exponent(None); scene.materials.len()];
     for material in &mut scene.materials {
         material.roughness = perceptual_roughness_from_glossiness(None);
     }
@@ -890,9 +896,10 @@ pub(crate) fn apply_native_material_policy(
         let material = scene.materials.get_mut(material_index).with_context(|| {
             format!("scene mesh references invalid material index {material_index}")
         })?;
+        glossiness_exponents[material_index] = sanitized_glossiness_exponent(glossiness);
         material.roughness = perceptual_roughness_from_glossiness(glossiness);
     }
-    Ok(())
+    Ok(glossiness_exponents)
 }
 
 fn apply_fallout_specular_texture_policy(materials: &mut [nif::fo3::SceneMaterial]) {

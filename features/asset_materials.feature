@@ -73,6 +73,36 @@ Feature: Asset conversion profile selection
       | nan        |
       | infinite   |
 
+  Scenario Outline: Authored glossiness drives automatic Chan diffuse strength
+    Given a NIF material glossiness exponent <glossiness>
+    And the master Chan strength is <master>
+    When its legacy world shading policy is evaluated
+    Then its preserved glossiness exponent is approximately <preserved>
+    And its legacy micro-roughness is approximately <micro_roughness>
+    And its automatic Chan weight is approximately <chan_weight>
+
+    Examples:
+      | glossiness | master | preserved | micro_roughness | chan_weight |
+      | 4          | 1.0    | 4.0       | 0.577350        | 0.577350    |
+      | 128        | 1.0    | 128.0     | 0.124035        | 0.124035    |
+      | 4          | 0.5    | 4.0       | 0.577350        | 0.288675    |
+      | 4          | 0.0    | 4.0       | 0.577350        | 0.000000    |
+
+  Scenario Outline: Invalid legacy glossiness preserves the exponent-ten fallback
+    Given a NIF material glossiness value "<glossiness>"
+    And the master Chan strength is 1.0
+    When its legacy world shading policy is evaluated
+    Then its preserved glossiness exponent is approximately 10.0
+    And its legacy micro-roughness is approximately 0.408248
+    And its automatic Chan weight is approximately 0.408248
+
+    Examples:
+      | glossiness |
+      | missing    |
+      | negative   |
+      | nan        |
+      | infinite   |
+
   Scenario: Exact normalized diffuse paths select binary metalness
     Given metallic material CSV "diffuse_texture,object_name,metallic\ntextures/weapons/test.dds,Test Weapon,1\n"
     And a material diffuse texture "Data\\Textures\\Weapons\\TEST.DDS"

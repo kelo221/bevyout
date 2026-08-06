@@ -186,14 +186,20 @@ pub(crate) struct IrradianceIntensity(pub(crate) f32);
 #[derive(Resource)]
 pub(crate) struct AmbientScale(pub(crate) f32);
 
+#[derive(Component, Clone, Copy)]
+pub(crate) struct PreparedPointLightIntensity {
+    pub(crate) radius: f32,
+    pub(crate) intensity_lumens: f32,
+}
+
 #[derive(Resource)]
 pub(crate) struct FogStrength(pub(crate) f32);
 
 /// Live multiplier for the cell-driven volumetric fog density. This is kept
 /// separate from `FogStrength` so the existing distance-fog tuning remains
-/// unchanged. The 0.05 baseline preserves authored cell values without the
-/// over-dense result observed in SuperDuperMart.
-pub(crate) const DEFAULT_VOLUMETRIC_FOG_MULTIPLIER: f32 = 0.05;
+/// unchanged. The 0.01 baseline starts from the authored cell fog profile
+/// without overpowering the Super-Duper Mart atmosphere.
+pub(crate) const DEFAULT_VOLUMETRIC_FOG_MULTIPLIER: f32 = 0.01;
 
 #[derive(Resource)]
 pub(crate) struct VolumetricFogMultiplier(pub(crate) f32);
@@ -209,6 +215,56 @@ pub(crate) const DEFAULT_EMISSION_SCALE: f32 = 0.15;
 
 #[derive(Resource)]
 pub(crate) struct EmissionScale(pub(crate) f32);
+
+/// Master strength for the legacy-world Chan diffuse contribution. Authored
+/// material glossiness still determines the per-material maximum in WGSL.
+#[derive(Clone, Copy, Debug, Resource)]
+pub(crate) struct LegacyChanSettings {
+    strength: f32,
+}
+
+impl Default for LegacyChanSettings {
+    fn default() -> Self {
+        Self { strength: 1.0 }
+    }
+}
+
+impl LegacyChanSettings {
+    pub(crate) fn strength(&self) -> f32 {
+        self.strength
+    }
+
+    pub(crate) fn set_strength(&mut self, strength: f32) {
+        self.strength = strength;
+    }
+}
+
+/// Runtime diagnostics for flat Fallout overlays. Prepared lightmap/probe
+/// capture membership is fixed during preparation; these controls cover the
+/// remaining realtime reflection and shadow contributions.
+#[derive(Clone, Copy, Debug, Default, Resource)]
+pub(crate) struct OverlayLightingSettings {
+    realtime_shadows: bool,
+    reflections: bool,
+}
+
+impl OverlayLightingSettings {
+    pub(crate) fn realtime_shadows(&self) -> bool {
+        self.realtime_shadows
+    }
+
+    pub(crate) fn set_realtime_shadows(&mut self, enabled: bool) {
+        self.realtime_shadows = enabled;
+    }
+
+    pub(crate) fn reflections(&self) -> bool {
+        self.reflections
+    }
+
+    pub(crate) fn set_reflections(&mut self, enabled: bool) {
+        self.reflections = enabled;
+    }
+}
 
 /// Combined settings for the viewer's material-clamp policy (issue #269):
 /// metallic gate, dielectric-specular gate, and roughness scale behind one
@@ -650,7 +706,8 @@ pub(crate) fn apply_lighting_scale(
     ambient_scale: Res<AmbientScale>,
     disabled: Res<LightsDisabled>,
     mut ambient: ResMut<GlobalAmbientLight>,
-    mut points: Query<&mut PointLight>,
+    mut points: Query<(&mut PointLight, Option<&PreparedPointLightIntensity>)>,
+    mut spots: Query<(&mut SpotLight, Option<&PreparedPointLightIntensity>)>,
     mut directionals: Query<(&CellDirectionalLight, &mut DirectionalLight)>,
 ) {
     if !lighting.is_changed() && !ambient_scale.is_changed() && !disabled.is_changed() {
@@ -661,11 +718,24 @@ pub(crate) fn apply_lighting_scale(
     } else {
         25.0 * lighting.0 * ambient_scale.0
     };
-    for mut light in &mut points {
+    for (mut light, prepared) in &mut points {
         light.intensity = if disabled.0 {
             0.0
         } else {
-            light.range * light.range * 2.0 * lighting.0
+            let (radius, intensity_lumens) = prepared.map_or((light.range, 0.0), |prepared| {
+                (prepared.radius, prepared.intensity_lumens)
+            });
+            point_light_intensity(radius, intensity_lumens, lighting.0)
+        };
+    }
+    for (mut light, prepared) in &mut spots {
+        light.intensity = if disabled.0 {
+            0.0
+        } else {
+            let (radius, intensity_lumens) = prepared.map_or((light.range, 0.0), |prepared| {
+                (prepared.radius, prepared.intensity_lumens)
+            });
+            point_light_intensity(radius, intensity_lumens, lighting.0)
         };
     }
     for (cell_light, mut light) in &mut directionals {

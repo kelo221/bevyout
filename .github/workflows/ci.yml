@@ -114,4 +114,10 @@ jobs:
           cache-on-failure: true
 
       - name: Test
-        run: cargo test
+        run: cargo test --locked
+
+      - name: Miniature CPU lightmap bake
+        run: cargo test --locked --lib miniature_surface_bake_produces_finite_ktx2
+
+      - name: Lightmap binding projection
+        run: cargo test --locked --lib lightmap_binding_projection_preserves_primitive_identity_and_uv_rect

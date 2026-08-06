@@ -23,6 +23,10 @@ fn current_render_bake(manifest: &mut PreparedSceneManifest) {
         bake_revision: Some(crate::vsa::CURRENT_BAKE_REVISION.into()),
         source_fingerprint: "fixture".into(),
         scene_path: "baked/scene.glb".into(),
+        lightmaps: Vec::new(),
+        lightmap_variance_pages: Vec::new(),
+        lightmap_bindings: Vec::new(),
+        bake_settings: Default::default(),
         irradiance_volume: Some(crate::vsa::PreparedIrradianceVolume {
             asset_path: "baked/irradiance.ktx2".into(),
             translation: [0.0; 3],
@@ -468,6 +472,10 @@ fn render_recovery_rebakes_stale_bakes_and_accepts_current_ones() {
         bake_revision: Some(crate::vsa::CURRENT_BAKE_REVISION.into()),
         source_fingerprint: "fixture".into(),
         scene_path: "baked/scene.glb".into(),
+        lightmaps: Vec::new(),
+        lightmap_variance_pages: Vec::new(),
+        lightmap_bindings: Vec::new(),
+        bake_settings: Default::default(),
         irradiance_volume: Some(crate::vsa::PreparedIrradianceVolume {
             asset_path: "baked/irradiance.ktx2".into(),
             translation: [0.0; 3],
@@ -826,8 +834,8 @@ fn fog_uses_fo3_distances_and_rejects_invalid_ranges() {
 }
 
 #[test]
-fn volumetric_fog_default_preserves_authored_values_at_five_percent() {
-    assert_eq!(DEFAULT_VOLUMETRIC_FOG_MULTIPLIER, 0.05);
+fn volumetric_fog_default_preserves_authored_values_at_one_percent() {
+    assert_eq!(DEFAULT_VOLUMETRIC_FOG_MULTIPLIER, 0.01);
 }
 
 #[test]

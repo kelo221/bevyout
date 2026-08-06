@@ -541,6 +541,9 @@ pub(crate) fn parse_light_data(subs: &[Subrecord]) -> Option<LightData> {
             data[10] as f32 / 255.0,
             1.0,
         ],
+        flags: u32_at(data, 12).unwrap_or(0),
+        falloff_exponent: f32_at_option(data, 16).unwrap_or(0.0),
+        fov: f32_at_option(data, 20).unwrap_or(0.0),
     })
 }
 

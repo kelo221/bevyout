@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [workspace]
-members = [".", "crates/bevyout-core"]
+members = [".", "crates/bevyout-core", "crates/bevyout-xatlas"]
 exclude = ["NifConverter/nifty"]
 resolver = "3"
 
@@ -14,9 +14,13 @@ default = []
 # The Bevy 0.18-only upstream plugin is intentionally not enabled; the viewer
 # adapter owns the Bevy 0.19 integration and keeps the default build Yarn-free.
 dialogue-yarn = ["dep:yarnspinner"]
+# Solari is an optional GPU infrastructure dependency. The auto bake selector
+# prefers it when the build includes the feature and falls back to CPU.
+lightmap-gpu-solari = ["bevy/bevy_solari"]
 
 [dependencies]
 bevyout-core = { path = "crates/bevyout-core" }
+bevyout-xatlas = { path = "crates/bevyout-xatlas" }
 # WAV covers the ambient and interaction clips staged by the importer, while
 # Vorbis enables the original Fallout OGG voice assets. MP3 metadata is
 # retained in manifests, but Bevy's MP3 feature currently resolves to an
@@ -50,11 +54,14 @@ gltf = { version = "1.4", default-features = false, features = [
   "KHR_materials_volume",
 ] }
 hound = "3.5.1"
+half = "2.7"
 image = { version = "0.25", default-features = false, features = [
   "dds",
+  "hdr",
   "png",
 ] }
 libc = "0.2"
+ktx2 = "0.5.0"
 lewton = "0.10.2"
 nalgebra = "0.34"
 nif = { git = "https://github.com/kelo221/nifty.git", rev = "17f5769", default-features = false, features = [

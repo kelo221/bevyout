@@ -6,6 +6,10 @@ fn bake(revision: &str, job_fingerprint: &str) -> PreparedBake {
         bake_revision: Some(revision.into()),
         source_fingerprint: job_fingerprint.into(),
         scene_path: "scenes/00000001/baked/scene.glb".into(),
+        lightmaps: Vec::new(),
+        lightmap_variance_pages: Vec::new(),
+        lightmap_bindings: Vec::new(),
+        bake_settings: Default::default(),
         irradiance_volume: None,
     }
 }

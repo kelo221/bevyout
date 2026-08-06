@@ -76,5 +76,52 @@ fn transient_diffuse_annotation_is_consumed() {
         document["materials"][0]["pbrMetallicRoughness"]["metallicFactor"],
         1.0
     );
-    assert!(document["materials"][0].get("extras").is_none());
+    let semantics = &document["materials"][0]["extras"][FALLOUT_MATERIAL_EXTRA];
+    assert_eq!(semantics["schema"], 2);
+    assert_eq!(semantics["glossiness_exponent"], 10.0);
+}
+
+#[test]
+fn native_material_metadata_preserves_authored_glossiness() {
+    let source = synthetic_glb(serde_json::json!({
+        "asset": {"version": "2.0"},
+        "materials": [{
+            "extras": {FALLOUT_MATERIAL_EXTRA: {"schema": 1, "shader_type": 0}},
+            "pbrMetallicRoughness": {"roughnessFactor": 0.42}
+        }]
+    }));
+    let table = MetallicMaterialTable::default();
+    let patched =
+        patch_glb_material_policy_with_glossiness(&source, &table, Some(&[128.0])).unwrap();
+    let json_length = u32::from_le_bytes(patched[12..16].try_into().unwrap()) as usize;
+    let document: serde_json::Value =
+        serde_json::from_slice(&patched[20..20 + json_length]).unwrap();
+    let semantics = &document["materials"][0]["extras"][FALLOUT_MATERIAL_EXTRA];
+    assert_eq!(semantics["schema"], 2);
+    assert_eq!(semantics["shader_type"], 0);
+    assert_eq!(semantics["glossiness_exponent"], 128.0);
+}
+
+#[test]
+fn blender_string_metadata_consumes_transient_glossiness() {
+    let source = synthetic_glb(serde_json::json!({
+        "asset": {"version": "2.0"},
+        "materials": [{
+            "extras": {
+                GLOSSINESS_EXTRA: 4.0,
+                FALLOUT_MATERIAL_EXTRA: "{\"schema\":1,\"shader_type\":0}"
+            },
+            "pbrMetallicRoughness": {"roughnessFactor": 1.0}
+        }]
+    }));
+    let patched = patch_glb_material_policy(&source, &MetallicMaterialTable::default()).unwrap();
+    let json_length = u32::from_le_bytes(patched[12..16].try_into().unwrap()) as usize;
+    let document: serde_json::Value =
+        serde_json::from_slice(&patched[20..20 + json_length]).unwrap();
+    let extras = document["materials"][0]["extras"].as_object().unwrap();
+    assert!(!extras.contains_key(GLOSSINESS_EXTRA));
+    let semantics: serde_json::Value =
+        serde_json::from_str(extras[FALLOUT_MATERIAL_EXTRA].as_str().unwrap()).unwrap();
+    assert_eq!(semantics["schema"], 2);
+    assert_eq!(semantics["glossiness_exponent"], 4.0);
 }

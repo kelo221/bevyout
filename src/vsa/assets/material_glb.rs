@@ -4,10 +4,21 @@ use super::*;
 
 const DIFFUSE_PATH_EXTRA: &str = "bevyout_diffuse_texture_path";
 const ROUGHNESS_EXTRA: &str = "bevyout_perceptual_roughness";
+const GLOSSINESS_EXTRA: &str = "bevyout_glossiness_exponent";
+const FALLOUT_MATERIAL_EXTRA: &str = "bevyout_fallout_material";
 
+#[cfg(test)]
 pub(crate) fn patch_glb_material_policy(
     bytes: &[u8],
     table: &MetallicMaterialTable,
+) -> Result<Vec<u8>> {
+    patch_glb_material_policy_with_glossiness(bytes, table, None)
+}
+
+pub(crate) fn patch_glb_material_policy_with_glossiness(
+    bytes: &[u8],
+    table: &MetallicMaterialTable,
+    glossiness_exponents: Option<&[f32]>,
 ) -> Result<Vec<u8>> {
     if bytes.len() < 20 || &bytes[0..4] != b"glTF" {
         bail!("material policy received an invalid GLB header");
@@ -52,10 +63,21 @@ pub(crate) fn patch_glb_material_policy(
         .get_mut("materials")
         .and_then(serde_json::Value::as_array_mut)
     {
-        for material in materials {
+        for (material_index, material) in materials.iter_mut().enumerate() {
             let Some(material_object) = material.as_object_mut() else {
                 continue;
             };
+            let annotated_glossiness = material_object
+                .get("extras")
+                .and_then(serde_json::Value::as_object)
+                .and_then(|extras| extras.get(GLOSSINESS_EXTRA))
+                .and_then(serde_json::Value::as_f64)
+                .map(|value| value as f32);
+            let glossiness = sanitized_glossiness_exponent(
+                glossiness_exponents
+                    .and_then(|values| values.get(material_index).copied())
+                    .or(annotated_glossiness),
+            );
             let annotated_path = material_object
                 .get("extras")
                 .and_then(serde_json::Value::as_object)
@@ -86,9 +108,45 @@ pub(crate) fn patch_glb_material_policy(
             {
                 extras.remove(DIFFUSE_PATH_EXTRA);
                 extras.remove(ROUGHNESS_EXTRA);
+                extras.remove(GLOSSINESS_EXTRA);
+                let encoded_as_string = extras
+                    .get(FALLOUT_MATERIAL_EXTRA)
+                    .is_some_and(serde_json::Value::is_string);
+                let mut semantics = extras
+                    .get(FALLOUT_MATERIAL_EXTRA)
+                    .and_then(|value| match value {
+                        serde_json::Value::Object(_) => Some(value.clone()),
+                        serde_json::Value::String(value) => serde_json::from_str(value).ok(),
+                        _ => None,
+                    })
+                    .unwrap_or_else(|| serde_json::json!({}));
+                let semantics_object = semantics
+                    .as_object_mut()
+                    .context("Fallout material metadata is not an object")?;
+                semantics_object.insert("schema".into(), serde_json::Value::from(2));
+                semantics_object.insert(
+                    "glossiness_exponent".into(),
+                    serde_json::Value::from(glossiness),
+                );
+                let semantics = if encoded_as_string {
+                    serde_json::Value::String(serde_json::to_string(&semantics)?)
+                } else {
+                    semantics
+                };
+                extras.insert(FALLOUT_MATERIAL_EXTRA.into(), semantics);
                 if extras.is_empty() {
                     material_object.remove("extras");
                 }
+            } else {
+                material_object.insert(
+                    "extras".into(),
+                    serde_json::json!({
+                        FALLOUT_MATERIAL_EXTRA: {
+                            "schema": 2,
+                            "glossiness_exponent": glossiness,
+                        }
+                    }),
+                );
             }
         }
     }

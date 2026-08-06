@@ -1,5 +1,5 @@
 use super::*;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 #[test]
 fn view_and_render_validate_day_night_cycle_duration() {
@@ -264,9 +264,79 @@ fn static_batch_chunk_size_defaults_to_64_metres_and_enforces_bounds() {
     let CommandLine::Bake(args) = cli.command else {
         panic!("expected bake command");
     };
-    assert_eq!(args.static_batch_chunk_meters, 64.0);
+    assert_eq!(args.static_batch_chunk_meters, None);
+    assert_eq!(args.lightmap_backend, LightmapBackendPreference::Auto);
+    assert!(args.lightmap_environment_map.is_none());
     assert_eq!(args.irradiance_spacing_meters, 8.0);
     assert_eq!(args.irradiance_samples, 64);
+    assert_eq!(args.lightmap_min_samples, 8);
+    assert_eq!(args.lightmap_max_samples, 8);
+    assert_eq!(args.lightmap_variance_threshold, 0.0);
+    assert_eq!(args.lightmap_bounces, 1);
+    assert_eq!(args.lightmap_texels_per_meter, None);
+    assert!(args.lightmap_density_overrides.is_empty());
+    assert!(!args.lightmap_debug_uv);
+    assert!(!args.lightmap_debug_samples);
+    assert!(!args.lightmap_debug_variance);
+    assert_eq!(args.lightmap_tile_size, None);
+    assert_eq!(args.lightmap_denoise_iterations, 1);
+    assert!(!args.lightmap_force_retrace);
+    assert!(
+        Cli::try_parse_from([
+            "bevyout",
+            "bake",
+            "--manifest",
+            "scene.ron",
+            "--lightmap-bounces",
+            "8",
+        ])
+        .is_ok()
+    );
+    assert!(
+        Cli::try_parse_from([
+            "bevyout",
+            "bake",
+            "--manifest",
+            "scene.ron",
+            "--lightmap-bounces",
+            "9",
+        ])
+        .is_err()
+    );
+    let cli = Cli::try_parse_from([
+        "bevyout",
+        "bake",
+        "--manifest",
+        "scene.ron",
+        "--lightmap-density",
+        "000151e3=32",
+    ])
+    .unwrap();
+    let CommandLine::Bake(args) = cli.command else {
+        panic!("expected bake command");
+    };
+    assert_eq!(args.lightmap_density_overrides.len(), 1);
+    assert_eq!(
+        args.lightmap_density_overrides[0].reference_form_id,
+        0x0001_51e3
+    );
+    assert_eq!(args.lightmap_density_overrides[0].texels_per_meter, 32.0);
+    let cli = Cli::try_parse_from([
+        "bevyout",
+        "bake",
+        "--manifest",
+        "scene.ron",
+        "--lightmap-debug-uv",
+        "--lightmap-debug-samples",
+        "--lightmap-debug-variance",
+    ])
+    .unwrap();
+    let CommandLine::Bake(args) = cli.command else {
+        panic!("expected bake command");
+    };
+    assert!(args.lightmap_debug_uv);
+    assert!(args.lightmap_debug_samples);
+    assert!(args.lightmap_debug_variance);
     assert!(
         Cli::try_parse_from([
             "bevyout",
@@ -331,6 +401,110 @@ fn static_batch_chunk_size_defaults_to_64_metres_and_enforces_bounds() {
             .is_err()
         );
     }
+
+    for value in ["15", "24", "1024"] {
+        assert!(
+            Cli::try_parse_from([
+                "bevyout",
+                "bake",
+                "--manifest",
+                "scene.ron",
+                "--lightmap-tile-size",
+                value,
+            ])
+            .is_err()
+        );
+    }
+    let cli = Cli::try_parse_from([
+        "bevyout",
+        "bake",
+        "--manifest",
+        "scene.ron",
+        "--lightmap-force-retrace",
+    ])
+    .unwrap();
+    let CommandLine::Bake(args) = cli.command else {
+        panic!("expected bake command");
+    };
+    assert!(args.lightmap_force_retrace);
+}
+
+#[test]
+fn progress_mode_parses_all_values_and_defaults_to_auto() {
+    let cli = Cli::try_parse_from(["bevyout", "prepare", "SuperDuperMart"]).unwrap();
+    let CommandLine::Prepare(args) = cli.command else {
+        panic!("expected prepare command");
+    };
+    assert_eq!(args.progress.mode, ProgressMode::Auto);
+
+    for (value, expected) in [
+        ("auto", ProgressMode::Auto),
+        ("tty", ProgressMode::Tty),
+        ("plain", ProgressMode::Plain),
+        ("off", ProgressMode::Off),
+    ] {
+        let cli = Cli::try_parse_from([
+            "bevyout",
+            "bake",
+            "--manifest",
+            "scene.ron",
+            "--progress",
+            value,
+        ])
+        .unwrap();
+        let CommandLine::Bake(args) = cli.command else {
+            panic!("expected bake command");
+        };
+        assert_eq!(args.progress.mode, expected);
+    }
+
+    assert!(
+        Cli::try_parse_from([
+            "bevyout",
+            "prepare",
+            "SuperDuperMart",
+            "--progress",
+            "invalid",
+        ])
+        .is_err()
+    );
+}
+
+#[test]
+fn bake_backend_accepts_explicit_solari_prototype_request() {
+    let cli = Cli::try_parse_from([
+        "bevyout",
+        "bake",
+        "--manifest",
+        "scene.ron",
+        "--bake-backend",
+        "solari",
+    ])
+    .unwrap();
+    let CommandLine::Bake(args) = cli.command else {
+        panic!("expected bake command");
+    };
+    assert_eq!(args.lightmap_backend, LightmapBackendPreference::Solari);
+}
+
+#[test]
+fn bake_accepts_an_authored_hdr_environment_map() {
+    let cli = Cli::try_parse_from([
+        "bevyout",
+        "bake",
+        "--manifest",
+        "scene.ron",
+        "--lightmap-environment-map",
+        "lighting/interior.hdr",
+    ])
+    .unwrap();
+    let CommandLine::Bake(args) = cli.command else {
+        panic!("expected bake command");
+    };
+    assert_eq!(
+        args.lightmap_environment_map,
+        Some(PathBuf::from("lighting/interior.hdr"))
+    );
 }
 
 #[test]

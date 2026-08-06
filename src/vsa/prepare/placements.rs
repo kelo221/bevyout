@@ -486,6 +486,8 @@ pub(crate) fn stage_placements(
         if base.kind == "LIGH" {
             let light = base.light.as_ref();
             let radius = light.map_or(5.0, |light| light.radius * FO3_SCALE);
+            let light_flags = light.map_or(0, |light| light.flags);
+            let is_spot = light_flags & 0x200 != 0;
             lights.push(PreparedLight {
                 reference_form_id: reference.form_id,
                 base_form_id: reference.base_form_id,
@@ -494,8 +496,24 @@ pub(crate) fn stage_placements(
                 color_rgba: light.map_or([1.0, 0.78, 0.55, 1.0], |light| light.color_rgba),
                 radius: radius.max(0.1),
                 intensity_lumens: radius.max(0.1) * radius.max(0.1) * 2.0 * 8192.0,
-                kind: "point".into(),
-                flags: 0,
+                kind: if is_spot { "spot" } else { "point" }.into(),
+                flags: light_flags,
+                spot_fov_radians: if is_spot {
+                    light.map_or(0.0, |light| {
+                        if light.fov.is_finite() {
+                            light.fov.to_radians().clamp(0.0, std::f32::consts::PI)
+                        } else {
+                            0.0
+                        }
+                    })
+                } else {
+                    0.0
+                },
+                spot_falloff_exponent: if is_spot {
+                    light.map_or(0.0, |light| light.falloff_exponent.max(0.0))
+                } else {
+                    0.0
+                },
                 initially_enabled: reference.initially_enabled,
             });
         }

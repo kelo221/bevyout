@@ -201,6 +201,9 @@ pub(crate) struct BaseAudioRecord {
 pub(crate) struct LightData {
     pub(crate) radius: f32,
     pub(crate) color_rgba: [f32; 4],
+    pub(crate) flags: u32,
+    pub(crate) falloff_exponent: f32,
+    pub(crate) fov: f32,
 }
 
 #[derive(Debug, Clone, Default)]

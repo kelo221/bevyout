@@ -88,12 +88,18 @@ fn pbr_input_from_standard_material(
         pbr_bindings::material_array[material_indices[slot].material].deferred_lighting_pass_id;
     let fallout_surface_kind =
         pbr_bindings::material_array[material_indices[slot].material].fallout_surface_kind;
+    let fallout_glossiness_exponent =
+        pbr_bindings::material_array[material_indices[slot].material].fallout_glossiness_exponent;
+    let fallout_chan_strength =
+        pbr_bindings::material_array[material_indices[slot].material].fallout_chan_strength;
     let alpha_cutoff = pbr_bindings::material_array[material_indices[slot].material].alpha_cutoff;
 #else   // BINDLESS
     let flags = pbr_bindings::material.flags;
     let base_color = pbr_bindings::material.base_color;
     let deferred_lighting_pass_id = pbr_bindings::material.deferred_lighting_pass_id;
     let fallout_surface_kind = pbr_bindings::material.fallout_surface_kind;
+    let fallout_glossiness_exponent = pbr_bindings::material.fallout_glossiness_exponent;
+    let fallout_chan_strength = pbr_bindings::material.fallout_chan_strength;
     let alpha_cutoff = pbr_bindings::material.alpha_cutoff;
 #endif
 
@@ -104,6 +110,8 @@ fn pbr_input_from_standard_material(
     pbr_input.material.base_color *= base_color;
     pbr_input.material.deferred_lighting_pass_id = deferred_lighting_pass_id;
     pbr_input.material.fallout_surface_kind = fallout_surface_kind;
+    pbr_input.material.fallout_glossiness_exponent = fallout_glossiness_exponent;
+    pbr_input.material.fallout_chan_strength = fallout_chan_strength;
 
     // Neubelt and Pettineo 2013, "Crafting a Next-gen Material Pipeline for The Order: 1886"
     let NdotV = max(dot(pbr_input.N, pbr_input.V), 0.0001);

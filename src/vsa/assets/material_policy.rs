@@ -3,7 +3,8 @@
 use std::collections::BTreeMap;
 
 pub(crate) const DEFAULT_GLOSSINESS_EXPONENT: f32 = 10.0;
-pub(crate) const MATERIAL_POLICY_REVISION: &str = "fallout-pbr-materials-v6-1.75x-roughness";
+pub(crate) const MATERIAL_POLICY_REVISION: &str =
+    "fallout-pbr-materials-v7-legacy-glossiness-v1-1.75x-roughness";
 pub(crate) const METALLIC_MATERIALS_CSV: &str = include_str!("metallic_materials.csv");
 
 /// Converts a Blinn-Phong exponent into tuned glTF/Bevy perceptual GGX roughness.
@@ -11,10 +12,33 @@ pub(crate) const METALLIC_MATERIALS_CSV: &str = include_str!("metallic_materials
 /// Preserve Fallout's authored gloss hierarchy while translating its
 /// Blinn-Phong exponent to glTF/Bevy perceptual GGX roughness with a 1.75x modifier.
 pub(crate) fn perceptual_roughness_from_glossiness(glossiness: Option<f32>) -> f32 {
-    let exponent = glossiness
-        .filter(|value| value.is_finite() && *value >= 0.0)
-        .unwrap_or(DEFAULT_GLOSSINESS_EXPONENT);
+    let exponent = sanitized_glossiness_exponent(glossiness);
     (1.75 * (2.0 / (exponent + 2.0)).powf(0.25)).clamp(0.0, 1.0)
+}
+
+/// Preserves a usable Fallout Blinn-Phong exponent for legacy direct lighting.
+pub(crate) fn sanitized_glossiness_exponent(glossiness: Option<f32>) -> f32 {
+    glossiness
+        .filter(|value| value.is_finite() && *value >= 0.0)
+        .unwrap_or(DEFAULT_GLOSSINESS_EXPONENT)
+}
+
+/// Converts Fallout's Blinn-Phong exponent into the matching micro-roughness.
+#[allow(dead_code)] // Canonical CPU mirror of the direct-light WGSL policy.
+pub(crate) fn legacy_micro_roughness_from_glossiness(glossiness: Option<f32>) -> f32 {
+    let exponent = sanitized_glossiness_exponent(glossiness);
+    (2.0 / (exponent + 2.0)).sqrt()
+}
+
+/// Scales the authored-material Chan contribution by the viewer master control.
+#[allow(dead_code)] // Canonical CPU mirror of the direct-light WGSL policy.
+pub(crate) fn legacy_chan_weight(glossiness: Option<f32>, master_strength: f32) -> f32 {
+    let master_strength = if master_strength.is_finite() {
+        master_strength.clamp(0.0, 1.0)
+    } else {
+        1.0
+    };
+    (legacy_micro_roughness_from_glossiness(glossiness) * master_strength).clamp(0.0, 1.0)
 }
 
 /// Selects Fallout 3's authored specular-strength payload.

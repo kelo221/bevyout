@@ -3,7 +3,10 @@
 use super::*;
 use crate::viewer::day_night::{DayNightPreview, GameClock, WeatherTransition, profile_for_cell};
 use crate::viewer::world::exterior::ExteriorWorldspaceLodSettings;
-use crate::viewer::{ImageSpaceBloomOverrides, LoadedSceneManifest, image_space_bloom_values};
+use crate::viewer::{
+    ImageSpaceBloomOverrides, LegacyChanSettings, LoadedSceneManifest, OverlayLightingSettings,
+    image_space_bloom_values,
+};
 use bevy::pbr::{MeshMaterial3d, StandardMaterial};
 
 pub(super) struct RenderCommandProvider;
@@ -240,7 +243,7 @@ fn toggle_reflection_probe_debug(
     ))
 }
 
-pub(super) const RENDER_SETTINGS: [&str; 19] = [
+pub(super) const RENDER_SETTINGS: [&str; 23] = [
     "lighting",
     "irradiance",
     "ambient",
@@ -254,11 +257,15 @@ pub(super) const RENDER_SETTINGS: [&str; 19] = [
     "metallic",
     "dielectric_specular",
     "roughness_scale",
+    "chan_strength",
     "shadow_samples",
     "realtime_shadows",
     "worldspace_lod",
     "reflection_probes",
     "reflection_probe_strength",
+    "overlay_lightmaps",
+    "overlay_shadows",
+    "overlay_reflections",
     "day_night_preview",
 ];
 
@@ -449,6 +456,10 @@ pub(super) fn render_values(world: &mut World) -> Result<Map<String, Value>, Con
         json!(world.resource::<MaterialClampSettings>().roughness_scale()),
     );
     values.insert(
+        "chan_strength".into(),
+        json!(world.resource::<LegacyChanSettings>().strength()),
+    );
+    values.insert(
         "shadow_samples".into(),
         json!(world.resource::<PointLightShadowSamples>().0),
     );
@@ -467,6 +478,19 @@ pub(super) fn render_values(world: &mut World) -> Result<Map<String, Value>, Con
     values.insert(
         "reflection_probe_strength".into(),
         json!(world.resource::<ReflectionProbeSettings>().strength()),
+    );
+    values.insert("overlay_lightmaps".into(), json!(0));
+    values.insert(
+        "overlay_shadows".into(),
+        json!(
+            world
+                .resource::<OverlayLightingSettings>()
+                .realtime_shadows() as u8
+        ),
+    );
+    values.insert(
+        "overlay_reflections".into(),
+        json!(world.resource::<OverlayLightingSettings>().reflections() as u8),
     );
     values.insert(
         "day_night_preview".into(),
@@ -558,11 +582,15 @@ pub(super) fn render_setting_label(setting: &str) -> &'static str {
         "metallic" => "Metallic material gate",
         "dielectric_specular" => "Dielectric specular gate",
         "roughness_scale" => "Material roughness scale",
+        "chan_strength" => "Legacy-world Chan strength",
         "shadow_samples" => "Point-shadow samples per pixel",
         "realtime_shadows" => "Realtime point shadows",
         "worldspace_lod" => "Far worldspace LOD",
         "reflection_probes" => "Prepared reflection probes",
         "reflection_probe_strength" => "Reflection probe strength",
+        "overlay_lightmaps" => "Overlay prepared lightmaps",
+        "overlay_shadows" => "Overlay realtime shadows",
+        "overlay_reflections" => "Overlay reflections",
         "day_night_preview" => "Day/night preview",
         _ => "Render setting",
     }
@@ -631,7 +659,7 @@ pub(super) fn set_render(
         "lighting" => (0.0001..=262_144.0).contains(&value),
         "irradiance" => (0.0..=4096.0).contains(&value),
         "ambient" => (0.0001..=4096.0).contains(&value),
-        "bloom_intensity" | "bloom_softness" | "fog" | "ao" | "emission" => {
+        "bloom_intensity" | "bloom_softness" | "fog" | "ao" | "emission" | "chan_strength" => {
             (0.0..=1.0).contains(&value)
         }
         "volumetric_fog" => (0.0..=100.0).contains(&value),
@@ -646,6 +674,9 @@ pub(super) fn set_render(
         | "realtime_shadows"
         | "worldspace_lod"
         | "reflection_probes"
+        | "overlay_lightmaps"
+        | "overlay_shadows"
+        | "overlay_reflections"
         | "day_night_preview" => value == 0.0 || value == 1.0,
         _ => unreachable!(),
     };
@@ -653,6 +684,12 @@ pub(super) fn set_render(
         return Err(ConsoleError::new(
             "out_of_range",
             format!("value {value} is outside the supported range for {setting}"),
+        ));
+    }
+    if setting == "overlay_lightmaps" && value == 1.0 {
+        return Err(ConsoleError::new(
+            "requires_rebuild",
+            "Fallout overlays are intentionally excluded from prepared lightmaps; enabling them requires a legacy bake",
         ));
     }
 
@@ -673,6 +710,14 @@ pub(super) fn set_render(
         "roughness_scale" => world
             .resource_mut::<MaterialClampSettings>()
             .set_roughness_scale(value),
+        "chan_strength" => {
+            let current = world.resource::<LegacyChanSettings>().strength();
+            if current != value {
+                world
+                    .resource_mut::<LegacyChanSettings>()
+                    .set_strength(value);
+            }
+        }
         "shadow_samples" => world.resource_mut::<PointLightShadowSamples>().0 = value as u32,
         "realtime_shadows" => {
             world.resource_mut::<RealtimeShadowSettings>().enabled = value == 1.0;
@@ -688,6 +733,13 @@ pub(super) fn set_render(
         "reflection_probe_strength" => world
             .resource_mut::<ReflectionProbeSettings>()
             .set_strength(value),
+        "overlay_lightmaps" => {}
+        "overlay_shadows" => world
+            .resource_mut::<OverlayLightingSettings>()
+            .set_realtime_shadows(value == 1.0),
+        "overlay_reflections" => world
+            .resource_mut::<OverlayLightingSettings>()
+            .set_reflections(value == 1.0),
         "day_night_preview" => {
             if let Some(mut preview) = world.get_resource_mut::<DayNightPreview>() {
                 preview.0 = value == 1.0;

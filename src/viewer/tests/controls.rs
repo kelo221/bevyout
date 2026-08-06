@@ -412,7 +412,7 @@ fn reflection_probe_settings_preserve_strength_across_the_gate_and_catch_late_pr
             .get::<EnvironmentMapLight>()
             .unwrap()
             .intensity,
-        PREPARED_REFLECTION_PROBE_INTENSITY * 100.0
+        PREPARED_REFLECTION_PROBE_INTENSITY * 10.0
     );
 
     app.world_mut()
@@ -479,6 +479,42 @@ fn reflection_probe_settings_preserve_strength_across_the_gate_and_catch_late_pr
             .unwrap()
             .intensity,
         PREPARED_REFLECTION_PROBE_INTENSITY * 2.5
+    );
+}
+
+#[test]
+fn lighting_scale_reuses_prepared_point_light_intensity() {
+    let mut app = App::new();
+    app.add_plugins(MinimalPlugins)
+        .insert_resource(LightingScale(128.0))
+        .insert_resource(AmbientScale(1.0))
+        .insert_resource(LightsDisabled(false))
+        .insert_resource(GlobalAmbientLight::default())
+        .add_systems(Update, apply_lighting_scale);
+    let entity = app
+        .world_mut()
+        .spawn((
+            PointLight {
+                range: 4.0,
+                ..default()
+            },
+            PreparedPointLightIntensity {
+                radius: 4.0,
+                intensity_lumens: 8_192.0,
+            },
+        ))
+        .id();
+
+    app.update();
+    assert_eq!(
+        app.world().get::<PointLight>(entity).unwrap().intensity,
+        128.0
+    );
+    app.world_mut().resource_mut::<LightingScale>().0 = 64.0;
+    app.update();
+    assert_eq!(
+        app.world().get::<PointLight>(entity).unwrap().intensity,
+        64.0
     );
 }
 

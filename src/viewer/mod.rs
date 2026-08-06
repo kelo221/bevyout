@@ -33,6 +33,9 @@ use crate::cli::{ActorAnimationConverter, BakeArgs, PrepareArgs, RenderArgs, Vie
 #[cfg(test)]
 use crate::vsa::PREPARED_CONVERTER_REVISION;
 use bevyout_core::actor_animation::{PreparedActorAnimationKind, PreparedActorAnimationSet};
+pub(crate) use bevyout_core::lighting::{
+    CELL_DIRECTIONAL_ILLUMINANCE, DEFAULT_LIGHTING_SCALE, point_light_intensity,
+};
 
 use crate::vsa::{
     ACTOR_ANIMATION_CATALOG_REVISION, CellInfo, FO3_SCALE, ITEM_CATALOG_REVISION, ImageSpaceInfo,
@@ -102,8 +105,6 @@ pub(crate) use lighting::*;
 pub use ragdoll_lab::ragdoll_lab;
 pub(crate) use scene::*;
 
-const DEFAULT_LIGHTING_SCALE: f32 = 128.0;
-const CELL_DIRECTIONAL_ILLUMINANCE: f32 = 10_000.0;
 const DEFAULT_FOG_STRENGTH: f32 = 0.01;
 const RENDER_REPORT_HISTORY: usize = 600;
 /// Runtime point-shadow cubemap face size. Prepared/baked shadow artifacts
@@ -685,6 +686,7 @@ fn prepare_args_for_render(
     actor_animation_converter: ActorAnimationConverter,
 ) -> PrepareArgs {
     PrepareArgs {
+        progress: args.progress.clone(),
         selectors: vec![args.selector.clone()],
         all: false,
         all_interiors: false,
@@ -733,14 +735,32 @@ fn prepare_for_render_with_converter(
 
 fn bake_for_render(args: &RenderArgs, cache_dir: &Path) -> Result<()> {
     bake(BakeArgs {
+        progress: args.progress.clone(),
         manifest: None,
         selector: Some(args.selector.clone()),
         all_interiors: false,
         retry_failed: false,
         cache_dir: Some(cache_dir.to_path_buf()),
+        lightmap_backend: crate::cli::LightmapBackendPreference::Auto,
+        lightmap_environment_map: None,
         irradiance_spacing_meters: 8.0,
         irradiance_samples: 64,
-        static_batch_chunk_meters: 64.0,
+        lightmap_min_samples: 8,
+        lightmap_max_samples: 8,
+        lightmap_variance_threshold: 0.0,
+        lightmap_bounces: 1,
+        // Let the selected bake backend choose its density. The GPU path uses
+        // its fast default and the bake path can lower it automatically if a
+        // large primitive still exceeds the atlas page limit.
+        lightmap_texels_per_meter: None,
+        lightmap_density_overrides: Vec::new(),
+        lightmap_debug_uv: false,
+        lightmap_debug_samples: false,
+        lightmap_debug_variance: false,
+        lightmap_denoise_iterations: 1,
+        lightmap_tile_size: None,
+        lightmap_force_retrace: false,
+        static_batch_chunk_meters: None,
         toktx: args.toktx.clone(),
         force: false,
         keep_intermediate: false,

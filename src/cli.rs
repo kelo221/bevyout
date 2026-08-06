@@ -1,5 +1,16 @@
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 use std::path::PathBuf;
+
+pub mod progress;
+
+pub use progress::ProgressMode;
+
+#[derive(Args, Clone, Debug, Default)]
+pub(crate) struct ProgressArgs {
+    /// Progress output policy. Progress is written to stderr.
+    #[arg(long = "progress", value_enum, default_value_t = ProgressMode::Auto)]
+    pub(crate) mode: ProgressMode,
+}
 
 #[derive(Parser, Debug)]
 #[command(
@@ -52,6 +63,22 @@ pub enum CommandLine {
     /// Print a prepared exterior worldspace index in stable catalog form.
     #[command(name = "exterior-catalog")]
     ExteriorCatalog(ExteriorCatalogArgs),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+pub enum LightmapBackendPreference {
+    /// Select GPU Solari when this build supports it, then fall back to CPU.
+    Auto,
+    /// Use the deterministic CPU reference backend.
+    Cpu,
+    /// Request the optional Solari-backed GPU prototype.
+    Solari,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct LightmapDensityOverrideArg {
+    pub(crate) reference_form_id: u32,
+    pub(crate) texels_per_meter: f32,
 }
 
 #[derive(Parser, Debug, Clone)]
@@ -186,6 +213,8 @@ pub struct ScriptRunArgs {
 
 #[derive(Parser, Debug, Clone)]
 pub struct PrepareArgs {
+    #[command(flatten)]
+    pub(crate) progress: ProgressArgs,
     /// GECK EditorID, or an eight-digit hexadecimal FormID. May be repeated to
     /// prepare several cells in one run.
     #[arg(value_name = "EDITOR_ID", conflicts_with_all = ["cell", "all"])]
@@ -386,6 +415,8 @@ pub struct AnimationZooArgs {
 
 #[derive(Parser, Debug)]
 pub struct RenderArgs {
+    #[command(flatten)]
+    pub(crate) progress: ProgressArgs,
     /// GECK EditorID, or an eight-digit hexadecimal FormID.
     #[arg(value_name = "EDITOR_ID")]
     pub(crate) selector: String,
@@ -440,6 +471,8 @@ pub struct RenderArgs {
 
 #[derive(Parser, Debug)]
 pub struct BakeArgs {
+    #[command(flatten)]
+    pub(crate) progress: ProgressArgs,
     /// Prepared scene manifest to bake. The final bake metadata is written back to it.
     #[arg(long, conflicts_with = "selector")]
     pub(crate) manifest: Option<PathBuf>,
@@ -461,6 +494,14 @@ pub struct BakeArgs {
     /// Prepared scene cache directory used by selector-based and batch baking.
     #[arg(long)]
     pub(crate) cache_dir: Option<PathBuf>,
+    /// Lightmap transport backend. Auto prefers GPU Solari and falls back to
+    /// the deterministic CPU reference backend when GPU support is unavailable.
+    #[arg(long = "bake-backend", value_enum, default_value_t = LightmapBackendPreference::Auto)]
+    pub(crate) lightmap_backend: LightmapBackendPreference,
+    /// Optional authored equirectangular HDR environment map used additively
+    /// with the prepared cell ambient during CPU light transport.
+    #[arg(long = "lightmap-environment-map", value_name = "FILE.hdr")]
+    pub(crate) lightmap_environment_map: Option<PathBuf>,
     /// World-space distance between irradiance probes, in metres.
     #[arg(
         long,
@@ -475,13 +516,76 @@ pub struct BakeArgs {
         value_parser = parse_irradiance_samples
     )]
     pub(crate) irradiance_samples: u32,
-    /// World-space size of material-compatible static geometry batches, in metres.
+    /// Minimum surface-lightmap samples per covered texel. The GPU-fast
+    /// default uses fixed eight-sample transport.
     #[arg(
         long,
-        default_value_t = 64.0,
-        value_parser = parse_static_batch_chunk_meters
+        default_value_t = 8,
+        value_parser = parse_lightmap_sample_count
     )]
-    pub(crate) static_batch_chunk_meters: f32,
+    pub(crate) lightmap_min_samples: u32,
+    /// Maximum surface-lightmap samples per covered texel. Keep this equal to
+    /// the minimum for the Solari GPU backend.
+    #[arg(
+        long,
+        default_value_t = 8,
+        value_parser = parse_lightmap_sample_count
+    )]
+    pub(crate) lightmap_max_samples: u32,
+    /// Relative per-texel variance threshold for adaptive surface sampling.
+    /// Zero is the GPU-compatible fixed-sampling default.
+    #[arg(
+        long,
+        default_value_t = 0.0,
+        value_parser = parse_lightmap_variance_threshold
+    )]
+    pub(crate) lightmap_variance_threshold: f32,
+    /// Number of secondary diffuse surfaces sampled by each surface-lightmap texel.
+    #[arg(
+        long,
+        default_value_t = 1,
+        value_parser = parse_lightmap_bounce_count
+    )]
+    pub(crate) lightmap_bounces: u32,
+    /// Surface-lightmap texel density in texels per world-space metre.
+    /// When omitted, CPU uses 16, Solari uses a fast 4-texel preset, and Auto
+    /// follows the backend it selects.
+    #[arg(long, value_parser = parse_lightmap_texels_per_meter)]
+    pub(crate) lightmap_texels_per_meter: Option<f32>,
+    /// Per-placement density override in the form FORM_ID=TEXELS_PER_METER.
+    /// May be repeated; overrides are keyed by the prepared reference FormID.
+    #[arg(long = "lightmap-density", value_parser = parse_lightmap_density_override)]
+    pub(crate) lightmap_density_overrides: Vec<LightmapDensityOverrideArg>,
+    /// Write per-page chart/coverage debug images.
+    #[arg(long)]
+    pub(crate) lightmap_debug_uv: bool,
+    /// Write per-page adaptive sample-count debug images.
+    #[arg(long)]
+    pub(crate) lightmap_debug_samples: bool,
+    /// Write per-page relative-variance debug images.
+    #[arg(long)]
+    pub(crate) lightmap_debug_variance: bool,
+    /// Feature-guided A-Trous surface-lightmap denoising passes. Zero disables
+    /// denoising; each additional pass doubles the filter footprint.
+    #[arg(
+        long,
+        default_value_t = 1,
+        value_parser = parse_lightmap_denoise_iterations
+    )]
+    pub(crate) lightmap_denoise_iterations: u32,
+    /// Persistent surface-lightmap accumulation tile edge in texels.
+    /// When omitted, CPU uses 128, Solari uses 512 to reduce per-dispatch
+    /// overhead, and Auto follows the backend it selects.
+    #[arg(long, value_parser = parse_lightmap_tile_size)]
+    pub(crate) lightmap_tile_size: Option<u32>,
+    /// Discard completed surface-lightmap accumulation tiles before tracing.
+    #[arg(long)]
+    pub(crate) lightmap_force_retrace: bool,
+    /// World-space size of material-compatible static geometry batches, in metres.
+    /// When omitted, CPU uses 64 m, Solari uses 32 m to keep pages within the
+    /// one-primitive atlas contract, and Auto follows the backend it selects.
+    #[arg(long, value_parser = parse_static_batch_chunk_meters)]
+    pub(crate) static_batch_chunk_meters: Option<f32>,
     /// Unified KTX-Software `ktx.exe` path (legacy option name).
     #[arg(long)]
     pub(crate) toktx: Option<PathBuf>,
@@ -561,6 +665,92 @@ fn parse_irradiance_samples(value: &str) -> Result<u32, String> {
         Ok(value)
     } else {
         Err("irradiance samples must be between 1 and 512".into())
+    }
+}
+
+fn parse_lightmap_sample_count(value: &str) -> Result<u32, String> {
+    let value = value
+        .parse::<u32>()
+        .map_err(|error| format!("invalid lightmap sample count: {error}"))?;
+    if (1..=1024).contains(&value) {
+        Ok(value)
+    } else {
+        Err("lightmap samples must be between 1 and 1024".into())
+    }
+}
+
+fn parse_lightmap_variance_threshold(value: &str) -> Result<f32, String> {
+    let value = value
+        .parse::<f32>()
+        .map_err(|error| format!("invalid lightmap variance threshold: {error}"))?;
+    if value.is_finite() && value >= 0.0 {
+        Ok(value)
+    } else {
+        Err("lightmap variance threshold must be finite and non-negative".into())
+    }
+}
+
+fn parse_lightmap_denoise_iterations(value: &str) -> Result<u32, String> {
+    let value = value
+        .parse::<u32>()
+        .map_err(|error| format!("invalid lightmap denoise iteration count: {error}"))?;
+    if value <= 5 {
+        Ok(value)
+    } else {
+        Err("lightmap denoise iterations must be between 0 and 5".into())
+    }
+}
+
+fn parse_lightmap_bounce_count(value: &str) -> Result<u32, String> {
+    let value = value
+        .parse::<u32>()
+        .map_err(|error| format!("invalid lightmap bounce count: {error}"))?;
+    if value <= 8 {
+        Ok(value)
+    } else {
+        Err("lightmap bounces must be between 0 and 8".into())
+    }
+}
+
+fn parse_lightmap_texels_per_meter(value: &str) -> Result<f32, String> {
+    let value = value
+        .parse::<f32>()
+        .map_err(|error| format!("invalid lightmap texel density: {error}"))?;
+    if value.is_finite() && (1.0..=128.0).contains(&value) {
+        Ok(value)
+    } else {
+        Err("lightmap texel density must be between 1 and 128 texels per metre".into())
+    }
+}
+
+fn parse_lightmap_density_override(value: &str) -> Result<LightmapDensityOverrideArg, String> {
+    let (form_id, density) = value
+        .split_once('=')
+        .ok_or_else(|| "lightmap density must be FORM_ID=TEXELS_PER_METER".to_string())?;
+    let form_id_text = form_id.trim();
+    let form_id_text = form_id_text
+        .strip_prefix("0x")
+        .or_else(|| form_id_text.strip_prefix("0X"))
+        .unwrap_or(form_id_text);
+    if form_id_text.is_empty() {
+        return Err("lightmap density override has an empty FormID".into());
+    }
+    let reference_form_id = u32::from_str_radix(form_id_text, 16)
+        .map_err(|error| format!("invalid lightmap density FormID: {error}"))?;
+    Ok(LightmapDensityOverrideArg {
+        reference_form_id,
+        texels_per_meter: parse_lightmap_texels_per_meter(density.trim())?,
+    })
+}
+
+fn parse_lightmap_tile_size(value: &str) -> Result<u32, String> {
+    let value = value
+        .parse::<u32>()
+        .map_err(|error| format!("invalid lightmap tile size: {error}"))?;
+    if (16..=512).contains(&value) && value.is_power_of_two() {
+        Ok(value)
+    } else {
+        Err("lightmap tile size must be a power of two between 16 and 512".into())
     }
 }
 

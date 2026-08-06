@@ -1,4 +1,5 @@
 use super::*;
+use crate::cli::progress::ProgressReporter;
 use crate::vsa::catalog::{CellCatalog, build_cell_map};
 use bevyout_core::actor::{
     ActorAppearanceAvailability, ActorAssemblyBlueprint as CoreActorAssemblyBlueprint,
@@ -19,6 +20,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 /// batch through `resolve_selection` (#46). Fingerprint validation must use
 /// this route even for one cell because the single-cell path prepares it.
 pub fn prepare(args: PrepareArgs) -> Result<()> {
+    let progress = ProgressReporter::new(args.progress.mode);
     let mut explicit = args.selectors.clone();
     explicit.extend(args.cell.clone());
 
@@ -29,10 +31,10 @@ pub fn prepare(args: PrepareArgs) -> Result<()> {
             .into_iter()
             .next()
             .context("provide a GECK EditorID/FormID selector or legacy --cell, or pass --all/--all-interiors/--worldspace/--retry-failed")?;
-        return prepare_single(args, selector_input);
+        return prepare_single(args, selector_input, &progress);
     }
 
-    prepare_batch(args, explicit)
+    prepare_batch(args, explicit, &progress)
 }
 
 fn prepare_requires_batch(args: &PrepareArgs, explicit_count: usize) -> bool {
@@ -49,7 +51,11 @@ fn prepare_requires_batch(args: &PrepareArgs, explicit_count: usize) -> bool {
 /// rather than duplicating the plugin-chain/BSA/audio/footstep loading
 /// `prepare_cell` needs, so its output is identical to what the previous
 /// `prepare_one` produced for a single cell (F47.1).
-fn prepare_single(args: PrepareArgs, selector_input: String) -> Result<()> {
+fn prepare_single(
+    args: PrepareArgs,
+    selector_input: String,
+    progress: &ProgressReporter,
+) -> Result<()> {
     let game_root = args
         .game_root
         .clone()
@@ -83,14 +89,22 @@ fn prepare_single(args: PrepareArgs, selector_input: String) -> Result<()> {
         fingerprint,
     )?;
     let mut output = Vec::new();
-    let result = prepare_cell(&session, args, selector_input, &mut output);
+    progress.started("Prepare", Some(1));
+    progress.phase_started("cell", Some(1));
+    let result = prepare_cell(&session, args, selector_input, &mut output, progress);
     for line in &output {
         println!("{line}");
     }
+    progress.unit_completed_in_phase("cell", Some(1), None);
+    progress.finished(result.is_ok());
     result
 }
 
-fn prepare_batch(args: PrepareArgs, explicit: Vec<String>) -> Result<()> {
+fn prepare_batch(
+    args: PrepareArgs,
+    explicit: Vec<String>,
+    progress: &ProgressReporter,
+) -> Result<()> {
     let spec = SelectionSpec {
         all: args.all,
         all_interiors: args.all_interiors,
@@ -254,13 +268,25 @@ fn prepare_batch(args: PrepareArgs, explicit: Vec<String>) -> Result<()> {
     }
     manifest.write_atomic(&manifest_path)?;
 
-    let session = BatchSession::new(
+    progress.started("Prepare", Some(resolved.len() as u64));
+    progress.phase_started("cell", Some(resolved.len() as u64));
+    for _ in 0..skipped {
+        progress.unit_completed_in_phase("cell", Some(resolved.len() as u64), None);
+    }
+
+    let session = match BatchSession::new(
         &plugin_path,
         &data_root,
         &cache_dir,
         loaded_plugins,
         fingerprint,
-    )?;
+    ) {
+        Ok(session) => session,
+        Err(error) => {
+            progress.finished(false);
+            return Err(error);
+        }
+    };
 
     // F48.4: bounded worker pool. `--jobs N` overrides; otherwise the
     // machine's available parallelism, and never more workers than there
@@ -301,8 +327,14 @@ fn prepare_batch(args: PrepareArgs, explicit: Vec<String>) -> Result<()> {
                     cell_args.check_fingerprints = false;
 
                     let mut output = Vec::new();
-                    let result =
-                        prepare_cell(&session, cell_args, selector_input.clone(), &mut output);
+                    let cell_progress = progress.scoped();
+                    let result = prepare_cell(
+                        &session,
+                        cell_args,
+                        selector_input.clone(),
+                        &mut output,
+                        &cell_progress,
+                    );
 
                     let status = match &result {
                         Ok(()) => JobStatus::Done,
@@ -318,6 +350,12 @@ fn prepare_batch(args: PrepareArgs, explicit: Vec<String>) -> Result<()> {
                             eprintln!("cell {selector_input} failed: {reason}");
                         }
                     }
+
+                    cell_progress.unit_completed_in_phase(
+                        "cell",
+                        Some(resolved.len() as u64),
+                        None,
+                    );
 
                     {
                         let mut manifest = manifest_mutex.lock().unwrap();
@@ -362,6 +400,10 @@ fn prepare_batch(args: PrepareArgs, explicit: Vec<String>) -> Result<()> {
         let physics_cache = session.physics_cache.lock().unwrap();
         (physics_cache.accesses(), physics_cache.hits)
     };
+    progress.cache_counts(
+        physics_hits as u64,
+        (physics_reads.saturating_sub(physics_hits)) as u64,
+    );
     println!(
         "{}",
         batch_cache_summary_line(asset_totals, physics_reads, physics_hits)
@@ -377,12 +419,14 @@ fn prepare_batch(args: PrepareArgs, explicit: Vec<String>) -> Result<()> {
     }
 
     if !failed_entries.is_empty() {
+        progress.finished(false);
         bail!(
             "{} of {} cell(s) failed to prepare",
             failed_entries.len(),
             to_run.len()
         );
     }
+    progress.finished(true);
     Ok(())
 }
 
@@ -452,7 +496,12 @@ fn prepare_cell(
     args: PrepareArgs,
     selector_input: String,
     output: &mut Vec<String>,
+    progress: &ProgressReporter,
 ) -> Result<()> {
+    progress.phase_started(
+        format!("cell {selector_input}/resolve and load records"),
+        None,
+    );
     let selector = parse_cell_selector(&selector_input)?;
     let game_root = args
         .game_root
@@ -533,6 +582,10 @@ fn prepare_cell(
     diagnostics.extend(session.archive_diagnostics.iter().cloned());
     // Audio archive indexes: same -- indexed once in `BatchSession::new`.
     diagnostics.extend(session.audio_diagnostics.iter().cloned());
+    progress.phase_started(
+        format!("cell {selector_input}/textures, interface, audio"),
+        None,
+    );
     let (cell_audio, mut audio_clips) = stage_audio(
         &data_root,
         &session.audio_archives,
@@ -613,6 +666,10 @@ fn prepare_cell(
     if !cell.interior {
         let static_converter_revision = NATIVE_NIF_CONVERTER_REVISION;
         let actor_converter_revision = NATIVE_ACTOR_CONVERTER_REVISION;
+        progress.phase_started(
+            format!("cell {selector_input}/parse and stage assets"),
+            None,
+        );
         let mut exterior_stage = stage_placements_with_package_points(
             parsed.references.clone(),
             &parsed.bases,
@@ -627,6 +684,12 @@ fn prepare_cell(
             static_converter_revision,
             actor_converter_revision,
         )?;
+        progress.cache_counts(
+            exterior_stage.cache_hits as u64,
+            (exterior_stage.cache_missing
+                + exterior_stage.cache_invalid
+                + exterior_stage.cache_explicit_rebuilds) as u64,
+        );
         {
             let _asset_stage_guard = session.asset_stage_lock.lock().unwrap();
             if let Some(worldspace_form_id) = cell.worldspace_form_id {
@@ -675,6 +738,10 @@ fn prepare_cell(
             }
         }
         let mut failed_native_assets = HashMap::new();
+        progress.phase_started(
+            format!("cell {selector_input}/native NIF/KF conversion"),
+            Some(exterior_stage.jobs.len() as u64),
+        );
         if !exterior_stage.jobs.is_empty() {
             let batch = run_native_batch(
                 &exterior_stage.jobs,
@@ -703,6 +770,10 @@ fn prepare_cell(
                 ));
             }
             batch.enforce_strict(args.strict)?;
+            for outcome in &batch.outcomes {
+                progress.job_completed(outcome.status == NativeJobStatus::Converted);
+                progress.unit_completed(Some(exterior_stage.jobs.len() as u64), None);
+            }
             failed_native_assets = batch
                 .failed_outputs(&exterior_stage.jobs)
                 .into_iter()
@@ -734,6 +805,10 @@ fn prepare_cell(
         // the same prepared graph pipeline as interiors before the package is
         // assembled; the package stores the resulting graph artifact pointer
         // while retaining its compact flattened buffers for diagnostics.
+        progress.phase_started(
+            format!("cell {selector_input}/navigation and physics"),
+            None,
+        );
         let mut physics_assets = HashMap::new();
         for placement in &mut exterior_stage.placements {
             let Some(relative_path) = placement.physics_asset_path.as_ref() else {
@@ -897,6 +972,7 @@ fn prepare_cell(
             dialogue: None,
             exterior: Some(package),
         };
+        progress.phase_started(format!("cell {selector_input}/manifest publication"), None);
         let manifest_path = scene_dir.join("scene.ron");
         fs::write(
             &manifest_path,
@@ -923,6 +999,10 @@ fn prepare_cell(
     let actor_converter_revision = NATIVE_ACTOR_CONVERTER_REVISION;
     let prepared_converter_revision = NATIVE_PREPARED_CONVERTER_REVISION;
     let actor_animation_backend = args.actor_animation_converter.backend();
+    progress.phase_started(
+        format!("cell {selector_input}/navigation and physics"),
+        None,
+    );
     let (navmeshes, mut nav_graph, mut nav_graph_full, nav_graph_summary) = stage_navmeshes(
         &cache_dir,
         &scene_dir,
@@ -991,6 +1071,10 @@ fn prepare_cell(
         &actor_catalog_package_lists(&actor_catalog),
         &package_catalog_inputs.packages,
     );
+    progress.phase_started(
+        format!("cell {selector_input}/parse and stage assets"),
+        None,
+    );
     let stage = stage_placements_with_package_points(
         references,
         &parsed.bases,
@@ -1023,6 +1107,10 @@ fn prepare_cell(
         cache_explicit_rebuilds,
         leveled_lists,
     } = stage;
+    progress.cache_counts(
+        cache_hits as u64,
+        (cache_missing + cache_invalid + cache_explicit_rebuilds) as u64,
+    );
     // F48.4 serialization point: `convert_staged_textures` walks every
     // `.dds` under the *whole* `staging_dir` (not just this cell's), and
     // Native conversion and `convert_staged_textures` walk shared staging
@@ -1032,6 +1120,10 @@ fn prepare_cell(
     let item_icons;
     let mut failed_native_assets = HashMap::new();
     {
+        progress.phase_started(
+            format!("cell {selector_input}/textures and interface"),
+            None,
+        );
         let _asset_stage_guard = session.asset_stage_lock.lock().unwrap();
         item_icons = stage_item_icons(
             &parsed.bases,
@@ -1060,6 +1152,10 @@ fn prepare_cell(
             )?;
             convert_staged_textures(&staging_dir.join("interface"), &mut diagnostics)?;
             if !jobs.is_empty() {
+                progress.phase_started(
+                    format!("cell {selector_input}/native NIF/KF conversion"),
+                    Some(jobs.len() as u64),
+                );
                 let batch =
                     run_native_batch(&jobs, &data_root, &session.archives, args.jobs, args.strict)
                         .context("native NIF batch conversion failed")?;
@@ -1071,6 +1167,8 @@ fn prepare_cell(
                     message: summary_line,
                 });
                 for outcome in &batch.outcomes {
+                    progress.job_completed(outcome.status == NativeJobStatus::Converted);
+                    progress.unit_completed(Some(jobs.len() as u64), None);
                     if outcome.status == NativeJobStatus::Converted {
                         if let Some(warning) = &outcome.error {
                             diagnostics.push(Diagnostic {
@@ -1529,6 +1627,10 @@ fn prepare_cell(
         )
     }
 
+    progress.phase_started(
+        format!("cell {selector_input}/static shadows and reflection probes"),
+        None,
+    );
     let static_point_shadows = prepare_static_point_shadows(
         StaticShadowPrepareOptions {
             asset_root: &cache_dir,
@@ -1540,6 +1642,8 @@ fn prepare_cell(
         &placements,
         &lights,
         &mut diagnostics,
+        Some(progress),
+        &format!("cell {selector_input}/static point shadows"),
     )?;
     let reflection_layouts = if cell.interior {
         nav_graph_full
@@ -1568,6 +1672,7 @@ fn prepare_cell(
         None
     };
 
+    progress.phase_started(format!("cell {selector_input}/manifest publication"), None);
     let manifest = PreparedSceneManifest {
         schema_version: CURRENT_MANIFEST_SCHEMA_VERSION,
         prepare_revision: Some(CURRENT_PREPARE_REVISION.into()),

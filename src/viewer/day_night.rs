@@ -16,7 +16,8 @@ use serde::Serialize;
 
 use super::controls::{AmbientScale, LightingScale};
 use super::scene::{
-    CellDirectionalLight, refresh_environment_for_active_cell, scaled_directional_illuminance,
+    CellDirectionalLight, refresh_environment_for_active_cell, runtime_lightmapped_diffuse_enabled,
+    scaled_directional_illuminance,
 };
 use super::{LoadedSceneManifest, console, plugins::ViewerSet};
 
@@ -196,6 +197,7 @@ pub(crate) fn apply_day_night_environment(world: &mut World) {
         return;
     };
     let cell = manifest.cell.clone();
+    let lightmapped_diffuse_enabled = runtime_lightmapped_diffuse_enabled(manifest.bake.as_ref());
     let preview = world.resource::<DayNightPreview>().0;
     let hour = world.resource::<GameClock>().hour;
     let profile = profile_for_cell(&cell, preview).0.cloned();
@@ -257,7 +259,7 @@ pub(crate) fn apply_day_night_environment(world: &mut World) {
     world.insert_resource(GlobalAmbientLight {
         color: Color::srgb(ambient[0], ambient[1], ambient[2]),
         brightness: 25.0 * lighting_scale * ambient_scale,
-        affects_lightmapped_meshes: true,
+        affects_lightmapped_meshes: lightmapped_diffuse_enabled,
     });
     {
         let mut directional_lights =
@@ -266,6 +268,7 @@ pub(crate) fn apply_day_night_environment(world: &mut World) {
             || !sunlight[..3].iter().all(|channel| channel.is_finite());
         for (mut light, cell_light) in directional_lights.iter_mut(world) {
             light.color = Color::srgb(sunlight[0], sunlight[1], sunlight[2]);
+            light.affects_lightmapped_mesh_diffuse = lightmapped_diffuse_enabled;
             light.illuminance = scaled_directional_illuminance(
                 cell_light.base_illuminance,
                 lighting_scale,

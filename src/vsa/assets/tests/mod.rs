@@ -25,13 +25,15 @@ fn blender_uses_the_shared_glossiness_formula_and_diffuse_path_annotation() {
     assert!(BLENDER_CONVERSION_SCRIPT.contains("actor_shape_glossiness(nifnode)"));
     assert!(BLENDER_CONVERSION_SCRIPT.contains("bevyout_diffuse_texture_path"));
     assert!(BLENDER_CONVERSION_SCRIPT.contains("bevyout_perceptual_roughness"));
+    assert!(BLENDER_CONVERSION_SCRIPT.contains("bevyout_glossiness_exponent"));
+    assert!(BLENDER_CONVERSION_SCRIPT.contains("'schema': 2"));
 }
 
 #[test]
 fn roughness_default_revision_invalidates_the_previous_native_asset_key() {
-    assert!(NATIVE_NIF_CONVERTER_REVISION.contains("pbr-material-v3"));
+    assert!(NATIVE_NIF_CONVERTER_REVISION.contains("pbr-material-v4"));
     let previous_revision =
-        NATIVE_NIF_CONVERTER_REVISION.replacen("pbr-material-v3", "pbr-material-v2", 1);
+        NATIVE_NIF_CONVERTER_REVISION.replacen("pbr-material-v4", "pbr-material-v3", 1);
     assert_ne!(previous_revision, NATIVE_NIF_CONVERTER_REVISION);
     assert_ne!(
         content_addressed_glb_name(
@@ -43,6 +45,21 @@ fn roughness_default_revision_invalidates_the_previous_native_asset_key() {
             b"chair03.nif"
         )
     );
+}
+
+#[test]
+fn glossiness_metadata_revision_invalidates_every_converter_generation() {
+    for revision in [
+        NATIVE_NIF_CONVERTER_REVISION,
+        NATIVE_ACTOR_CONVERTER_REVISION,
+        PREPARED_CONVERTER_REVISION,
+        NATIVE_PREPARED_CONVERTER_REVISION,
+    ] {
+        assert!(revision.contains("pbr-material-v4"), "{revision}");
+        assert!(!revision.contains("pbr-material-v3"), "{revision}");
+    }
+    assert!(NATIVE_NIF_CONVERTER_REVISION.contains("fallout-shader-semantics-v2"));
+    assert!(PREPARED_CONVERTER_REVISION.contains("fallout-shader-semantics-v2"));
 }
 
 #[test]

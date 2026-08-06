@@ -30,6 +30,30 @@ fn invalid_glossiness_uses_exponent_ten() {
 }
 
 #[test]
+fn legacy_micro_roughness_matches_authored_blinn_phong_exponents() {
+    let broad = legacy_micro_roughness_from_glossiness(Some(4.0));
+    let tight = legacy_micro_roughness_from_glossiness(Some(128.0));
+    assert!((broad - 0.577_350_26).abs() < 0.000_001);
+    assert!((tight - 0.124_034_73).abs() < 0.000_001);
+}
+
+#[test]
+fn chan_master_scales_authored_micro_roughness() {
+    let exponent = Some(4.0);
+    assert_eq!(legacy_chan_weight(exponent, 0.0), 0.0);
+    assert!((legacy_chan_weight(exponent, 0.5) - 0.288_675_13).abs() < 0.000_001);
+    assert!((legacy_chan_weight(exponent, 1.0) - 0.577_350_26).abs() < 0.000_001);
+}
+
+#[test]
+fn legacy_exponent_sanitization_uses_ten_for_invalid_values() {
+    for value in [None, Some(-1.0), Some(f32::NAN), Some(f32::INFINITY)] {
+        assert_eq!(sanitized_glossiness_exponent(value), 10.0);
+        assert!((legacy_micro_roughness_from_glossiness(value) - 0.408_248_3).abs() < 0.000_001);
+    }
+}
+
+#[test]
 fn fallout_specular_strength_uses_normal_alpha_only_when_eligible() {
     let normal = "textures/furniture/chair03_n.dds";
     assert_eq!(
