@@ -19,7 +19,7 @@ use super::{
     ExteriorCellRoot, ExteriorObjectLod, ExteriorPresentationStats, ExteriorWaterState,
     ExteriorWaterSurface, ExteriorWorldspaceLodCatalog, ExteriorWorldspaceLodVisual, FpsPlayer,
     apply_action, clamp_adjacent_terrain_lods, exterior_package_header_has_current_revision,
-    exterior_presentation_json, finalize_evictions, mark_collision_ready,
+    exterior_presentation_json, finalize_evictions, initial_cell_state, mark_collision_ready,
     select_unique_worldspace_lod_candidates, terrain_center, terrain_mesh_with_stride,
     terrain_mesh_with_subdivisions, update_water_state, worldspace_lod_distance,
 };
@@ -43,6 +43,47 @@ fn run_test_action(world: &mut World, action: ExteriorResidencyAction) {
         .run_system_once(apply_test_action)
         .expect("exterior action system runs");
     world.flush();
+}
+
+#[test]
+fn startup_cell_uses_the_same_evictable_residency_policy_as_streamed_cells() {
+    let state = initial_cell_state(0x0000_0c49, GridCoordinate::new(4, -5), 512);
+
+    assert_eq!(state.lifecycle, ExteriorCellLifecycle::Resident);
+    assert!(!state.pinned);
+    assert_eq!(state.estimated_bytes, 512);
+}
+
+#[test]
+fn package_completion_cannot_spawn_above_the_resident_root_budget() {
+    let grid = GridCoordinate::new(0, 0);
+    let mut state = lifecycle::ExteriorStreamState {
+        resident_budget: 1,
+        ..Default::default()
+    };
+    state.cells.insert(
+        grid,
+        lifecycle::RuntimeCell {
+            state: ExteriorCellState {
+                cell_form_id: 1,
+                grid,
+                lifecycle: ExteriorCellLifecycle::Ready,
+                generation: 1,
+                pinned: false,
+                estimated_bytes: 1,
+                failed_attempts: 0,
+            },
+            root: Some(bevy::prelude::Entity::from_raw_u32(1).expect("test entity")),
+            task: None,
+            package: None,
+            collision_ready: true,
+            eviction_restore: None,
+        },
+    );
+
+    assert!(!state.has_root_capacity());
+    state.cells.get_mut(&grid).expect("resident cell").root = None;
+    assert!(state.has_root_capacity());
 }
 
 #[test]

@@ -100,6 +100,13 @@ pub(crate) fn poll(
     asset_server: Res<AssetServer>,
 ) {
     for (task_entity, mut pending) in &mut tasks {
+        // A completed package owns its render root immediately, before
+        // collision readiness changes its logical lifecycle. Keep that real
+        // ownership under the hard cell budget even if task completion races
+        // same-frame eviction teardown.
+        if !state.has_root_capacity() {
+            continue;
+        }
         let Some(result) = check_ready(&mut pending.task) else {
             continue;
         };

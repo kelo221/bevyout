@@ -28,7 +28,7 @@ try {
 		}
 		const target = resolve(directory, basename(name));
 		await writeFile(target, blob.stdout);
-		if (run(["rustfmt", "--edition", "2024", "--check", target]).exitCode !== 0) failures.push(`${name}: staged blob is not rustfmt-clean`);
+		if (run(["rustfmt", "--config", "skip_children=true", "--edition", "2024", "--check", target]).exitCode !== 0) failures.push(`${name}: staged blob is not rustfmt-clean`);
 	}
 } finally {
 	await rm(directory, { recursive: true, force: true });

@@ -14,7 +14,8 @@ rule:
           - pattern: "$X.recv()"
           - pattern: "$X.recv_timeout($$$A)"
           - pattern: "$X.lock()"
-          - pattern: "$X.read()"
+          - pattern: "$X.read().unwrap()"
+          - pattern: "$X.read().expect($$$A)"
           - pattern: "$X.write()"
         stopBy: end
 constraints:

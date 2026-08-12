@@ -4,9 +4,50 @@ use super::super::openmw_esm4::{
 use super::super::openmw_esm4::{LandscapeTextureRecord, TextureSetRecord};
 use super::terrain_from_land;
 use bevyout_core::manifest::exterior::PreparedTerrain;
-use bevyout_core::manifest::exterior::{ExteriorCoordinatePolicy, GridCoordinate};
+use bevyout_core::manifest::exterior::{
+    ExteriorCellPackage, ExteriorCoordinatePolicy, GridCoordinate, PreparedExteriorEnvironment,
+    PreparedExteriorObject,
+};
 use std::collections::HashMap;
 use std::fs;
+
+#[test]
+fn unstaged_source_model_is_not_published_as_a_runtime_exterior_asset() {
+    let mut package = ExteriorCellPackage {
+        revision: "test".into(),
+        content_fingerprint: "test".into(),
+        cell_form_id: 1,
+        worldspace_form_id: 2,
+        grid: GridCoordinate::new(0, 0),
+        origin: [0.0; 3],
+        terrain: None,
+        water: None,
+        static_objects: vec![PreparedExteriorObject {
+            reference_form_id: 3,
+            base_form_id: 4,
+            asset_path: Some("MarkerCOCHeading.nif".into()),
+            physics_asset_path: None,
+            door_destination: None,
+            position: [0.0; 3],
+            rotation_xyzw: [0.0, 0.0, 0.0, 1.0],
+            scale: 1.0,
+            initially_enabled: true,
+            persistent: false,
+            dynamic: false,
+            distant: false,
+        }],
+        dynamic_objects: Vec::new(),
+        distant_objects: Vec::new(),
+        local_lights: Vec::new(),
+        navigation: None,
+        environment: PreparedExteriorEnvironment::default(),
+        diagnostics: Vec::new(),
+    };
+
+    super::apply_staged_assets(&mut package, &[], &HashMap::new());
+
+    assert_eq!(package.static_objects[0].asset_path, None);
+}
 
 #[test]
 fn terrain_fixture_has_shared_shape_and_cell_origin() {

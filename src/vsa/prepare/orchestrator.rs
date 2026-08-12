@@ -14,11 +14,10 @@ use bevyout_core::image_space::IMAGE_SPACE_MODIFIER_CATALOG_REVISION;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// Dispatches `prepare`: a single legacy selector goes straight through
-/// `prepare_single` below; `--all`/`--all-interiors`/`--worldspace`,
-/// `--list-only`, `--check-fingerprints`, `--retry-failed`, or more than one
-/// positional selector build a lightweight cell catalogue and resolve the
-/// batch through `resolve_selection` (#46). Fingerprint validation must use
-/// this route even for one cell because the single-cell path prepares it.
+/// `prepare_single` below; `--all`/`--all-interiors`/`--worldspace`/
+/// `--all-exteriors`, `--exterior-radius`, `--list-only`, `--check-fingerprints`,
+/// `--retry-failed`, or more than one positional selector build a lightweight
+/// cell catalogue and resolve the batch through `resolve_selection`.
 pub fn prepare(args: PrepareArgs) -> Result<()> {
     let progress = ProgressReporter::new(args.progress.mode);
     let mut explicit = args.selectors.clone();
@@ -30,7 +29,7 @@ pub fn prepare(args: PrepareArgs) -> Result<()> {
         let selector_input = explicit
             .into_iter()
             .next()
-            .context("provide a GECK EditorID/FormID selector or legacy --cell, or pass --all/--all-interiors/--worldspace/--retry-failed")?;
+            .context("provide a GECK EditorID/FormID selector or legacy --cell, or pass --all/--all-interiors/--all-exteriors/--worldspace/--exterior-radius/--retry-failed")?;
         return prepare_single(args, selector_input, &progress);
     }
 
@@ -42,7 +41,9 @@ fn prepare_requires_batch(args: &PrepareArgs, explicit_count: usize) -> bool {
         || args.check_fingerprints
         || args.all
         || args.all_interiors
+        || args.all_exteriors
         || args.worldspace.is_some()
+        || args.exterior_radius.is_some()
         || args.retry_failed
         || explicit_count > 1
 }
@@ -108,7 +109,9 @@ fn prepare_batch(
     let spec = SelectionSpec {
         all: args.all,
         all_interiors: args.all_interiors,
+        all_exteriors: args.all_exteriors,
         worldspace: args.worldspace.clone(),
+        exterior_radius: args.exterior_radius,
         explicit,
     };
 
@@ -160,6 +163,7 @@ fn prepare_batch(
             name: entry.name.clone(),
             interior: entry.interior,
             worldspace_form_id: entry.worldspace_form_id,
+            grid: entry.grid,
         })
         .collect();
     let worldspace_names = catalog.worldspaces.clone();
@@ -321,7 +325,9 @@ fn prepare_batch(
                     cell_args.cell = None;
                     cell_args.all = false;
                     cell_args.all_interiors = false;
+                    cell_args.all_exteriors = false;
                     cell_args.worldspace = None;
+                    cell_args.exterior_radius = None;
                     cell_args.list_only = false;
                     cell_args.retry_failed = false;
                     cell_args.check_fingerprints = false;

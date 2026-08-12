@@ -196,10 +196,12 @@ impl Plugin for ExteriorWorldPlugin {
                     initialize,
                     place_player,
                     update_residency,
+                    // Release evicted roots and collision ownership before a
+                    // newly completed package is allowed to spawn this frame.
+                    finalize_evictions,
                     loading::poll,
                     apply_exterior_persistence,
                     attach_streamed_colliders,
-                    finalize_evictions,
                 )
                     .chain()
                     .run_if(in_state(AppState::InGame)),
@@ -227,6 +229,26 @@ impl Plugin for ExteriorWorldPlugin {
 struct ExteriorStreamBudget {
     resident_cells: usize,
     bytes: u64,
+}
+
+fn initial_cell_state(
+    cell_form_id: u32,
+    grid: GridCoordinate,
+    estimated_bytes: u64,
+) -> bevyout_core::manifest::exterior::ExteriorCellState {
+    bevyout_core::manifest::exterior::ExteriorCellState {
+        cell_form_id,
+        grid,
+        lifecycle: ExteriorCellLifecycle::Resident,
+        generation: 1,
+        // The active grid is retained by the residency planner itself. During
+        // a collision handoff, update_residency temporarily pins the previous
+        // grid in its planning snapshot. A permanent startup pin would leave
+        // this cell resident after both protections no longer apply.
+        pinned: false,
+        estimated_bytes,
+        failed_attempts: 0,
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -327,15 +349,11 @@ fn initialize(
     state.cells.insert(
         package.grid,
         lifecycle::RuntimeCell {
-            state: bevyout_core::manifest::exterior::ExteriorCellState {
-                cell_form_id: package.cell_form_id,
-                grid: package.grid,
-                lifecycle: ExteriorCellLifecycle::Resident,
-                generation: 1,
-                pinned: true,
-                estimated_bytes: estimate_package_bytes(&package),
-                failed_attempts: 0,
-            },
+            state: initial_cell_state(
+                package.cell_form_id,
+                package.grid,
+                estimate_package_bytes(&package),
+            ),
             root: Some(root),
             task: None,
             package: Some(package),

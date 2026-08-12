@@ -24,6 +24,7 @@ pub(crate) struct CellCatalogEntry {
     pub(crate) winning_plugin: String,
     pub(crate) provenance: Vec<String>,
     pub(crate) worldspace_form_id: Option<u32>,
+    pub(crate) grid: Option<(i32, i32)>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -89,6 +90,7 @@ impl CellCatalog {
                     winning_plugin: record.winning_source.unwrap_or_else(|| "<unknown>".into()),
                     provenance: record.provenance,
                     worldspace_form_id: cell.worldspace_form_id,
+                    grid: cell.grid,
                 }
             })
             .collect::<Vec<_>>();

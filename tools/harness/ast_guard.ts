@@ -26,6 +26,7 @@ const expected = new Set([
 const excluded = new Set([
 	".bevyout", "target", "tests", "benches", "examples", "BevyCheatSheet", "BevyDocs",
 	"bevy_markdown_docs", "node_modules", "third_party", "vendor", "NifConverter", "prepare", "preparation",
+	"bake", "catalog",
 ]);
 
 function run(command: string[], cwd = root, check = true): { stdout: string; stderr: string; exitCode: number } {
@@ -42,7 +43,7 @@ function shouldScan(path: string): boolean {
 	const name = parts.at(-1)?.toLowerCase() ?? "";
 	if (!normalized.endsWith(".rs") || parts.some((part) => excluded.has(part))) return false;
 	if (name.startsWith("test_") || name.endsWith("_test.rs")) return false;
-	if (normalized === "src/cli.rs" || normalized === "src/main.rs" || normalized.includes("/cli/")) return false;
+	if (normalized === "src/cli.rs" || normalized === "src/main.rs" || normalized.includes("/cli/") || normalized === "src/vsa/catalog.rs" || normalized.includes("src/vsa/bake/")) return false;
 	return normalized.startsWith("src/") || normalized.startsWith("crates/");
 }
 

@@ -2355,6 +2355,7 @@ async fn given_selector_interior_cell(world: &mut BevyoutWorld, hex: String, edi
         name: None,
         interior: true,
         worldspace_form_id: None,
+        grid: None,
     });
 }
 
@@ -2366,6 +2367,7 @@ async fn given_selector_exterior_cell(world: &mut BevyoutWorld, hex: String, edi
         name: None,
         interior: false,
         worldspace_form_id: None,
+        grid: None,
     });
 }
 
@@ -2384,6 +2386,28 @@ async fn given_exterior_cell_in_worldspace(
         name: None,
         interior: false,
         worldspace_form_id: Some(parse_hex(&worldspace_hex)),
+        grid: None,
+    });
+}
+
+#[given(
+    regex = r#"^cell 0x([0-9a-fA-F]+) "([^"]*)" is an exterior cell in worldspace 0x([0-9a-fA-F]+) at grid \((-?\d+),(-?\d+)\)$"#
+)]
+async fn given_exterior_cell_in_worldspace_at_grid(
+    world: &mut BevyoutWorld,
+    hex: String,
+    editor_id: String,
+    worldspace_hex: String,
+    grid_x: i32,
+    grid_y: i32,
+) {
+    world.cells.push(CellSummary {
+        form_id: parse_hex(&hex),
+        editor_id: Some(editor_id),
+        name: None,
+        interior: false,
+        worldspace_form_id: Some(parse_hex(&worldspace_hex)),
+        grid: Some((grid_x, grid_y)),
     });
 }
 
@@ -2396,6 +2420,18 @@ async fn given_worldspace_named(world: &mut BevyoutWorld, hex: String, name: Str
 async fn when_selected_all_interiors(world: &mut BevyoutWorld) {
     let spec = SelectionSpec {
         all_interiors: true,
+        ..Default::default()
+    };
+    world.selection_result = Some(
+        resolve_selection(&world.cells, &world.worldspace_names, &spec)
+            .map_err(|error| error.to_string()),
+    );
+}
+
+#[when("cells are selected with --all-exteriors")]
+async fn when_selected_all_exteriors(world: &mut BevyoutWorld) {
+    let spec = SelectionSpec {
+        all_exteriors: true,
         ..Default::default()
     };
     world.selection_result = Some(
@@ -2424,6 +2460,19 @@ async fn when_selected_explicit(world: &mut BevyoutWorld, list: String) {
 async fn when_selected_worldspace(world: &mut BevyoutWorld, name: String) {
     let spec = SelectionSpec {
         worldspace: Some(name),
+        ..Default::default()
+    };
+    world.selection_result = Some(
+        resolve_selection(&world.cells, &world.worldspace_names, &spec)
+            .map_err(|error| error.to_string()),
+    );
+}
+
+#[when(regex = r#"^cells are selected with anchor "([^"]*)" and --exterior-radius (\d+)$"#)]
+async fn when_selected_exterior_radius(world: &mut BevyoutWorld, anchor: String, radius: u32) {
+    let spec = SelectionSpec {
+        exterior_radius: Some(radius),
+        explicit: vec![anchor],
         ..Default::default()
     };
     world.selection_result = Some(

@@ -217,22 +217,60 @@ pub struct PrepareArgs {
     pub(crate) progress: ProgressArgs,
     /// GECK EditorID, or an eight-digit hexadecimal FormID. May be repeated to
     /// prepare several cells in one run.
-    #[arg(value_name = "EDITOR_ID", conflicts_with_all = ["cell", "all"])]
+    #[arg(
+        value_name = "EDITOR_ID",
+        conflicts_with_all = ["cell", "all", "all_exteriors"]
+    )]
     pub(crate) selectors: Vec<String>,
     /// Prepare every cell in the resolved plugin chain.
     #[arg(
         long,
-        conflicts_with_all = ["all_interiors", "worldspace", "selectors", "cell"]
+        conflicts_with_all = [
+            "all_interiors",
+            "all_exteriors",
+            "worldspace",
+            "selectors",
+            "cell"
+        ]
     )]
     pub(crate) all: bool,
     /// Prepare every interior cell. Combinable with `--worldspace` and
     /// explicit selectors.
     #[arg(long)]
     pub(crate) all_interiors: bool,
+    /// Prepare every exterior cell in the resolved plugin chain.
+    #[arg(
+        long,
+        conflicts_with_all = [
+            "all",
+            "all_interiors",
+            "worldspace",
+            "exterior_radius",
+            "selectors",
+            "cell"
+        ]
+    )]
+    pub(crate) all_exteriors: bool,
     /// Prepare every cell belonging to this worldspace (EditorID or FormID).
     /// Combinable with `--all-interiors` and explicit selectors.
     #[arg(long, value_name = "WORLDSPACE")]
     pub(crate) worldspace: Option<String>,
+    /// Prepare the square exterior-cell neighborhood centered on the one
+    /// positional exterior cell selector. Distance is measured in CELL grid
+    /// coordinates, so radius 3 selects at most a 7x7 patch.
+    #[arg(
+        long,
+        value_name = "N",
+        requires = "selectors",
+        conflicts_with_all = [
+            "all",
+            "all_interiors",
+            "all_exteriors",
+            "worldspace",
+            "cell"
+        ]
+    )]
+    pub(crate) exterior_radius: Option<u32>,
     /// Print the resolved cell selection (`formid<TAB>editor_id` per line,
     /// sorted) and exit before any extraction or conversion work.
     #[arg(long, conflicts_with = "check_fingerprints")]
@@ -302,8 +340,9 @@ pub struct PrepareArgs {
     pub(crate) jobs: Option<usize>,
     /// Retry only cells currently recorded `failed` in the resumable job
     /// manifest, intersected with any other selector given. Alone (no
-    /// `--all`/`--all-interiors`/`--worldspace`/selectors), retries every
-    /// failed cell recorded in the manifest.
+    /// `--all`/`--all-interiors`/`--all-exteriors`/`--worldspace`/
+    /// `--exterior-radius`/selectors), retries every failed cell recorded in the
+    /// manifest.
     #[arg(long)]
     pub(crate) retry_failed: bool,
 }

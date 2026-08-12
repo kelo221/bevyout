@@ -120,6 +120,7 @@ pub(crate) fn bake_batch(args: BakeArgs, progress: &ProgressReporter) -> Result<
             name: None,
             interior: entry.interior,
             worldspace_form_id: entry.worldspace_form_id,
+            grid: entry.grid,
         })
         .collect();
 

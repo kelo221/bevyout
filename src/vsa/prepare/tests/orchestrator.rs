@@ -10,6 +10,57 @@ fn fingerprint_check_always_uses_the_report_only_batch_path() {
 }
 
 #[test]
+fn exterior_radius_always_uses_the_batch_path() {
+    let args = PrepareArgs::try_parse_from(["prepare", "00000c49", "--exterior-radius", "3"])
+        .expect("valid prepare arguments");
+
+    assert_eq!(args.exterior_radius, Some(3));
+    assert!(prepare_requires_batch(&args, 1));
+}
+
+#[test]
+fn exterior_radius_conflicts_with_whole_catalogue_selectors() {
+    for conflicting in ["--all", "--all-interiors", "--worldspace"] {
+        let mut argv = vec!["prepare", "00000c49", "--exterior-radius", "3", conflicting];
+        if conflicting == "--worldspace" {
+            argv.push("Wasteland");
+        }
+
+        assert!(PrepareArgs::try_parse_from(argv).is_err(), "{conflicting}");
+    }
+}
+
+#[test]
+fn all_exteriors_always_uses_the_batch_path() {
+    let args = PrepareArgs::try_parse_from(["prepare", "--all-exteriors"])
+        .expect("valid prepare arguments");
+
+    assert!(args.all_exteriors);
+    assert!(prepare_requires_batch(&args, 0));
+}
+
+#[test]
+fn all_exteriors_conflicts_with_every_other_cell_selector() {
+    for conflicting in [
+        "--all",
+        "--all-interiors",
+        "--worldspace",
+        "--exterior-radius",
+        "positional",
+    ] {
+        let mut argv = vec!["prepare", "--all-exteriors"];
+        match conflicting {
+            "--worldspace" => argv.extend(["--worldspace", "Wasteland"]),
+            "--exterior-radius" => argv.extend(["00000c49", "--exterior-radius", "3"]),
+            "positional" => argv.push("00000c49"),
+            flag => argv.push(flag),
+        }
+
+        assert!(PrepareArgs::try_parse_from(argv).is_err(), "{conflicting}");
+    }
+}
+
+#[test]
 fn dialogue_voice_discovery_is_automatic_without_the_legacy_flag() {
     assert!(should_discover_dialogue_voice(false));
     assert!(should_discover_dialogue_voice(true));

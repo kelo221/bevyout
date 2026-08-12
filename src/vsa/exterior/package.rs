@@ -360,6 +360,13 @@ pub(crate) fn apply_staged_assets(
             .iter()
             .find(|placement| placement.reference_form_id == object.reference_form_id)
         else {
+            // `base.model` is a Fallout source NIF path. It is useful while
+            // assembling the package, but the viewer may only receive staged
+            // runtime assets. References intentionally omitted from prepared
+            // placements (editor markers and non-rendering effects) therefore
+            // must not retain that source path.
+            object.asset_path = None;
+            object.physics_asset_path = None;
             continue;
         };
         if let Some(asset_path) = placement.asset_path.as_deref() {

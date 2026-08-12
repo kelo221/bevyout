@@ -97,7 +97,7 @@ pub(crate) fn run_view(manifest_path: PathBuf, options: RunViewOptions) -> Resul
                     format!("save slot '{slot}' is incompatible with the loaded content")
                 })?;
             if let Some(warning) = outcome.warning {
-                eprintln!("warning: {warning}");
+                warn!("{warning}");
             }
             Ok(outcome.save)
         })
@@ -110,6 +110,7 @@ pub(crate) fn run_view(manifest_path: PathBuf, options: RunViewOptions) -> Resul
     let start_unfocused = should_start_unfocused(unfocused, agent_port);
     let mut app = App::new();
     app.add_plugins((
+        task_pools::ViewerIoTaskPoolPlugin,
         DefaultPlugins
             .set(WindowPlugin {
                 primary_window: Some(default_primary_window(start_unfocused)),
