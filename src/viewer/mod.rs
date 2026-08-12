@@ -385,7 +385,7 @@ fn confirm(prompt: &str) -> Result<bool> {
             "" | "y" | "yes" => return Ok(true),
             "n" | "no" => return Ok(false),
             _ => {
-                eprint!("Please answer yes or no.\n");
+                let _ = io::stderr().write_all(b"Please answer yes or no.\n");
             }
         }
     }
