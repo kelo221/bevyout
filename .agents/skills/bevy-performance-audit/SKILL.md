@@ -23,7 +23,7 @@ and frame/trace data as runtime evidence. Do not call a regex hit a bottleneck.
 Run the bundled scanner from the project root:
 
 ```powershell
-python3 .agents/skills/bevy-performance-audit/scripts/scan_bevy_code.py .
+bun run .agents/skills/bevy-performance-audit/scripts/scan_bevy_code.ts .
 ```
 
 Use `--json` for machine-readable output and `--max-per-category N` to bound

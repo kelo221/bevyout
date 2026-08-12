@@ -1,0 +1,130 @@
+{
+  "schemas": [
+    {
+      "path": "crates/bevyout-core/src/actor_animation.rs",
+      "type_pattern": "^Prepared",
+      "revisions": [
+        { "path": "src/vsa/prepare/actor_animation.rs", "constant": "ACTOR_ANIMATION_CATALOG_REVISION" }
+      ]
+    },
+    {
+      "path": "src/vsa/dialogue/mod.rs",
+      "type_pattern": "^Prepared",
+      "revisions": [
+        { "path": "src/vsa/dialogue/mod.rs", "constant": "PREPARED_DIALOGUE_CATALOG_REVISION" }
+      ]
+    },
+    {
+      "path": "crates/bevyout-core/src/dialogue/mod.rs",
+      "type_pattern": "^PreparedDialogueBundleRef$",
+      "revisions": [
+        { "path": "crates/bevyout-core/src/dialogue/mod.rs", "constant": "DIALOGUE_BUNDLE_REVISION" }
+      ]
+    },
+    {
+      "path": "crates/bevyout-core/src/dialogue/mod.rs",
+      "type_pattern": "^PreparedDialogueVoiceIndex$",
+      "revisions": [
+        { "path": "crates/bevyout-core/src/dialogue/mod.rs", "constant": "DIALOGUE_VOICE_INDEX_REVISION" }
+      ]
+    },
+    {
+      "path": "crates/bevyout-core/src/dialogue/mod.rs",
+      "type_pattern": "^PreparedDialogueVoiceDemand(?:Report)?$",
+      "revisions": [
+        { "path": "crates/bevyout-core/src/dialogue/mod.rs", "constant": "DIALOGUE_VOICE_DEMAND_REVISION" }
+      ]
+    },
+    {
+      "path": "crates/bevyout-core/src/faction.rs",
+      "type_pattern": "^Prepared",
+      "revisions": [
+        { "path": "crates/bevyout-core/src/faction.rs", "constant": "FACTION_TABLE_REVISION" }
+      ]
+    },
+    {
+      "path": "crates/bevyout-core/src/image_space.rs",
+      "type_pattern": "^Prepared",
+      "revisions": [
+        { "path": "crates/bevyout-core/src/image_space.rs", "constant": "IMAGE_SPACE_MODIFIER_CATALOG_REVISION" }
+      ]
+    },
+    {
+      "path": "crates/bevyout-core/src/manifest.rs",
+      "type_pattern": "^Prepared",
+      "revisions": [
+        { "path": "src/vsa/manifest/mod.rs", "constant": "CURRENT_PREPARE_REVISION" }
+      ]
+    },
+    {
+      "path": "crates/bevyout-core/src/manifest.rs",
+      "type_pattern": "^PreparedStaticPointShadow",
+      "revisions": [
+        { "path": "src/vsa/manifest/mod.rs", "constant": "STATIC_POINT_SHADOW_REVISION" }
+      ]
+    },
+    {
+      "path": "crates/bevyout-core/src/manifest.rs",
+      "type_pattern": "^PreparedReflectionProbe",
+      "revisions": [
+        { "path": "src/vsa/manifest/mod.rs", "constant": "REFLECTION_PROBE_REVISION" }
+      ]
+    },
+    {
+      "path": "crates/bevyout-core/src/manifest.rs",
+      "type_pattern": "^Prepared(?:Bake|Lightmap|Irradiance)",
+      "revisions": [
+        { "path": "src/vsa/manifest/mod.rs", "constant": "CURRENT_BAKE_REVISION" }
+      ]
+    },
+    {
+      "path": "crates/bevyout-core/src/manifest.rs",
+      "type_pattern": "^PreparedActor$",
+      "revisions": [
+        { "path": "src/vsa/prepare/actor_catalog.rs", "constant": "ACTOR_CATALOG_REVISION" }
+      ]
+    },
+    {
+      "path": "crates/bevyout-core/src/manifest.rs",
+      "type_pattern": "^Prepared(?:Item|Leveled)",
+      "revisions": [
+        { "path": "src/vsa/prepare/items.rs", "constant": "ITEM_CATALOG_REVISION" }
+      ]
+    },
+    {
+      "path": "crates/bevyout-core/src/manifest.rs",
+      "type_pattern": "^PreparedNavGraphSource$",
+      "revisions": [
+        { "path": "src/vsa/prepare/nav_graph.rs", "constant": "NAV_GRAPH_REVISION" }
+      ]
+    },
+    {
+      "path": "crates/bevyout-core/src/manifest/exterior.rs",
+      "type_pattern": "^Prepared",
+      "revisions": [
+        { "path": "src/vsa/manifest/mod.rs", "constant": "CURRENT_PREPARE_REVISION" }
+      ]
+    },
+    {
+      "path": "crates/bevyout-core/src/manifest/exterior.rs",
+      "type_pattern": "^Prepared(?:Terrain|Water|ExteriorObject|ExteriorDoorDestination|ExteriorLight)$",
+      "revisions": [
+        { "path": "crates/bevyout-core/src/manifest/exterior.rs", "constant": "EXTERIOR_CELL_PACKAGE_REVISION" }
+      ]
+    },
+    {
+      "path": "crates/bevyout-core/src/manifest/exterior.rs",
+      "type_pattern": "^PreparedExteriorNavigation$",
+      "revisions": [
+        { "path": "crates/bevyout-core/src/manifest/exterior.rs", "constant": "EXTERIOR_NAVIGATION_REVISION" }
+      ]
+    },
+    {
+      "path": "crates/bevyout-core/src/manifest/exterior.rs",
+      "type_pattern": "^Prepared(?:ExteriorEnvironment|WeatherProfile)$",
+      "revisions": [
+        { "path": "crates/bevyout-core/src/manifest/exterior.rs", "constant": "EXTERIOR_ENVIRONMENT_REVISION" }
+      ]
+    }
+  ]
+}

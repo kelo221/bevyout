@@ -1,0 +1,22 @@
+id: bevy-system-frame-allocation
+language: Rust
+severity: warning
+message: Per-frame Bevy system allocates a collection; reuse a buffer or prove this schedule is cold.
+note: Advisory. Runtime path filtering excludes tests and preparation code.
+rule:
+  all:
+    - pattern: fn $FUNC($$$ARGS) { $$$BODY }
+    - has:
+        any:
+          - pattern: "Vec::new()"
+          - pattern: "Vec::with_capacity($$$A)"
+          - pattern: "HashMap::new()"
+          - pattern: "HashMap::with_capacity($$$A)"
+          - pattern: "$X.collect::<Vec<$T>>()"
+        stopBy: end
+constraints:
+  ARGS:
+    regex: "(?:Query|Res|ResMut|EventReader|EventWriter)<|\\bCommands\\b"
+  FUNC:
+    not:
+      regex: "^(test|bench|prepare|load|startup|setup)_"

@@ -2,6 +2,7 @@
 name = "bevyout"
 version = "0.1.0"
 edition = "2024"
+license = "GPL-3.0-or-later"
 
 [workspace]
 members = [".", "crates/bevyout-core", "crates/bevyout-xatlas"]
@@ -19,8 +20,8 @@ dialogue-yarn = ["dep:yarnspinner"]
 lightmap-gpu-solari = ["bevy/bevy_solari"]
 
 [dependencies]
-bevyout-core = { path = "crates/bevyout-core" }
-bevyout-xatlas = { path = "crates/bevyout-xatlas" }
+bevyout-core = { version = "0.1.0", path = "crates/bevyout-core" }
+bevyout-xatlas = { version = "0.1.0", path = "crates/bevyout-xatlas" }
 # WAV covers the ambient and interaction clips staged by the importer, while
 # Vorbis enables the original Fallout OGG voice assets. MP3 metadata is
 # retained in manifests, but Bevy's MP3 feature currently resolves to an
@@ -64,7 +65,7 @@ libc = "0.2"
 ktx2 = "0.5.0"
 lewton = "0.10.2"
 nalgebra = "0.34"
-nif = { git = "https://github.com/kelo221/nifty.git", rev = "17f5769", default-features = false, features = [
+nif = { version = "0.5.0", git = "https://github.com/kelo221/nifty.git", rev = "17f5769", default-features = false, features = [
   "fo3_glb",
 ] }
 rayon = "1.10"
@@ -112,7 +113,6 @@ bevy_pbr = { path = "third_party/bevy_pbr-0.19.0" }
 # no lib target).
 cucumber = "0.23"
 futures = "0.3"
-proptest = "1.6"
 
 [[test]]
 name = "features"

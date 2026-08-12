@@ -1,0 +1,7 @@
+id: bevy-schedule-chain-review
+language: Rust
+severity: warning
+message: Review .chain() serialization; prefer explicit ordering only across true data/deferred seams.
+note: Advisory. chain_ignore_deferred is intentionally not matched because it encodes a distinct contract.
+rule:
+  pattern: "$SYSTEMS.chain()"

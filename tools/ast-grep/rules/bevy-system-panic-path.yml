@@ -1,0 +1,21 @@
+id: bevy-system-panic-path
+language: Rust
+severity: warning
+message: Bevy system contains a panic/unwrap/expect path; handle recoverable runtime state explicitly.
+note: Advisory because invariants may justify expect; require a stable explanation when retained.
+rule:
+  all:
+    - pattern: fn $FUNC($$$ARGS) { $$$BODY }
+    - has:
+        any:
+          - pattern: "$X.unwrap()"
+          - pattern: "$X.expect($$$A)"
+          - pattern: "panic!($$$A)"
+          - pattern: "unreachable!($$$A)"
+        stopBy: end
+constraints:
+  ARGS:
+    regex: "(?:Query|Res|ResMut|EventReader|EventWriter)<|\\bCommands\\b"
+  FUNC:
+    not:
+      regex: "^(test|bench)_"

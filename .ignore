@@ -1,0 +1,9 @@
+# Large reference, generated, vendored, and worktree trees are not project search roots.
+/.bevyout/
+/.pi/worktrees/
+/BevyCheatSheet/
+/GECK-Notes/
+/NifConverter/
+/openmw-master/
+/target/
+/tools/bevyout-mcp/node_modules/

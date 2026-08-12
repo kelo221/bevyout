@@ -7,5 +7,8 @@ license = "MIT"
 description = "Small maintained Rust FFI boundary for vendored xatlas"
 build = "build.rs"
 
+[package.metadata.cargo-machete]
+ignored = ["cc"] # Used by build.rs; cargo-machete does not resolve build-script references.
+
 [build-dependencies]
 cc = "1.0"

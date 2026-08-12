@@ -1,20 +1,20 @@
 # bevyout Pi Harness
 
-This is a deliberately small, model-agnostic Pi bootstrap. It selects no
-provider or model.
+This is the Bevyout full/lean Pi harness. The launcher itself selects no
+provider or foreground model; saved agent routes are project-owned and bounded.
 
 ## Launch
 
 From any directory:
 
-```powershell
-& C:\Users\V\Projects\Rust\bevyout\Tools\pi-bevyout.ps1
+```sh
+bun run C:/Users/V/Projects/Rust/bevyout/tools/pi-bevyout.ts
 ```
 
 All Pi arguments are preserved:
 
-```powershell
-.\Tools\pi-bevyout.ps1 --provider openai --model <model-id>
+```sh
+bun run tools/pi-bevyout.ts --provider openai --model <model-id>
 ```
 
 The launcher changes to the repository root, disables automatic root context
@@ -27,7 +27,11 @@ and the project wiki.
 
 No model request or running viewer is required:
 
-```powershell
-.\Tools\pi-bevyout.ps1 --offline --version
+```sh
+bun run tools/pi-bevyout.ts --offline --version
+bun run tools/harness/doctor.ts
 git diff --check
 ```
+
+Root package aliases are also available, for example `bun run pi:lean`,
+`bun run harness:fast`, and `bun run harness:full`.

@@ -2,6 +2,7 @@
 name = "bevyout-core"
 version = "0.1.0"
 edition = "2024"
+license = "GPL-3.0-or-later"
 
 [dependencies]
 glam = { version = "=0.32.1", features = ["serde"] }

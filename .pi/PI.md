@@ -1,77 +1,60 @@
-# bevyout — Pi Context
+# bevyout Pi contract
 
-Work in `C:\Users\V\Projects\Rust\bevyout`, an offline recreation of Fallout 3
-built with Rust 2024 and Bevy 0.19. The default branch is `master`; the remote
-is GitHub. Never commit, push, open a PR, post externally, or alter unrelated
-git state unless the user explicitly asks.
+Rust 2024, stable 1.96, Bevy 0.19. Offline Fallout 3 recreation. `master` is
+default. Never commit, push, merge, publish, or alter unrelated git state unless
+explicitly requested. Never stage broadly. Bethesda-derived data stays in ignored
+`.bevyout/`; all committed fixtures are synthetic.
 
-## Response style
+## Work efficiently
 
-CAVEMAN MODE ACTIVE. Rules: Drop articles/filler/pleasantries/hedging. Fragments
-OK. Short synonyms. Pattern: [thing] [action] [reason]. [next step]. Not: "Sure!
-I would be happy to help you with that." Yes: "Bug in auth middleware. Fix:".
-Code/commits/security: write normal. User says "stop caveman" or "normal mode"
-to deactivate.
+- Use CodeGraph first when `.codegraph/` exists. Then Rust LSP/Lens. Keep `rg`
+  scoped and bounded.
+- Load only the relevant `.agents/skills/*/SKILL.md`. Live viewer tasks use
+  `bevyout-mcp`; renderer work uses `bevy-performance-audit`; prepared data uses
+  `bevyout-scene-pipeline`.
+- Choose one orchestration plane per run: Pi Subagents for extension-aware or
+  worktree waves; `/workflow` for inspectable built-in-tool workflows. Never mix.
+- Parallelize independent issues. Serialize work sharing runtime seams. Wave
+  workers use isolated worktrees; `bevy-wave-integrator` alone combines named
+  local branches into a separate integration branch. Nothing auto-merges/pushes.
+- Use `bun run tools/pi-bevyout.ts --lean` for small local edits. Full mode is default;
+  MCP is read-only unless `-RuntimeWrite` was explicitly selected.
 
-## Workflow
+## Architecture
 
-- If `.codegraph/` exists, use `codegraph explore "<question>"` before grep or
-  broad file reads. Keep fallback searches scoped and output bounded.
-- Read local Bevy references in `BevyCheatSheet/`, `BevyDocs/`, and
-  `bevy_markdown_docs/` before using generic or version-mismatched examples.
-- Keep `src/main.rs` a dispatcher and `src/cli.rs` the clap boundary.
-- Keep pure contracts and policy in `crates/bevyout-core`; it may depend only
-  on `std`, `serde`, and `glam`, never Bevy.
-- Keep Fallout-cell internals in `src/vsa/` and Bevy presentation in the
-  viewer boundary. Prefer narrow plugins and pure policy modules.
-- Use feature-first order: fix the feature list, write Cucumber and unit tests,
-  then implement. Every Cucumber scenario must have non-skipped steps.
-- Use dynamic-linking aliases while iterating: `cargo check-dev`,
-  `cargo test-dev`, and `cargo run-dev -- ...`.
-- Before handoff run `cargo fmt --check`,
-  `cargo clippy --all-targets -- -D warnings`, `cargo test`, and a
-  representative `cargo run-dev` command when the touched path permits it.
-- Use the bevyout MCP/BRP agent bridge for live viewer inspection,
-  screenshots, console commands, bounded profiling, and runtime acceptance.
-- Check the diff and report exact validation. Separate static/local proof from
-  anything not verified with real prepared data or a live viewer.
+- Preserve vertical slices. `src/main.rs` dispatches; `src/cli.rs` owns clap.
+  `bevyout-core` is pure policy/contracts and depends only on std/serde/glam.
+- Preserve viewer ordering: `Input -> Interaction -> WorldSync -> Ui`. Declare
+  ordering at plugin boundaries. Know that `Commands` are deferred; apply or
+  order deferred work deliberately before same-frame consumers.
+- Prefer one authoritative resource per domain. Do not mirror mutable truth
+  across Resources, Components, UI state, and prepared data.
+- Make mutable query disjointness provable with filters. Use `ParamSet` only when
+  overlap is intentional; never hold one set borrow while accessing another.
+- Keep hot systems allocation-free when practical: reuse buffers, avoid per-frame
+  collection creation/string formatting, and move I/O/CPU work to Bevy task pools.
+  Never block the main schedule on filesystem, locks, sleeps, or task joins.
+- Asset handles express lifetime. Cache loads, retain strong handles while needed,
+  and never perform routine `AssetServer::load` inside hot systems.
+- Keep app-world extraction separate from render-world prepare/queue. Render
+  resources belong to their world; do not reach across boundaries or hide sync.
+- Prepared serialized field changes require the mapped `*_REVISION` bump. Defaulted
+  fields still count. Viewers consume prepared artifacts; they do not repair them.
+- Local `bevy_pbr` fork is intentional. Preserve its staging upload path and
+  repository ownership; do not replace it with registry assumptions.
 
-## Project Rules
+## Change workflow
 
-- Preserve Vertical Slice Architecture and the explicit viewer schedule:
-  `Input -> Interaction -> WorldSync -> Ui`.
-- Bump the relevant `*_REVISION` whenever a prepared serialized type changes,
-  including new serde-defaulted fields.
-- Runtime item movement goes through `bevyout-core`'s canonical `ItemLedger`;
-  inventories, containers, and world drops are projections.
-- CLI diagnostics use deterministic `println!` text. Viewer diagnostics use
-  stable, grep-able `tracing` events, never `println!`.
-- Prepared point shadows are generated during `prepare`. Do not move them into
-  Blender or a per-frame runtime cubemap path. Realtime shadows remain explicit
-  opt-in and independent of prepared shadows.
-- Record-level container audio is authoritative; model cues may only fill
-  missing open/close fields through the existing prepared-audio path.
-- Put OpenMW-derived Rust code only in an isolated, attributed provenance
-  folder.
+Feature-first: define behavior, add Cucumber/unit regression coverage in non-inline
+test files, then implement. Iterate with `cargo check-dev`, `cargo test-dev`, and
+`cargo run-dev -- ...`. Do not run automatic `cargo clippy --fix` on dirty trees.
+Before handoff run the narrowest relevant harness mode, review the diff, then report
+static proof separately from live-viewer or compatible-real-data acceptance.
 
-## Landmines
+Viewer logs use stable `tracing`, not `println!`/`dbg!`. CLI deterministic output
+may use `println!`. Prepared point shadows remain prepare-time artifacts; realtime
+shadows are opt-in and independent.
 
-- Never commit Bethesda-derived RON, GLB, DDS, WAV, NIF, or other game data.
-  Derived content belongs under ignored `.bevyout/`; fixtures must be synthetic.
-- Never use `git add -A` or `git add .` at the repository root. Stage explicit
-  paths so worktrees, caches, and scratch files are not swept in.
-- Prepared caches can parse successfully while silently missing new defaulted
-  fields if their revision was not bumped.
-- Viewers consume prepared manifests and do not regenerate shadow artifacts.
-- WebGPU cannot upload CPU bytes directly to `Depth32Float`; the local
-  `bevy_pbr` patch uses an `R32Float` staging texture and one GPU upload pass.
-- Live capture can return black when the window is occluded, and frame timings
-  are meaningful only on a cool machine. Treat runtime artifacts and logs as
-  the acceptance evidence.
-- On Windows, stale viewer or Cargo processes can retain file locks during
-  final build gates.
-
-For multi-issue milestone work, follow the wave, issue, model-routing, manual
-acceptance, and PR conventions in `AGENTS.md` and `docs/plans/README.md`.
-Load detailed guidance only when relevant from `.agents/skills/*/SKILL.md`,
-the local Bevy docs, and the project wiki.
+Response style: compact and evidence-first. Normal prose for code, safety, and
+handoff. Load `AGENTS.md` or `docs/plans/README.md` only when their detailed wave,
+issue, acceptance, or contribution rules are needed.

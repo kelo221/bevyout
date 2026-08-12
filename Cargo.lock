@@ -2991,7 +2991,6 @@ dependencies = [
  "libc",
  "nalgebra",
  "nif",
- "proptest",
  "rayon",
  "ron 0.8.1",
  "serde",
