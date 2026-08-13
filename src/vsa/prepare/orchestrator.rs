@@ -699,10 +699,6 @@ fn prepare_cell(
     // in this selected cell, never to every content-wide PACK record. The
     // catalog input is also reused by the interior path below.
     let package_catalog_inputs = build_package_catalog_inputs(&parsed);
-    let early_package_linked_reference_ids = package_linked_reference_ids(
-        &actor_package_lists(&parsed),
-        &package_catalog_inputs.packages,
-    );
     if !cell.interior {
         let static_converter_revision = NATIVE_NIF_CONVERTER_REVISION;
         let actor_converter_revision = NATIVE_ACTOR_CONVERTER_REVISION;
@@ -744,6 +740,15 @@ fn prepare_cell(
             })
             .collect::<HashMap<_, _>>();
         attach_actor_assemblies(&mut actor_catalog, &actor_assemblies);
+        // Issue #305 review (issue #301 follow-up): resolve the package-point
+        // reference scope from the built actor catalog, the same source of
+        // truth the interior branch below uses, so a TPLT-inherited package
+        // list is not silently dropped -- `actor_package_lists` only ever
+        // read direct `PKID` values off the parsed plugin.
+        let exterior_package_linked_reference_ids = package_linked_reference_ids(
+            &actor_catalog_package_lists(&actor_catalog),
+            &package_catalog_inputs.packages,
+        );
         // Exterior workers share both the staging tree and the global
         // recipe-addressed `assets/` outputs. Hold the existing narrow
         // conversion lock before cache decisions are made, otherwise two
@@ -754,7 +759,7 @@ fn prepare_cell(
             parsed.references.clone(),
             &parsed.bases,
             &actor_models,
-            &early_package_linked_reference_ids,
+            &exterior_package_linked_reference_ids,
             &data_root,
             &session.archives,
             &staging_dir,
@@ -1029,10 +1034,18 @@ fn prepare_cell(
             assets_dir: &assets_dir,
             rebuild: args.rebuild_assets,
         };
+        // Issue #305 review: actor-animation conversion writes to the same
+        // shared, identity-addressed staging/GLB/report paths the placement
+        // conversion above guards against racing on. Re-acquire the narrow
+        // conversion lock for this span rather than holding it across the
+        // navigation/terrain/package work in between, which does not touch
+        // those shared paths and should stay parallel across cells.
+        let actor_animation_stage_guard = session.asset_stage_lock.lock().unwrap();
         let actor_animation_conversion =
             convert_actor_animation_catalog(&mut actor_animation_catalog, &conversion_context)?;
         let actor_animation_catalog_artifact =
             write_actor_animation_catalog(&cache_dir, cell_id, &actor_animation_catalog)?;
+        drop(actor_animation_stage_guard);
         let ready_animation_clips = actor_animation_catalog
             .animation_sets
             .iter()
@@ -2997,24 +3010,6 @@ fn stage_placements_with_package_points(
         .sort_by_key(|placement| placement.reference_form_id);
     stage.lights.sort_by_key(|light| light.reference_form_id);
     Ok(stage)
-}
-
-fn actor_package_lists(parsed: &ParsedPlugin) -> Vec<Vec<u32>> {
-    parsed
-        .references
-        .iter()
-        .filter(|reference| {
-            reference.initially_enabled
-                && matches!(reference.kind, ReferenceKind::Npc | ReferenceKind::Creature)
-        })
-        .filter_map(|reference| {
-            parsed
-                .bases
-                .get(&reference.base_form_id)
-                .and_then(|base| base.actor.as_ref())
-                .map(|actor| actor.package_form_ids.clone())
-        })
-        .collect()
 }
 
 fn actor_catalog_package_lists(catalog: &PreparedActorCatalog) -> Vec<Vec<u32>> {
