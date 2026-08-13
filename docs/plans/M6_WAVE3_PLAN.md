@@ -56,5 +56,51 @@ Codex runtime: GPT-5.6 Luna, Max reasoning.
 ## Shipped amendments
 
 - W3-A and W3-B policy lanes landed as commits `a9a68b95` and `f61e0116`.
-  The integrator feature seam and manual cover the pure policy outputs;
-  W3-C / #278 runtime integration remains blocked by gate #10.
+  The integrator feature seam and manual cover the pure policy outputs.
+- Gate #10 closed 2026-08-04, unblocking W3-C. Before dispatch, planning
+  found the exterior prepare pipeline discarded all actor placements
+  (`orchestrator.rs`'s exterior branch hardcoded `placements: Vec::new()`,
+  `apply_staged_assets` dropped the resolved `PreparedActor` assembly) —
+  independent of #10, so W3-C could not be a runtime-only change. Split
+  into a sequential Stage 1 (prepare, #299) and Stage 2 (runtime, #278)
+  on one branch/worktree (`m6-wave3-w3c`), per the roadmap's own
+  Sonnet-for-policy/Opus-for-runtime-integration guidance.
+- #299 (Sonnet): `367873bd`, `5bf11abb`, `c1c3f29a` — `ExteriorCellPackage`
+  gained an `actors` field, ACHR/ACRE assemblies are preserved instead of
+  discarded, exterior cells get actor/animation catalogs.
+  `EXTERIOR_CELL_PACKAGE_REVISION`/`CURRENT_PREPARE_REVISION` bumped.
+- #278 (Opus): `a802595e`..`a914248f` (7 commits) — new
+  `src/viewer/world/exterior/actors.rs` observes residency, binds/hands
+  off/unloads/restores one canonical actor via W3-A's policy, fixed two
+  live defects (cross-cell package-catalog lookup, unconditional nav
+  retargeting), added the `actorresidency` console command and
+  diagnostics counters.
+- Independent live re-verification (separate agent, fresh `curl` BRP
+  session) confirmed bind/handoff/eviction/restore and, critically, exactly
+  one live ECS entity for the tracked reference at every checkpoint via
+  `scene_snapshot` — the core no-duplicate-projection guarantee holds.
+  It also found `nav_bound` did not survive handoff/restore.
+- #303 (Sonnet, same branch): `32cb923c` fixed the nav-bind gap. Root
+  cause was not the hypothesized missing bind call on handoff (nav
+  components are untouched by handoff) but the exterior fall-guard
+  releasing the bind ~1.3s after a `setpos`-forced landing on
+  not-yet-settled destination collision, and restore's ordinary spawn
+  chain correctly leaving an actor unbound when its own AI package
+  fails to start (a separate, already-tracked gap, not a defect). Added
+  `reconcile_actor_nav_bindings`, a cheap idempotent per-frame retry for
+  any live tracked-but-unbound actor; survives evict/restore because
+  `bound_references` is deliberately never cleared on unload. Verified
+  live: `nav_bound: true` holds after both a forced handoff and a full
+  evict/restore cycle.
+- Follow-ups filed under #13, not fixed in this wave: #301 (exterior
+  actors lose their XLKR linked-reference chain, so packages using
+  near-linked-reference points fail `unresolved_point`), #302
+  (exterior-only `prepare` never writes the shared
+  `catalogs/<fingerprint>/packages.ron`, so package start fails
+  `catalog_unreadable` without an incidental interior cell in the same
+  run), #304 (fall-guard rebinds continuously at one specific test
+  coordinate — noisy, not incorrect, low priority).
+- Repository-wide `cargo fmt --check`/`cargo clippy --all-targets -- -D
+  warnings`/`cargo test` (699 Cucumber scenarios, 3470 steps) verified
+  clean independently by the orchestrator on the final branch state, not
+  only self-reported by executors.
