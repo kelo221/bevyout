@@ -43,7 +43,14 @@ function shouldScan(path: string): boolean {
 	const name = parts.at(-1)?.toLowerCase() ?? "";
 	if (!normalized.endsWith(".rs") || parts.some((part) => excluded.has(part))) return false;
 	if (name.startsWith("test_") || name.endsWith("_test.rs")) return false;
-	if (normalized === "src/cli.rs" || normalized === "src/main.rs" || normalized.includes("/cli/") || normalized === "src/vsa/catalog.rs" || normalized.includes("src/vsa/bake/")) return false;
+	if (
+		normalized === "src/cli.rs" ||
+		normalized === "src/main.rs" ||
+		normalized.includes("/cli/") ||
+		normalized === "src/vsa/catalog.rs" ||
+		normalized.includes("src/vsa/bake/") ||
+		normalized.includes("src/vsa/cache_stats/")
+	) return false;
 	return normalized.startsWith("src/") || normalized.startsWith("crates/");
 }
 

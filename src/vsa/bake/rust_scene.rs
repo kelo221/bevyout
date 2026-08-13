@@ -740,7 +740,7 @@ pub(crate) fn compose_scene_with_lightmap_density(
     for placement in ordered {
         if !asset_cache.contains_key(&placement.asset_path) {
             let path = resolve_asset_path(asset_root, &placement.asset_path);
-            let loaded = load_asset(&path, &mut resources)?;
+            let loaded = load_asset(asset_root, &path, &mut resources)?;
             source_material_count += loaded
                 .primitives
                 .iter()
@@ -984,8 +984,12 @@ impl RustBakeScene {
     }
 }
 
-fn load_asset(path: &Path, resources: &mut OutputResources) -> Result<LoadedAsset> {
-    let document = load_document(path)?;
+fn load_asset(
+    asset_root: &Path,
+    path: &Path,
+    resources: &mut OutputResources,
+) -> Result<LoadedAsset> {
+    let document = load_document(asset_root, path)?;
     let required = document
         .json
         .get("extensionsRequired")
@@ -1063,7 +1067,7 @@ pub(crate) fn asset_contains_animation(asset_root: &Path, relative: &str) -> Res
         .any(|window| window == b"\"animations\""))
 }
 
-fn load_document(path: &Path) -> Result<AssetDocument> {
+fn load_document(asset_root: &Path, path: &Path) -> Result<AssetDocument> {
     let bytes = fs::read(path).with_context(|| format!("could not read GLB {}", path.display()))?;
     let json = parse_glb_json(&bytes)?;
     let gltf = gltf::Gltf::from_slice(&bytes)
@@ -1077,7 +1081,7 @@ fn load_document(path: &Path) -> Result<AssetDocument> {
                 .context("GLB references a BIN buffer but has no binary blob")?
                 .clone(),
             gltf::buffer::Source::Uri(uri) if !uri.starts_with("data:") => {
-                fs::read(path.parent().unwrap_or_else(|| Path::new(".")).join(uri))?
+                fs::read(resolve_gltf_external_path(asset_root, path, uri)?)?
             }
             gltf::buffer::Source::Uri(_) => {
                 bail!("data-URI GLB buffers are unsupported: {}", path.display())
@@ -1099,7 +1103,7 @@ fn load_document(path: &Path) -> Result<AssetDocument> {
                     .to_vec()
             }
             gltf::image::Source::Uri { uri, .. } if !uri.starts_with("data:") => {
-                fs::read(path.parent().unwrap_or_else(|| Path::new(".")).join(uri))?
+                fs::read(resolve_gltf_external_path(asset_root, path, uri)?)?
             }
             gltf::image::Source::Uri { .. } => {
                 bail!("data-URI GLB images are unsupported: {}", path.display())
@@ -1113,6 +1117,30 @@ fn load_document(path: &Path) -> Result<AssetDocument> {
         buffers,
         image_bytes,
     })
+}
+
+/// Matches Bevy's RFC-1808 embed resolution for the subset emitted by the
+/// prepared cache. A leading slash means asset-root-relative, not filesystem
+/// root-relative; legacy relative glTF dependencies remain relative to their
+/// containing GLB.
+fn resolve_gltf_external_path(asset_root: &Path, glb_path: &Path, uri: &str) -> Result<PathBuf> {
+    if uri.contains('\\') || uri.contains(':') {
+        bail!("glTF external URI is not a canonical asset path: {uri}")
+    }
+    if let Some(root_relative) = uri.strip_prefix('/') {
+        if root_relative.is_empty()
+            || root_relative
+                .split('/')
+                .any(|component| component.is_empty() || component == "." || component == "..")
+        {
+            bail!("glTF root-relative URI is not canonical: {uri}")
+        }
+        return Ok(resolve_asset_path(asset_root, root_relative));
+    }
+    Ok(glb_path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join(uri.replace('/', std::path::MAIN_SEPARATOR_STR)))
 }
 
 fn collect_node_primitives(

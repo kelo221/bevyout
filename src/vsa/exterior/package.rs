@@ -5,7 +5,6 @@ use bevyout_core::manifest::exterior::{
     ExteriorBorderPortal, ExteriorCellPackage, ExteriorCoordinatePolicy, ExteriorDiagnostic,
     GridCoordinate, PreparedExteriorDoorDestination, PreparedExteriorEnvironment,
     PreparedExteriorLight, PreparedExteriorNavigation, PreparedExteriorObject, PreparedWater,
-    PreparedWeatherProfile,
 };
 
 use super::super::manifest::PreparedNavGraphSource;
@@ -178,28 +177,12 @@ pub(crate) fn build_cell_package(
             lighting.fog_far * crate::vsa::paths::FO3_SCALE
         }),
         dynamic_lighting_allowed: true,
-        weather_profiles: {
-            let timings = cell
-                .day_night_profile
-                .as_ref()
-                .map(|profile| profile.timings)
-                .unwrap_or_default();
-            let mut profiles = parsed
-                .weathers
-                .values()
-                .map(|weather| PreparedWeatherProfile {
-                    form_id: weather.form_id,
-                    editor_id: weather.editor_id.clone(),
-                    timings,
-                    sky_upper: weather.sky_upper,
-                    sky_lower: weather.sky_lower,
-                    ambient: weather.ambient,
-                    sunlight: weather.sunlight,
-                })
-                .collect::<Vec<_>>();
-            profiles.sort_by_key(|profile| profile.form_id);
-            profiles
-        },
+        timings: cell
+            .day_night_profile
+            .as_ref()
+            .map(|profile| profile.timings)
+            .unwrap_or_default(),
+        weather_profiles: Vec::new(),
     };
     let navigation = (!parsed.navmeshes.is_empty()).then(|| PreparedExteriorNavigation {
         revision: EXTERIOR_NAVIGATION_REVISION.into(),

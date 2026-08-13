@@ -12,7 +12,6 @@ mod policy;
 use std::any::TypeId;
 use std::collections::{BTreeMap, HashSet};
 use std::fs;
-use std::io::{BufRead, BufReader};
 use std::path::Path;
 
 use avian3d::prelude::Collider;
@@ -296,17 +295,11 @@ fn initialize(
     match fs::read_to_string(&index_path).and_then(|text| {
         ron::from_str::<ExteriorWorldspaceIndex>(&text).map_err(std::io::Error::other)
     }) {
-        Ok(mut index) if index.revision == EXTERIOR_INDEX_REVISION => {
-            let indexed_cells = index.cells.len();
-            index.cells.retain(|cell| {
-                let path = Path::new(&manifest.asset_root).join(&cell.package_path);
-                path.is_file() && exterior_package_has_current_revision(&path)
-            });
+        Ok(index) if index.revision == EXTERIOR_INDEX_REVISION => {
             info!(
-                "exterior package availability worldspace {:08x}: {}/{} indexed cells",
+                "exterior index ready worldspace {:08x}: {} cells; package availability validated on demand",
                 index.worldspace_form_id,
-                index.cells.len(),
-                indexed_cells
+                index.cells.len()
             );
             state.index = Some(index);
         }
@@ -381,27 +374,6 @@ fn initialize(
         );
     }
     info!("exterior resident {:08x}", manifest.cell.form_id);
-}
-
-fn exterior_package_has_current_revision(path: &Path) -> bool {
-    let Ok(file) = fs::File::open(path) else {
-        return false;
-    };
-    let Ok(lines) = BufReader::new(file)
-        .lines()
-        .take(4)
-        .collect::<Result<Vec<_>, _>>()
-    else {
-        return false;
-    };
-    exterior_package_header_has_current_revision(&lines)
-}
-
-fn exterior_package_header_has_current_revision(lines: &[String]) -> bool {
-    let expected = format!("revision: \"{}\"", EXTERIOR_CELL_PACKAGE_REVISION);
-    lines
-        .iter()
-        .any(|line| line.trim_start().starts_with("revision:") && line.contains(&expected))
 }
 
 fn place_player(

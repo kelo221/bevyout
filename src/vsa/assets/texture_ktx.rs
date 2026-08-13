@@ -268,6 +268,183 @@ pub(crate) fn transcode_glb_images_to_ktx2(bytes: &[u8]) -> Result<Vec<u8>> {
     Ok(result)
 }
 
+/// Replaces embedded KTX2 image bytes with asset-root-relative URIs while
+/// retaining a four-byte placeholder for each now-unused buffer view. Keeping
+/// the view indices stable avoids rewriting accessors or extension payloads;
+/// the image itself no longer references the placeholder.
+pub(crate) fn externalize_glb_ktx2_images(
+    bytes: &[u8],
+    mut publish: impl FnMut(usize, &[u8]) -> Result<String>,
+) -> Result<Vec<u8>> {
+    if bytes.len() < 28 || &bytes[0..4] != b"glTF" {
+        bail!("KTX2 extraction received an invalid GLB header");
+    }
+    let json_length = u32::from_le_bytes(bytes[12..16].try_into().unwrap()) as usize;
+    let json_end = 20usize
+        .checked_add(json_length)
+        .context("GLB JSON length overflow")?;
+    if json_end + 8 > bytes.len() || &bytes[16..20] != b"JSON" {
+        bail!("KTX2 extraction received an invalid GLB JSON chunk");
+    }
+    let binary_length =
+        u32::from_le_bytes(bytes[json_end..json_end + 4].try_into().unwrap()) as usize;
+    if &bytes[json_end + 4..json_end + 8] != b"BIN\0" {
+        bail!("KTX2 extraction received a GLB without a BIN chunk");
+    }
+    let binary_start = json_end + 8;
+    let binary_end = binary_start
+        .checked_add(binary_length)
+        .context("GLB BIN length overflow")?;
+    if binary_end > bytes.len() {
+        bail!("GLB BIN chunk extends beyond the file");
+    }
+
+    let mut document: serde_json::Value =
+        serde_json::from_slice(&bytes[20..json_end]).context("decoding GLB JSON")?;
+    let views = document
+        .get("bufferViews")
+        .and_then(serde_json::Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let images = document
+        .get("images")
+        .and_then(serde_json::Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let binary = &bytes[binary_start..binary_end];
+    let mut replacement_views = std::collections::HashSet::new();
+    let mut published_views = std::collections::HashMap::<usize, String>::new();
+
+    let Some(document_images) = document
+        .get_mut("images")
+        .and_then(serde_json::Value::as_array_mut)
+    else {
+        return Ok(bytes.to_vec());
+    };
+    for (image_index, image) in images.iter().enumerate() {
+        let Some(view_index) = image
+            .get("bufferView")
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|index| usize::try_from(index).ok())
+        else {
+            continue;
+        };
+        if image.get("mimeType").and_then(serde_json::Value::as_str) != Some("image/ktx2") {
+            bail!("embedded image {image_index} is not KTX2 after texture preparation");
+        }
+        let view = views
+            .get(view_index)
+            .with_context(|| format!("embedded image {image_index} has an invalid bufferView"))?;
+        let offset = view
+            .get("byteOffset")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0) as usize;
+        let length = view
+            .get("byteLength")
+            .and_then(serde_json::Value::as_u64)
+            .context("embedded image bufferView has no byteLength")? as usize;
+        let end = offset
+            .checked_add(length)
+            .context("embedded image range overflow")?;
+        let payload = binary
+            .get(offset..end)
+            .context("embedded image extends beyond the GLB BIN chunk")?;
+        validate_ktx2_payload(payload)?;
+        let asset_path = if let Some(path) = published_views.get(&view_index) {
+            path.clone()
+        } else {
+            let path = publish(image_index, payload)?;
+            validate_external_texture_asset_path(&path)?;
+            published_views.insert(view_index, path.clone());
+            path
+        };
+        let target = document_images
+            .get_mut(image_index)
+            .context("mutable GLB image disappeared during extraction")?;
+        let object = target
+            .as_object_mut()
+            .context("GLB image is not an object")?;
+        object.remove("bufferView");
+        object.insert(
+            "uri".into(),
+            serde_json::Value::String(format!("/{asset_path}")),
+        );
+        replacement_views.insert(view_index);
+    }
+    if replacement_views.is_empty() {
+        return Ok(bytes.to_vec());
+    }
+
+    let mut rebuilt_binary = Vec::new();
+    let document_views = document
+        .get_mut("bufferViews")
+        .and_then(serde_json::Value::as_array_mut)
+        .context("GLB has no mutable bufferViews array")?;
+    for (index, view) in document_views.iter_mut().enumerate() {
+        while !rebuilt_binary.len().is_multiple_of(4) {
+            rebuilt_binary.push(0);
+        }
+        let old = &views[index];
+        let offset = old
+            .get("byteOffset")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0) as usize;
+        let length = old
+            .get("byteLength")
+            .and_then(serde_json::Value::as_u64)
+            .context("bufferView has no byteLength")? as usize;
+        let payload = if replacement_views.contains(&index) {
+            &[0u8; 4][..]
+        } else {
+            let end = offset
+                .checked_add(length)
+                .context("bufferView range overflow")?;
+            binary
+                .get(offset..end)
+                .context("bufferView extends beyond the GLB BIN chunk")?
+        };
+        view["byteOffset"] = serde_json::Value::from(rebuilt_binary.len());
+        view["byteLength"] = serde_json::Value::from(payload.len());
+        rebuilt_binary.extend_from_slice(payload);
+    }
+    while !rebuilt_binary.len().is_multiple_of(4) {
+        rebuilt_binary.push(0);
+    }
+    document["buffers"][0]["byteLength"] = serde_json::Value::from(rebuilt_binary.len());
+
+    let mut json = serde_json::to_vec(&document)?;
+    while !json.len().is_multiple_of(4) {
+        json.push(b' ');
+    }
+    let total_length = 20 + json.len() + 8 + rebuilt_binary.len();
+    let mut result = Vec::with_capacity(total_length);
+    result.extend_from_slice(b"glTF");
+    result.extend_from_slice(&2u32.to_le_bytes());
+    result.extend_from_slice(&u32::try_from(total_length)?.to_le_bytes());
+    result.extend_from_slice(&u32::try_from(json.len())?.to_le_bytes());
+    result.extend_from_slice(b"JSON");
+    result.extend_from_slice(&json);
+    result.extend_from_slice(&u32::try_from(rebuilt_binary.len())?.to_le_bytes());
+    result.extend_from_slice(b"BIN\0");
+    result.extend_from_slice(&rebuilt_binary);
+    gltf::Gltf::from_slice(&result).context("validating external-texture GLB")?;
+    Ok(result)
+}
+
+fn validate_external_texture_asset_path(path: &str) -> Result<()> {
+    if !path.starts_with("objects/texture/")
+        || path.starts_with('/')
+        || path.contains('\\')
+        || path.split('/').any(|component| {
+            component.is_empty() || component == "." || component == ".." || component.contains(':')
+        })
+        || !path.ends_with(".ktx2")
+    {
+        bail!("external texture path is not a canonical object-store asset path");
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 #[path = "tests/texture_ktx.rs"]
 mod tests;

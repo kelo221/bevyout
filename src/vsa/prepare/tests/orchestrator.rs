@@ -61,6 +61,63 @@ fn all_exteriors_conflicts_with_every_other_cell_selector() {
 }
 
 #[test]
+fn single_exterior_selection_identifies_the_worldspace_index_to_publish() {
+    let exterior = CellInfo {
+        form_id: 0x0000_0aaa,
+        editor_id: Some("WastelandSynthetic".into()),
+        interior: false,
+        worldspace_form_id: Some(0x0000_003c),
+        ..synthetic_cell_info()
+    };
+    let interior = CellInfo {
+        form_id: 0x0001_7f37,
+        editor_id: Some("SuperDuperMart".into()),
+        interior: true,
+        worldspace_form_id: None,
+        ..synthetic_cell_info()
+    };
+    let cells = [&exterior, &interior];
+
+    assert_eq!(
+        selected_exterior_worldspace(cells, &CellSelector::FormId(0x0000_0aaa)),
+        Some(0x0000_003c)
+    );
+    assert_eq!(
+        selected_exterior_worldspace(cells, &CellSelector::EditorId("wastelandsynthetic".into())),
+        Some(0x0000_003c)
+    );
+    assert_eq!(
+        selected_exterior_worldspace(cells, &CellSelector::EditorId("SuperDuperMart".into())),
+        None
+    );
+}
+
+fn synthetic_cell_info() -> CellInfo {
+    CellInfo {
+        form_id: 0,
+        editor_id: None,
+        name: None,
+        interior: false,
+        behave_like_exterior: false,
+        ambient_rgba: [0.0; 4],
+        directional_rgba: [0.0; 4],
+        image_space_form_id: None,
+        image_space: None,
+        lighting_template_form_id: None,
+        lighting_template_flags: 0,
+        lighting_template: None,
+        raw_lighting: None,
+        effective_lighting: None,
+        water_form_id: None,
+        water_height: None,
+        grid: None,
+        worldspace_form_id: None,
+        day_night_profile: None,
+        day_night_preview_profile: None,
+    }
+}
+
+#[test]
 fn dialogue_voice_discovery_is_automatic_without_the_legacy_flag() {
     assert!(should_discover_dialogue_voice(false));
     assert!(should_discover_dialogue_voice(true));

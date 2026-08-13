@@ -1,6 +1,7 @@
 use super::*;
 use crate::cli::progress::ProgressReporter;
 use crate::vsa::catalog::{CellCatalog, build_cell_map};
+use crate::vsa::paths::CellSelector;
 use bevyout_core::actor::{
     ActorAppearanceAvailability, ActorAssemblyBlueprint as CoreActorAssemblyBlueprint,
     ActorAttachmentPoint, ActorFallbackLevel, ActorFallbackReason, ActorKind, ActorMeshRole,
@@ -11,6 +12,7 @@ use bevyout_core::actor::{
 use bevyout_core::actor_state::{ActorSkill, ActorValue};
 use bevyout_core::facegen::{FaceGenAssetKind, FaceGenDiagnostic, FaceGenRaw};
 use bevyout_core::image_space::IMAGE_SPACE_MODIFIER_CATALOG_REVISION;
+use bevyout_core::manifest::CellInfo;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// Dispatches `prepare`: a single legacy selector goes straight through
@@ -89,16 +91,43 @@ fn prepare_single(
         loaded_plugins,
         fingerprint,
     )?;
+    let selector = parse_cell_selector(&selector_input)?;
+    let exterior_worldspace = selected_exterior_worldspace(
+        session.parsed_content.cells().map(|(_, cell)| cell),
+        &selector,
+    );
     let mut output = Vec::new();
     progress.started("Prepare", Some(1));
     progress.phase_started("cell", Some(1));
-    let result = prepare_cell(&session, args, selector_input, &mut output, progress);
+    let mut result = prepare_cell(&session, args, selector_input, &mut output, progress);
+    if result.is_ok()
+        && let Some(worldspace_form_id) = exterior_worldspace
+    {
+        result = finalize_exterior_index(&session, &cache_dir, worldspace_form_id);
+    }
     for line in &output {
         println!("{line}");
     }
     progress.unit_completed_in_phase("cell", Some(1), None);
     progress.finished(result.is_ok());
     result
+}
+
+fn selected_exterior_worldspace<'a>(
+    cells: impl IntoIterator<Item = &'a CellInfo>,
+    selector: &CellSelector,
+) -> Option<u32> {
+    cells
+        .into_iter()
+        .find(|cell| match selector {
+            CellSelector::FormId(form_id) => cell.form_id == *form_id,
+            CellSelector::EditorId(editor_id) => cell
+                .editor_id
+                .as_deref()
+                .is_some_and(|candidate| candidate.eq_ignore_ascii_case(editor_id)),
+        })
+        .filter(|cell| !cell.interior)
+        .and_then(|cell| cell.worldspace_form_id)
 }
 
 fn prepare_batch(
@@ -681,6 +710,12 @@ fn prepare_cell(
             format!("cell {selector_input}/parse and stage assets"),
             None,
         );
+        // Exterior workers share both the staging tree and the global
+        // recipe-addressed `assets/` outputs. Hold the existing narrow
+        // conversion lock before cache decisions are made, otherwise two
+        // cells can both schedule and atomically replace the same GLB on
+        // Windows.
+        let asset_stage_guard = session.asset_stage_lock.lock().unwrap();
         let mut exterior_stage = stage_placements_with_package_points(
             parsed.references.clone(),
             &parsed.bases,
@@ -702,7 +737,6 @@ fn prepare_cell(
                 + exterior_stage.cache_explicit_rebuilds) as u64,
         );
         {
-            let _asset_stage_guard = session.asset_stage_lock.lock().unwrap();
             if let Some(worldspace_form_id) = cell.worldspace_form_id {
                 let cached = session
                     .worldspace_lod_cache
@@ -754,6 +788,7 @@ fn prepare_cell(
                 &exterior_stage.jobs,
                 &data_root,
                 &session.archives,
+                &cache_dir,
                 args.jobs,
                 args.strict,
             )
@@ -805,6 +840,7 @@ fn prepare_cell(
                 placement.step_support = false;
             }
         }
+        drop(asset_stage_guard);
 
         session.record_persistent_assets(&exterior_stage.placements);
 
@@ -921,6 +957,20 @@ fn prepare_cell(
             &package_path,
             to_string_pretty(&package, PrettyConfig::default())?,
         )?;
+        let storage_plan =
+            exterior_scene_storage_plan(package.worldspace_form_id, package.cell_form_id);
+        debug_assert_eq!(
+            package_path,
+            cache_dir.join(
+                storage_plan
+                    .package_path
+                    .replace('/', std::path::MAIN_SEPARATOR_STR,)
+            )
+        );
+        let terrain_prepared = package.terrain.is_some();
+        let object_count = package.static_objects.len()
+            + package.dynamic_objects.len()
+            + package.distant_objects.len();
         let manifest = PreparedSceneManifest {
             schema_version: CURRENT_MANIFEST_SCHEMA_VERSION,
             prepare_revision: Some(CURRENT_PREPARE_REVISION.into()),
@@ -948,7 +998,11 @@ fn prepare_cell(
             cell,
             placements: Vec::new(),
             lights: Vec::new(),
-            diagnostics,
+            diagnostics: if storage_plan.embed_content_diagnostics {
+                diagnostics
+            } else {
+                Vec::new()
+            },
             visual_issues: Vec::new(),
             navmeshes: Vec::new(),
             nav_graph: None,
@@ -962,7 +1016,7 @@ fn prepare_cell(
             mutability_summary: PreparedMutabilitySummary::default(),
             leveled_lists: std::collections::BTreeMap::new(),
             dialogue: None,
-            exterior: Some(package),
+            exterior: storage_plan.embed_package.then_some(package),
         };
         progress.phase_started(format!("cell {selector_input}/manifest publication"), None);
         let manifest_path = scene_dir.join("scene.ron");
@@ -973,16 +1027,8 @@ fn prepare_cell(
         output.push(format!(
             "prepared exterior {} terrain={} objects={} -> {}",
             super::super::manifest::cell_label(&manifest.cell),
-            manifest
-                .exterior
-                .as_ref()
-                .and_then(|package| package.terrain.as_ref())
-                .is_some(),
-            manifest.exterior.as_ref().map_or(0, |package| {
-                package.static_objects.len()
-                    + package.dynamic_objects.len()
-                    + package.distant_objects.len()
-            }),
+            terrain_prepared,
+            object_count,
             manifest_path.display()
         ));
         return Ok(());
@@ -1148,9 +1194,15 @@ fn prepare_cell(
                     format!("cell {selector_input}/native NIF/KF conversion"),
                     Some(jobs.len() as u64),
                 );
-                let batch =
-                    run_native_batch(&jobs, &data_root, &session.archives, args.jobs, args.strict)
-                        .context("native NIF batch conversion failed")?;
+                let batch = run_native_batch(
+                    &jobs,
+                    &data_root,
+                    &session.archives,
+                    &cache_dir,
+                    args.jobs,
+                    args.strict,
+                )
+                .context("native NIF batch conversion failed")?;
                 let summary = batch.summary();
                 let summary_line = summary.line();
                 output.push(summary_line.clone());
@@ -1725,28 +1777,50 @@ fn prepare_cell(
 }
 
 fn finalize_exterior_indexes(session: &BatchSession, cache_dir: &Path) -> Result<()> {
+    for template in session.exterior_indexes.iter() {
+        publish_exterior_index(session, cache_dir, template)?;
+    }
+    Ok(())
+}
+
+fn finalize_exterior_index(
+    session: &BatchSession,
+    cache_dir: &Path,
+    worldspace_form_id: u32,
+) -> Result<()> {
+    let template = session
+        .exterior_indexes
+        .iter()
+        .find(|index| index.worldspace_form_id == worldspace_form_id)
+        .with_context(|| format!("missing exterior worldspace index {worldspace_form_id:08x}"))?;
+    publish_exterior_index(session, cache_dir, template)
+}
+
+fn publish_exterior_index(
+    session: &BatchSession,
+    cache_dir: &Path,
+    template: &bevyout_core::manifest::exterior::ExteriorWorldspaceIndex,
+) -> Result<()> {
     let persistent_assets = session.persistent_assets.lock().unwrap().clone();
     let worldspace_lod = session.worldspace_lod_cache.lock().unwrap().clone();
-    for template in session.exterior_indexes.iter() {
-        let mut index = template.clone();
-        if let Some(lod_assets) = worldspace_lod.get(&index.worldspace_form_id) {
-            index.worldspace_lod = lod_assets.clone();
-        }
-        apply_staged_persistent_assets(&mut index, &persistent_assets);
-        let index_path = cache_dir
-            .join("worldspaces")
-            .join(format!("{:08x}", index.worldspace_form_id))
-            .join("index.ron");
-        if let Some(parent) = index_path.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        merge_existing_persistent_assets(&index_path, &mut index);
-        index.sort_deterministically();
-        fs::write(
-            &index_path,
-            to_string_pretty(&index, PrettyConfig::default())?,
-        )?;
+    let mut index = template.clone();
+    if let Some(lod_assets) = worldspace_lod.get(&index.worldspace_form_id) {
+        index.worldspace_lod = lod_assets.clone();
     }
+    apply_staged_persistent_assets(&mut index, &persistent_assets);
+    let index_path = cache_dir
+        .join("worldspaces")
+        .join(format!("{:08x}", index.worldspace_form_id))
+        .join("index.ron");
+    if let Some(parent) = index_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    merge_existing_persistent_assets(&index_path, &mut index);
+    index.sort_deterministically();
+    fs::write(
+        &index_path,
+        to_string_pretty(&index, PrettyConfig::default())?,
+    )?;
     Ok(())
 }
 

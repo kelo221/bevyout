@@ -750,3 +750,32 @@ fn prepared_shadow_resolution_and_rebuild_contract_parse() {
         );
     }
 }
+
+#[test]
+fn cache_stats_contract_parses() {
+    let cli = Cli::try_parse_from([
+        "bevyout",
+        "cache",
+        "stats",
+        "--cache",
+        "prepared-cache",
+        "--manifest-set",
+        "reports/sample-cells.ron",
+        "--json",
+        "reports/cache.json",
+        "--csv",
+        "reports/cache.csv",
+    ])
+    .unwrap();
+    let CommandLine::Cache(args) = cli.command else {
+        panic!("expected cache command");
+    };
+    let CacheCommand::Stats(args) = args.command;
+    assert_eq!(args.cache, PathBuf::from("prepared-cache"));
+    assert_eq!(
+        args.manifest_set.as_deref(),
+        Some(Path::new("reports/sample-cells.ron"))
+    );
+    assert_eq!(args.json.as_deref(), Some(Path::new("reports/cache.json")));
+    assert_eq!(args.csv.as_deref(), Some(Path::new("reports/cache.csv")));
+}

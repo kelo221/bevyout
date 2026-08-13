@@ -7,6 +7,7 @@ use std::io::Write;
 use bevyout_core::manifest::exterior::{
     EXTERIOR_INDEX_REVISION, ExteriorCellIndexEntry, ExteriorCoordinatePolicy, ExteriorDiagnostic,
     ExteriorPersistentReference, ExteriorWorldspaceIndex, GridCoordinate,
+    PreparedWeatherCatalogEntry,
 };
 
 use super::{DISTANT_REFERENCE_FLAG, PERSISTENT_REFERENCE_FLAG};
@@ -18,6 +19,18 @@ pub(crate) fn build_worldspace_indexes(
     content_fingerprint: &str,
 ) -> Vec<ExteriorWorldspaceIndex> {
     let policy = ExteriorCoordinatePolicy::default();
+    let mut weather_profiles = parsed
+        .weathers()
+        .map(|(_, weather)| PreparedWeatherCatalogEntry {
+            form_id: weather.form_id,
+            editor_id: weather.editor_id.clone(),
+            sky_upper: weather.sky_upper,
+            sky_lower: weather.sky_lower,
+            ambient: weather.ambient,
+            sunlight: weather.sunlight,
+        })
+        .collect::<Vec<_>>();
+    weather_profiles.sort_by_key(|profile| profile.form_id);
     let mut indexes = parsed
         .worldspaces()
         .map(|(_, worldspace)| ExteriorWorldspaceIndex {
@@ -28,6 +41,7 @@ pub(crate) fn build_worldspace_indexes(
             name: worldspace.name.clone(),
             climate_form_id: worldspace.climate_form_id,
             coordinate_policy: policy.clone(),
+            weather_profiles: weather_profiles.clone(),
             cells: Vec::new(),
             persistent_references: Vec::new(),
             worldspace_lod: Vec::new(),

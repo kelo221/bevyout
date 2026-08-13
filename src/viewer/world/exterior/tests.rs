@@ -18,10 +18,10 @@ use std::collections::BTreeMap;
 use super::{
     ExteriorCellRoot, ExteriorObjectLod, ExteriorPresentationStats, ExteriorWaterState,
     ExteriorWaterSurface, ExteriorWorldspaceLodCatalog, ExteriorWorldspaceLodVisual, FpsPlayer,
-    apply_action, clamp_adjacent_terrain_lods, exterior_package_header_has_current_revision,
-    exterior_presentation_json, finalize_evictions, initial_cell_state, mark_collision_ready,
-    select_unique_worldspace_lod_candidates, terrain_center, terrain_mesh_with_stride,
-    terrain_mesh_with_subdivisions, update_water_state, worldspace_lod_distance,
+    apply_action, clamp_adjacent_terrain_lods, exterior_presentation_json, finalize_evictions,
+    initial_cell_state, mark_collision_ready, select_unique_worldspace_lod_candidates,
+    terrain_center, terrain_mesh_with_stride, terrain_mesh_with_subdivisions, update_water_state,
+    worldspace_lod_distance,
 };
 use super::{diagnostics, lifecycle};
 
@@ -240,18 +240,6 @@ fn worldspace_lod_distance_uses_level_ranges_and_block_policy() {
         Some(1_200.0)
     );
     assert!(worldspace_lod_distance(&blocks, center + Vec3::X * 1_200.1).is_none());
-}
-
-#[test]
-fn stale_exterior_package_headers_are_not_resident_candidates() {
-    assert!(exterior_package_header_has_current_revision(&[
-        "(".into(),
-        "    revision: \"exterior-cell-package-v7-terrain-normal-map\",".into(),
-    ]));
-    assert!(!exterior_package_header_has_current_revision(&[
-        "(".into(),
-        "    revision: \"exterior-cell-package-v6\",".into(),
-    ]));
 }
 
 #[test]

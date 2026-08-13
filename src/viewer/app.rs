@@ -24,7 +24,8 @@ pub(crate) fn run_view(manifest_path: PathBuf, options: RunViewOptions) -> Resul
     } = options;
     let manifest_path = fs::canonicalize(&manifest_path).context("manifest does not exist")?;
     let text = fs::read_to_string(&manifest_path)?;
-    let manifest: PreparedSceneManifest = from_str(&text).context("invalid scene manifest")?;
+    let mut manifest: PreparedSceneManifest = from_str(&text).context("invalid scene manifest")?;
+    crate::vsa::hydrate_exterior_package(&mut manifest)?;
     ensure_prepared_manifest_compatible_any(
         &manifest,
         SUPPORTED_PREPARED_CONVERTER_REVISIONS,

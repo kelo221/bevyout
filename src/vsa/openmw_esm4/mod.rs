@@ -670,6 +670,10 @@ impl ParsedContentSet {
         self.state.worldspaces.iter()
     }
 
+    pub(crate) fn weathers(&self) -> impl Iterator<Item = (&u32, &WeatherRecord)> {
+        self.state.weathers.iter()
+    }
+
     pub(crate) fn land_for_cell(&self, cell_form_id: u32) -> Option<&LandRecord> {
         self.state.lands.get(&cell_form_id).map(|(_, land)| land)
     }

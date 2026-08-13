@@ -13,6 +13,7 @@ fn index() -> ExteriorWorldspaceIndex {
         name: None,
         climate_form_id: None,
         coordinate_policy: policy.clone(),
+        weather_profiles: Vec::new(),
         cells: [-1i32, 0, 1]
             .into_iter()
             .map(|x| ExteriorCellIndexEntry {

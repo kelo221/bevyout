@@ -110,8 +110,18 @@ pub(crate) fn prepare_worldspace_lod(
     let mut converted = 0usize;
     let mut failed = 0usize;
     if !jobs.is_empty() {
-        let batch = run_native_batch(&jobs, data_root, archives, requested_workers, strict)
-            .context("native worldspace LOD conversion failed")?;
+        let cache_dir = assets_dir
+            .parent()
+            .context("worldspace LOD assets directory has no cache parent")?;
+        let batch = run_native_batch(
+            &jobs,
+            data_root,
+            archives,
+            cache_dir,
+            requested_workers,
+            strict,
+        )
+        .context("native worldspace LOD conversion failed")?;
         let summary = batch.summary().line();
         output.push(summary.clone());
         diagnostics.push(Diagnostic {

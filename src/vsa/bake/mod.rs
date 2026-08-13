@@ -159,8 +159,9 @@ pub(crate) fn load_prepared_manifest(manifest_path: &Path) -> Result<PreparedSce
             manifest_path.display()
         )
     })?;
-    let manifest: PreparedSceneManifest =
+    let mut manifest: PreparedSceneManifest =
         ron::de::from_str(&text).context("invalid scene manifest; run prepare before bake")?;
+    crate::vsa::hydrate_exterior_package(&mut manifest)?;
     ensure_prepared_manifest_compatible_any(
         &manifest,
         SUPPORTED_PREPARED_CONVERTER_REVISIONS,

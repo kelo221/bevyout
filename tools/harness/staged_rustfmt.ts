@@ -12,7 +12,8 @@ function run(command: string[], check = false) {
 }
 
 const rust = run(["git", "diff", "--cached", "--name-only", "--diff-filter=ACMR"]).stdout.toString()
-	.split(/\r?\n/).filter((name) => name.endsWith(".rs"));
+	.split(/\r?\n/)
+	.filter((name) => name.endsWith(".rs") && !name.startsWith("third_party/"));
 if (rust.length === 0) {
 	console.log("Staged rustfmt passed (no staged Rust files)");
 	process.exit(0);

@@ -27,6 +27,9 @@ pub struct Cli {
 
 #[derive(Subcommand, Debug)]
 pub enum CommandLine {
+    /// Inspect, verify, migrate, and maintain the prepared cache.
+    #[command(name = "cache")]
+    Cache(CacheArgs),
     /// Extract a Fallout cell, stage its assets, and create a Bevy manifest.
     #[command(name = "prepare")]
     Prepare(PrepareArgs),
@@ -63,6 +66,35 @@ pub enum CommandLine {
     /// Print a prepared exterior worldspace index in stable catalog form.
     #[command(name = "exterior-catalog")]
     ExteriorCatalog(ExteriorCatalogArgs),
+}
+
+#[derive(Parser, Debug)]
+pub struct CacheArgs {
+    #[command(subcommand)]
+    pub(crate) command: CacheCommand,
+}
+
+#[derive(Subcommand, Debug)]
+pub(crate) enum CacheCommand {
+    /// Measure logical, allocated, categorized, and duplicate prepared-cache bytes.
+    #[command(name = "stats")]
+    Stats(CacheStatsArgs),
+}
+
+#[derive(Parser, Debug, Clone)]
+pub struct CacheStatsArgs {
+    /// Prepared cache root.
+    #[arg(long, default_value = ".bevyout/cache", value_name = "DIR")]
+    pub(crate) cache: PathBuf,
+    /// Optional RON document whose string paths select scene manifests or cache roots.
+    #[arg(long, value_name = "FILE.ron")]
+    pub(crate) manifest_set: Option<PathBuf>,
+    /// Write the deterministic full inventory as JSON.
+    #[arg(long, value_name = "FILE.json")]
+    pub(crate) json: Option<PathBuf>,
+    /// Write the deterministic per-file inventory as CSV.
+    #[arg(long, value_name = "FILE.csv")]
+    pub(crate) csv: Option<PathBuf>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]

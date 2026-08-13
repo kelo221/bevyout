@@ -199,6 +199,29 @@ fn terrain_material_resolves_txst_and_writes_cell_local_albedo() {
             .iter()
             .any(|diagnostic| diagnostic.message.contains("textures/test.png"))
     );
+
+    let mut same_payload_from_another_cell = terrain.clone();
+    super::super::prepare_terrain_albedo(
+        &mut same_payload_from_another_cell,
+        &[],
+        &landscape,
+        &texture_sets,
+        &root,
+        &[],
+        &root,
+        "synthetic",
+        0x5678,
+        &mut diagnostics,
+    )
+    .unwrap();
+    assert_eq!(
+        same_payload_from_another_cell.albedo_asset_path, terrain.albedo_asset_path,
+        "different terrain recipes with identical final bytes must share one object"
+    );
+    assert_eq!(
+        same_payload_from_another_cell.normal_asset_path, terrain.normal_asset_path,
+        "identical final normal maps must also share one object"
+    );
     let _ = fs::remove_dir_all(&root);
 }
 

@@ -9,11 +9,12 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use serde::{Deserialize, Serialize};
 
-pub const EXTERIOR_INDEX_REVISION: &str = "exterior-index-v3-worldspace-lod";
-pub const EXTERIOR_CELL_PACKAGE_REVISION: &str = "exterior-cell-package-v7-terrain-normal-map";
+pub const EXTERIOR_INDEX_REVISION: &str = "exterior-index-v4-shared-weather-catalog";
+pub const EXTERIOR_CELL_PACKAGE_REVISION: &str =
+    "exterior-cell-package-v9-shared-weather-catalog-object-store-terrain";
 pub const EXTERIOR_COORDINATE_POLICY_REVISION: &str = "fo3-exterior-coordinates-v1";
 pub const EXTERIOR_LOD_POLICY_REVISION: &str = "exterior-lod-v3-worldspace-assets";
-pub const EXTERIOR_ENVIRONMENT_REVISION: &str = "exterior-environment-v2";
+pub const EXTERIOR_ENVIRONMENT_REVISION: &str = "exterior-environment-v3-shared-weather-catalog";
 pub const EXTERIOR_NAVIGATION_REVISION: &str = "exterior-nav-v3";
 
 /// Fallout's exterior grid is 4096 plugin units wide.  Existing bevyout
@@ -125,6 +126,11 @@ pub struct ExteriorWorldspaceIndex {
     pub name: Option<String>,
     pub climate_form_id: Option<u32>,
     pub coordinate_policy: ExteriorCoordinatePolicy,
+    /// Content-set weather colors stored once per worldspace instead of once
+    /// per exterior cell package. Cell-local climate timings remain on the
+    /// environment and are combined with these colors at runtime.
+    #[serde(default)]
+    pub weather_profiles: Vec<PreparedWeatherCatalogEntry>,
     pub cells: Vec<ExteriorCellIndexEntry>,
     pub persistent_references: Vec<ExteriorPersistentReference>,
     /// Prepared vanilla worldspace terrain/landmark LOD tiles. These are
@@ -139,6 +145,7 @@ impl ExteriorWorldspaceIndex {
     pub fn sort_deterministically(&mut self) {
         self.cells
             .sort_by_key(|cell| (cell.grid, cell.cell_form_id));
+        self.weather_profiles.sort_by_key(|profile| profile.form_id);
         self.persistent_references
             .sort_by_key(|reference| reference.reference_form_id);
         self.worldspace_lod.sort_by_key(|asset| {
@@ -379,11 +386,25 @@ pub struct PreparedExteriorEnvironment {
     pub fog_near: f32,
     pub fog_far: f32,
     pub dynamic_lighting_allowed: bool,
-    /// All prepared WTHR records from the selected content set.  Keeping the
-    /// compact keyframes in the package lets runtime weather transitions stay
-    /// data-driven without reopening source plugins or archives.
+    /// Climate timings are cell-local because an exterior cell can inherit a
+    /// different climate while using colors from the shared weather catalog.
     #[serde(default)]
+    pub timings: crate::time_of_day::DayNightTimings,
+    /// Compatibility input for packages written before the shared worldspace
+    /// weather catalog. New packages leave this empty and omit it from RON.
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub weather_profiles: Vec<PreparedWeatherProfile>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct PreparedWeatherCatalogEntry {
+    pub form_id: u32,
+    pub editor_id: Option<String>,
+    pub sky_upper: crate::time_of_day::ColorKeyframes,
+    pub sky_lower: crate::time_of_day::ColorKeyframes,
+    pub ambient: crate::time_of_day::ColorKeyframes,
+    pub sunlight: crate::time_of_day::ColorKeyframes,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -395,6 +416,32 @@ pub struct PreparedWeatherProfile {
     pub sky_lower: crate::time_of_day::ColorKeyframes,
     pub ambient: crate::time_of_day::ColorKeyframes,
     pub sunlight: crate::time_of_day::ColorKeyframes,
+}
+
+pub fn resolve_prepared_weather_profile(
+    environment: &PreparedExteriorEnvironment,
+    catalog: &[PreparedWeatherCatalogEntry],
+    form_id: u32,
+) -> Option<PreparedWeatherProfile> {
+    catalog
+        .iter()
+        .find(|profile| profile.form_id == form_id)
+        .map(|profile| PreparedWeatherProfile {
+            form_id: profile.form_id,
+            editor_id: profile.editor_id.clone(),
+            timings: environment.timings,
+            sky_upper: profile.sky_upper,
+            sky_lower: profile.sky_lower,
+            ambient: profile.ambient,
+            sunlight: profile.sunlight,
+        })
+        .or_else(|| {
+            environment
+                .weather_profiles
+                .iter()
+                .find(|profile| profile.form_id == form_id)
+                .cloned()
+        })
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

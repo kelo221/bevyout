@@ -321,13 +321,101 @@ fn malformed_nif_failure_is_isolated_and_leaves_no_outputs() {
     fs::create_dir_all(&root).unwrap();
     let failed = job(&root, 1);
     fs::write(&failed.input, b"not a nif").unwrap();
-    let result =
-        run_native_batch(std::slice::from_ref(&failed), &root, &[], Some(1), false).unwrap();
+    let result = run_native_batch(
+        std::slice::from_ref(&failed),
+        &root,
+        &[],
+        &root,
+        Some(1),
+        false,
+    )
+    .unwrap();
     assert_eq!(result.summary().failed, 1);
     assert!(!failed.output.exists());
     assert!(!failed.physics_output.exists());
-    let strict =
-        run_native_batch(std::slice::from_ref(&failed), &root, &[], Some(1), true).unwrap();
+    let strict = run_native_batch(
+        std::slice::from_ref(&failed),
+        &root,
+        &[],
+        &root,
+        Some(1),
+        true,
+    )
+    .unwrap();
     assert!(strict.enforce_strict(true).is_err());
+    let _ = fs::remove_dir_all(root);
+}
+
+fn glb_with_embedded_prepared_texture() -> Vec<u8> {
+    let geometry = [9u8, 8, 7, 6, 5, 4, 3, 2];
+    let mut ktx2 = vec![0; 80];
+    ktx2[..12].copy_from_slice(crate::vsa::assets::KTX2_IDENTIFIER);
+    ktx2[20..24].copy_from_slice(&2u32.to_le_bytes());
+    ktx2[24..28].copy_from_slice(&2u32.to_le_bytes());
+    ktx2[40..44].copy_from_slice(&1u32.to_le_bytes());
+    let mut binary = geometry.to_vec();
+    binary.extend_from_slice(&ktx2);
+    let document = serde_json::json!({
+        "asset": {"version": "2.0"},
+        "buffers": [{"byteLength": binary.len()}],
+        "bufferViews": [
+            {"buffer": 0, "byteOffset": 0, "byteLength": geometry.len()},
+            {"buffer": 0, "byteOffset": geometry.len(), "byteLength": ktx2.len()}
+        ],
+        "images": [{"bufferView": 1, "mimeType": "image/ktx2"}],
+        "textures": [{"source": 0}]
+    });
+    let mut json = serde_json::to_vec(&document).unwrap();
+    while !json.len().is_multiple_of(4) {
+        json.push(b' ');
+    }
+    let total = 20 + json.len() + 8 + binary.len();
+    let mut result = Vec::new();
+    result.extend_from_slice(b"glTF");
+    result.extend_from_slice(&2u32.to_le_bytes());
+    result.extend_from_slice(&(total as u32).to_le_bytes());
+    result.extend_from_slice(&(json.len() as u32).to_le_bytes());
+    result.extend_from_slice(b"JSON");
+    result.extend_from_slice(&json);
+    result.extend_from_slice(&(binary.len() as u32).to_le_bytes());
+    result.extend_from_slice(b"BIN\0");
+    result.extend_from_slice(&binary);
+    result
+}
+
+fn first_image_uri(glb: &[u8]) -> String {
+    let json_len = u32::from_le_bytes(glb[12..16].try_into().unwrap()) as usize;
+    let document: serde_json::Value = serde_json::from_slice(&glb[20..20 + json_len]).unwrap();
+    document["images"][0]["uri"].as_str().unwrap().to_owned()
+}
+
+#[test]
+fn native_glbs_with_the_same_texture_share_one_external_object() {
+    let root = std::env::temp_dir().join(format!(
+        "bevyout-native-external-texture-{}",
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).unwrap();
+    let first = job(&root, 41);
+    let second = job(&root, 42);
+    let source = glb_with_embedded_prepared_texture();
+    fs::write(&first.output, &source).unwrap();
+    fs::write(&second.output, &source).unwrap();
+
+    externalize_native_glb_textures(&first, &root).unwrap();
+    externalize_native_glb_textures(&second, &root).unwrap();
+
+    let first_bytes = fs::read(&first.output).unwrap();
+    let second_bytes = fs::read(&second.output).unwrap();
+    let first_uri = first_image_uri(&first_bytes);
+    assert_eq!(first_uri, first_image_uri(&second_bytes));
+    assert!(first_uri.starts_with("/objects/texture/"));
+    assert_eq!(
+        fs::read(root.join(first_uri.trim_start_matches('/'))).unwrap(),
+        &source[source.len() - 80..]
+    );
+    let store = FsPreparedObjectStore::open(&root).unwrap();
+    assert_eq!(store.object_count().unwrap(), 1);
     let _ = fs::remove_dir_all(root);
 }

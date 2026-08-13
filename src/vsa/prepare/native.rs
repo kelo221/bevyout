@@ -6,6 +6,10 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use bevyout_core::facegen::{FaceGenAssetKind, FaceGenDiagnostic};
 
 use crate::cli::NifConversionMode;
+use crate::vsa::cache_store::{
+    CandidateObject, FsPreparedObjectStore, PreparedObjectKind, PreparedObjectStore,
+    PreparedRecipeInputs, normalize_source_path,
+};
 use crate::vsa::nif_convert::{
     ActorSceneConversionRequest, NifConversionRequest, NifConversionResult, convert_actor_scene,
     convert_nif,
@@ -61,6 +65,7 @@ pub(crate) fn run_native_batch(
     jobs: &[AssetJob],
     data_root: &Path,
     archives: &[crate::vsa::bsa::BsaArchive],
+    cache_dir: &Path,
     requested_workers: Option<usize>,
     strict: bool,
 ) -> Result<NativeBatchResult> {
@@ -72,7 +77,7 @@ pub(crate) fn run_native_batch(
         jobs.len()
     );
     let outcomes = run_bounded(jobs, worker_count, |index, job| {
-        convert_native_job(index, job, data_root, archives, strict)
+        convert_native_job(index, job, data_root, archives, cache_dir, strict)
     });
     let outcomes = sorted_native_outcomes(&outcomes);
     Ok(NativeBatchResult { outcomes })
@@ -83,6 +88,7 @@ fn convert_native_job(
     job: &AssetJob,
     data_root: &Path,
     archives: &[crate::vsa::bsa::BsaArchive],
+    cache_dir: &Path,
     strict: bool,
 ) -> NativeJobOutcome {
     let result = match job.kind {
@@ -117,6 +123,8 @@ fn convert_native_job(
         AssetJobKind::ActorAssembly => convert_native_actor(job, data_root, archives, strict),
     }
     .and_then(|conversion| {
+        externalize_native_glb_textures(job, cache_dir)
+            .context("externalizing native GLB textures")?;
         validate_asset_cache_pair(&job.output, &job.physics_output)
             .context("validating native GLB/physics output")?;
         validate_glb_images(&job.output).context("validating native GLB textures")?;
@@ -150,6 +158,45 @@ fn convert_native_job(
             }
         }
     }
+}
+
+fn externalize_native_glb_textures(job: &AssetJob, cache_dir: &Path) -> Result<()> {
+    let bytes = fs::read(&job.output)
+        .with_context(|| format!("reading native GLB {}", job.output.display()))?;
+    let store = FsPreparedObjectStore::open(cache_dir)?;
+    let glb_identity = job
+        .output
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .context("native GLB output has no UTF-8 file stem")?;
+    let rewritten =
+        super::super::assets::externalize_glb_ktx2_images(&bytes, |image_index, payload| {
+            let recipe = PreparedRecipeInputs {
+                recipe_version: 1,
+                kind: PreparedObjectKind::Texture,
+                source_identity: normalize_source_path(&format!(
+                    "generated/glb/{glb_identity}/image-{image_index}.ktx2"
+                ))?,
+                input_hashes: vec![fingerprint(payload)],
+                converter_revision: "glb-external-texture-v1".into(),
+                format_policy_revision: "ktx2-preserve-v1".into(),
+                canonical_settings: Vec::new(),
+            };
+            let object = store.publish(
+                &recipe,
+                CandidateObject::from_bytes(PreparedObjectKind::Texture, "ktx2", payload.to_vec()),
+            )?;
+            Ok(store.object_asset_path(&object))
+        })?;
+    if rewritten == bytes {
+        return Ok(());
+    }
+    let temporary = job
+        .output
+        .with_extension(format!("glb.external-textures-{}.tmp", std::process::id()));
+    fs::write(&temporary, rewritten)
+        .with_context(|| format!("writing external-texture GLB {}", temporary.display()))?;
+    super::super::assets::atomic_replace(&temporary, &job.output)
 }
 
 fn convert_native_actor(
