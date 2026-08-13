@@ -10,8 +10,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use serde::{Deserialize, Serialize};
 
 pub const EXTERIOR_INDEX_REVISION: &str = "exterior-index-v4-shared-weather-catalog";
-pub const EXTERIOR_CELL_PACKAGE_REVISION: &str =
-    "exterior-cell-package-v10-actor-catalog";
+pub const EXTERIOR_CELL_PACKAGE_REVISION: &str = "exterior-cell-package-v10-actor-catalog";
 pub const EXTERIOR_COORDINATE_POLICY_REVISION: &str = "fo3-exterior-coordinates-v1";
 pub const EXTERIOR_LOD_POLICY_REVISION: &str = "exterior-lod-v3-worldspace-assets";
 pub const EXTERIOR_ENVIRONMENT_REVISION: &str = "exterior-environment-v3-shared-weather-catalog";

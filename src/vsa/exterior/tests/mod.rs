@@ -39,7 +39,11 @@ fn synthetic_exterior_cell() -> CellInfo {
     }
 }
 
-fn synthetic_actor_reference(kind: ReferenceKind, form_id: u32, base_form_id: u32) -> ReferenceRecord {
+fn synthetic_actor_reference(
+    kind: ReferenceKind,
+    form_id: u32,
+    base_form_id: u32,
+) -> ReferenceRecord {
     ReferenceRecord {
         kind,
         form_id,

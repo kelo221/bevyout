@@ -721,7 +721,9 @@ fn prepare_cell(
         let actor_references = parsed
             .references
             .iter()
-            .filter(|reference| matches!(reference.kind, ReferenceKind::Npc | ReferenceKind::Creature))
+            .filter(|reference| {
+                matches!(reference.kind, ReferenceKind::Npc | ReferenceKind::Creature)
+            })
             .cloned()
             .collect::<Vec<_>>();
         let actor_catalog_inputs = build_actor_catalog_inputs(&parsed, &actor_references);
@@ -737,7 +739,9 @@ fn prepare_cell(
         )?;
         let actor_assemblies = actor_models
             .iter()
-            .map(|(reference_form_id, appearance)| (*reference_form_id, appearance.blueprint.clone()))
+            .map(|(reference_form_id, appearance)| {
+                (*reference_form_id, appearance.blueprint.clone())
+            })
             .collect::<HashMap<_, _>>();
         attach_actor_assemblies(&mut actor_catalog, &actor_assemblies);
         // Exterior workers share both the staging tree and the global
@@ -1034,7 +1038,8 @@ fn prepare_cell(
             .iter()
             .flat_map(|set| set.clips.iter())
             .filter(|clip| {
-                clip.status == bevyout_core::actor_animation::PreparedActorAnimationClipStatus::Ready
+                clip.status
+                    == bevyout_core::actor_animation::PreparedActorAnimationClipStatus::Ready
             })
             .count();
         let actor_animation_catalog_summary = format!(
