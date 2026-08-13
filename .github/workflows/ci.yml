@@ -151,6 +151,8 @@ jobs:
 
       - name: Install Bun
         uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: canary
 
       - name: Install MCP dependencies
         run: bun install --cwd tools/bevyout-mcp --frozen-lockfile --ignore-scripts
