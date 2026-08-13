@@ -395,6 +395,26 @@ pub(crate) fn apply_staged_assets(
             actor.assembly = None;
             continue;
         };
+        // Issue #305 review: defensive mirror of the object loop below. The
+        // orchestrator already scrubs a failed placement's `asset_path`
+        // before this runs on the exterior path, so `failed_assets` should
+        // never actually contain this placement's path here -- but if that
+        // ordering ever changes, an actor must not retain a path to a
+        // missing GLB either.
+        if let Some(asset_path) = placement.asset_path.as_deref()
+            && let Some(reason) = failed_assets.get(asset_path)
+        {
+            actor.asset_path = None;
+            actor.physics_asset_path = None;
+            actor.assembly = None;
+            package.diagnostics.push(ExteriorDiagnostic {
+                code: "native_asset_failed".into(),
+                form_id: Some(actor.reference_form_id),
+                severity: "warning".into(),
+                message: reason.clone(),
+            });
+            continue;
+        }
         actor.asset_path = placement.asset_path.clone();
         actor.physics_asset_path = placement.physics_asset_path.clone();
         actor.assembly = match &placement.semantic {
