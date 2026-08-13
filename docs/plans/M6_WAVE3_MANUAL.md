@@ -3,8 +3,8 @@
 This manual exercises the policy contracts shipped by W3-A and W3-B, and
 records the W3-C runtime acceptance (#278) run after gate #10 closed. It
 proves one gameplay actor binds, crosses a cell border, survives source
-eviction/reload, and retains one canonical state — not the downstream #87 or
-#14 gates.
+eviction/reload, and retains one canonical state — not the downstream gate
+#87 or gate #14.
 
 ## 1. Run the executable policy scenarios
 
