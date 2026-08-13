@@ -89,7 +89,7 @@ fn animation_zoo_requires_an_actor_and_validates_bridge_options() {
 }
 
 #[test]
-fn ragdoll_lab_defaults_to_avian_and_accepts_boxddd_comparison() {
+fn ragdoll_lab_defaults_to_boxddd() {
     let cli = Cli::try_parse_from([
         "bevyout",
         "ragdoll-lab",
@@ -103,7 +103,7 @@ fn ragdoll_lab_defaults_to_avian_and_accepts_boxddd_comparison() {
     };
     assert_eq!(args.selector, "SuperDuperMart");
     assert_eq!(args.actor, "00041606");
-    assert_eq!(args.backend, RagdollLabBackend::Avian);
+    assert_eq!(args.backend, RagdollLabBackend::Boxddd);
     assert_eq!(args.agent_port, 15_702);
 
     let cli = Cli::try_parse_from([

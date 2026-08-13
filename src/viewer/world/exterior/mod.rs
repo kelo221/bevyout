@@ -14,7 +14,6 @@ use std::collections::{BTreeMap, HashSet};
 use std::fs;
 use std::path::Path;
 
-use avian3d::prelude::Collider;
 use bevy::asset::RenderAssetUsages;
 use bevy::camera::visibility::VisibleEntities;
 use bevy::mesh::{Indices, PrimitiveTopology};
@@ -879,7 +878,6 @@ pub(crate) fn spawn_package(
     if let Some(terrain_data) = package.terrain.as_ref()
         && let Some(terrain) = terrain_mesh_with_stride(terrain_data, 1)
     {
-        let collider = terrain_collider(terrain_data);
         let near_handle = meshes.add(
             terrain_mesh_with_subdivisions(terrain_data, NEAR_TERRAIN_SUBDIVISIONS)
                 .unwrap_or(terrain),
@@ -898,43 +896,38 @@ pub(crate) fn spawn_package(
                 })
                 .load(path.to_owned())
         });
-        let entity = commands
-            .spawn((
-                Mesh3d(near_handle.clone()),
-                MeshMaterial3d(
-                    materials.add(StandardMaterial {
-                        base_color: Color::WHITE,
-                        base_color_texture: terrain_data
-                            .albedo_asset_path
-                            .as_deref()
-                            .map(|path| asset_server.load(path.to_owned())),
-                        normal_map_texture: normal_map.clone(),
-                        specular_texture: normal_map,
-                        flip_normal_map_y: false,
-                        // LAND normal alpha carries source specular data, but
-                        // the terrain is still a matte dielectric surface.
-                        // Maxing the dielectric F0 makes the high-frequency
-                        // normal detail sparkle like polished metal.
-                        reflectance: 0.25,
-                        perceptual_roughness: 1.0,
-                        ..default()
-                    }),
-                ),
-                ExteriorTerrain,
-                ExteriorTerrainLod {
-                    grid: package.grid,
-                    near: near_handle,
-                    middle: middle_handle,
-                    distant: distant_handle,
-                    current: TerrainLod::Near,
-                    center: terrain_center(package.terrain.as_ref(), package.origin),
-                },
-                ChildOf(root),
-            ))
-            .id();
-        if let Some(collider) = collider {
-            commands.entity(entity).insert(collider);
-        }
+        commands.spawn((
+            Mesh3d(near_handle.clone()),
+            MeshMaterial3d(
+                materials.add(StandardMaterial {
+                    base_color: Color::WHITE,
+                    base_color_texture: terrain_data
+                        .albedo_asset_path
+                        .as_deref()
+                        .map(|path| asset_server.load(path.to_owned())),
+                    normal_map_texture: normal_map.clone(),
+                    specular_texture: normal_map,
+                    flip_normal_map_y: false,
+                    // LAND normal alpha carries source specular data, but
+                    // the terrain is still a matte dielectric surface.
+                    // Maxing the dielectric F0 makes the high-frequency
+                    // normal detail sparkle like polished metal.
+                    reflectance: 0.25,
+                    perceptual_roughness: 1.0,
+                    ..default()
+                }),
+            ),
+            ExteriorTerrain,
+            ExteriorTerrainLod {
+                grid: package.grid,
+                near: near_handle,
+                middle: middle_handle,
+                distant: distant_handle,
+                current: TerrainLod::Near,
+                center: terrain_center(package.terrain.as_ref(), package.origin),
+            },
+            ChildOf(root),
+        ));
     }
     for object in package
         .static_objects
@@ -1299,30 +1292,6 @@ fn append_terrain_skirts(buffers: &mut TerrainMeshBuffers<'_>, columns: usize, r
         let right = y * columns + columns - 1;
         add_segment(right, right + columns);
     }
-}
-
-fn terrain_collider(terrain: &PreparedTerrain) -> Option<Collider> {
-    if !terrain.is_well_formed() || terrain.width < 2 || terrain.height < 2 {
-        return None;
-    }
-    let width = usize::from(terrain.width);
-    let height = usize::from(terrain.height);
-    let mut indices = Vec::with_capacity((width - 1) * (height - 1) * 2);
-    for y in 0..height - 1 {
-        for x in 0..width - 1 {
-            let i = (y * width + x) as u32;
-            let next = i + width as u32;
-            indices.extend_from_slice(&[[i, i + 1, next], [i + 1, next + 1, next]]);
-        }
-    }
-    Some(Collider::trimesh(
-        terrain
-            .positions
-            .iter()
-            .map(|position| Vec3::from_array(*position))
-            .collect(),
-        indices,
-    ))
 }
 
 fn estimate_package_bytes(package: &ExteriorCellPackage) -> u64 {

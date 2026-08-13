@@ -182,14 +182,12 @@ pub(crate) enum ActorAnimationConverter {
 
 #[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RagdollLabBackend {
-    Avian,
     Boxddd,
 }
 
 impl std::fmt::Display for RagdollLabBackend {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str(match self {
-            Self::Avian => "avian",
             Self::Boxddd => "boxddd",
         })
     }
@@ -443,7 +441,7 @@ pub struct RagdollLabArgs {
     #[arg(long, value_name = "FORM_ID")]
     pub(crate) actor: String,
     /// Physics solver used only by the isolated laboratory.
-    #[arg(long, value_enum, default_value_t = RagdollLabBackend::Avian)]
+    #[arg(long, value_enum, default_value_t = RagdollLabBackend::Boxddd)]
     pub(crate) backend: RagdollLabBackend,
     /// Prepared scene cache directory; defaults to .bevyout/cache.
     #[arg(long)]
