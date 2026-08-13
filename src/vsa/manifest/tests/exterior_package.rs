@@ -94,6 +94,7 @@ fn compact_exterior_scene_hydrates_the_canonical_package() {
         static_objects: Vec::new(),
         dynamic_objects: Vec::new(),
         distant_objects: Vec::new(),
+        actors: Vec::new(),
         local_lights: Vec::new(),
         navigation: None,
         water: None,
@@ -105,6 +106,52 @@ fn compact_exterior_scene_hydrates_the_canonical_package() {
     let mut manifest = compact_manifest(&root);
     hydrate_exterior_package(&mut manifest).unwrap();
     assert_eq!(manifest.exterior.unwrap(), package);
+    let _ = fs::remove_dir_all(root);
+}
+
+/// Issue #299: a package written under the previous
+/// `EXTERIOR_CELL_PACKAGE_REVISION` (before the `actors` field existed) must
+/// be rejected rather than silently hydrated with a missing actor list. This
+/// is the staleness gate the "Prepared asset revisions" policy exists for.
+#[test]
+fn stale_exterior_package_revision_is_rejected() {
+    let root = std::env::temp_dir().join(format!(
+        "bevyout-stale-exterior-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let _ = fs::remove_dir_all(&root);
+    let package_path = root.join("worldspaces/0000003c/cells/00000cb8.ron");
+    fs::create_dir_all(package_path.parent().unwrap()).unwrap();
+    let package = ExteriorCellPackage {
+        revision: "exterior-cell-package-v9-shared-weather-catalog-object-store-terrain".into(),
+        content_fingerprint: "content".into(),
+        cell_form_id: 0x0000_0cb8,
+        worldspace_form_id: 0x3c,
+        grid: bevyout_core::manifest::exterior::GridCoordinate::new(17, -9),
+        origin: [0.0; 3],
+        terrain: None,
+        static_objects: Vec::new(),
+        dynamic_objects: Vec::new(),
+        distant_objects: Vec::new(),
+        actors: Vec::new(),
+        local_lights: Vec::new(),
+        navigation: None,
+        water: None,
+        environment: PreparedExteriorEnvironment::default(),
+        diagnostics: Vec::new(),
+    };
+    fs::write(&package_path, ron::ser::to_string(&package).unwrap()).unwrap();
+
+    let mut manifest = compact_manifest(&root);
+    let error = hydrate_exterior_package(&mut manifest).unwrap_err();
+    assert!(
+        error.to_string().contains(EXTERIOR_CELL_PACKAGE_REVISION),
+        "expected stale-revision error to name the current revision, got: {error}"
+    );
     let _ = fs::remove_dir_all(root);
 }
 

@@ -1,10 +1,13 @@
+use bevyout_core::actor::ActorKind;
 use bevyout_core::manifest::CellInfo;
 use bevyout_core::manifest::PreparedPlacement;
+use bevyout_core::manifest::PreparedSemantic;
 use bevyout_core::manifest::exterior::{
     EXTERIOR_CELL_PACKAGE_REVISION, EXTERIOR_ENVIRONMENT_REVISION, EXTERIOR_NAVIGATION_REVISION,
     ExteriorBorderPortal, ExteriorCellPackage, ExteriorCoordinatePolicy, ExteriorDiagnostic,
-    GridCoordinate, PreparedExteriorDoorDestination, PreparedExteriorEnvironment,
-    PreparedExteriorLight, PreparedExteriorNavigation, PreparedExteriorObject, PreparedWater,
+    GridCoordinate, PreparedExteriorActor, PreparedExteriorDoorDestination,
+    PreparedExteriorEnvironment, PreparedExteriorLight, PreparedExteriorNavigation,
+    PreparedExteriorObject, PreparedWater,
 };
 
 use super::super::manifest::PreparedNavGraphSource;
@@ -73,6 +76,7 @@ pub(crate) fn build_cell_package(
     let mut static_objects = Vec::new();
     let mut dynamic_objects = Vec::new();
     let mut distant_objects = Vec::new();
+    let mut actors = Vec::new();
     let mut local_lights = Vec::new();
     for reference in &parsed.references {
         let Some(base) = parsed.bases.get(&reference.base_form_id) else {
@@ -85,6 +89,44 @@ pub(crate) fn build_cell_package(
             continue;
         };
         let (position, rotation_xyzw, scale) = placement_transform(reference);
+        let persistent = reference.flags & PERSISTENT_REFERENCE_FLAG != 0;
+        // ACHR/ACRE references are gameplay actors, not mesh entries: route
+        // them to their own field with room for the resolved actor assembly
+        // instead of flattening them into `dynamic_objects` (issue #299).
+        if let Some(kind) = actor_kind(reference.kind) {
+            if persistent {
+                diagnostics.push(ExteriorDiagnostic {
+                    code: "persistent_worldspace_reference".into(),
+                    form_id: Some(reference.form_id),
+                    severity: "info".into(),
+                    message:
+                        "persistent reference is owned by the worldspace index, not this cell package"
+                            .into(),
+                });
+            } else {
+                actors.push(PreparedExteriorActor {
+                    reference_form_id: reference.form_id,
+                    base_form_id: reference.base_form_id,
+                    kind,
+                    asset_path: base.model.clone(),
+                    physics_asset_path: None,
+                    assembly: None,
+                    position,
+                    rotation_xyzw,
+                    scale,
+                    initially_enabled: reference.initially_enabled,
+                });
+            }
+            if let Some(light) = &base.light {
+                local_lights.push(PreparedExteriorLight {
+                    reference_form_id: reference.form_id,
+                    position,
+                    color_rgba: light.color_rgba,
+                    range: light.radius * crate::vsa::paths::FO3_SCALE,
+                });
+            }
+            continue;
+        }
         let object = PreparedExteriorObject {
             reference_form_id: reference.form_id,
             base_form_id: reference.base_form_id,
@@ -106,7 +148,7 @@ pub(crate) fn build_cell_package(
             rotation_xyzw,
             scale,
             initially_enabled: reference.initially_enabled,
-            persistent: reference.flags & PERSISTENT_REFERENCE_FLAG != 0,
+            persistent,
             dynamic: !matches!(reference.kind, ReferenceKind::Object) || base.kind == "DOOR",
             distant: reference.flags & DISTANT_REFERENCE_FLAG != 0,
         };
@@ -137,6 +179,7 @@ pub(crate) fn build_cell_package(
     }
     static_objects.sort_by_key(|object| object.reference_form_id);
     dynamic_objects.sort_by_key(|object| object.reference_form_id);
+    actors.sort_by_key(|actor| actor.reference_form_id);
     distant_objects.sort_by_key(|object| object.reference_form_id);
     local_lights.sort_by_key(|light| light.reference_form_id);
     let authored_water_height = cell.water_height;
@@ -226,6 +269,7 @@ pub(crate) fn build_cell_package(
         static_objects,
         dynamic_objects,
         distant_objects,
+        actors,
         local_lights,
         navigation,
         environment,
@@ -328,11 +372,48 @@ fn compare_points(left: [f32; 3], right: [f32; 3]) -> std::cmp::Ordering {
         .then_with(|| left[2].total_cmp(&right[2]))
 }
 
+fn actor_kind(kind: ReferenceKind) -> Option<ActorKind> {
+    match kind {
+        ReferenceKind::Npc => Some(ActorKind::Humanoid),
+        ReferenceKind::Creature => Some(ActorKind::Creature),
+        ReferenceKind::Object => None,
+    }
+}
+
 pub(crate) fn apply_staged_assets(
     package: &mut ExteriorCellPackage,
     placements: &[PreparedPlacement],
     failed_assets: &std::collections::HashMap<String, String>,
 ) {
+    for actor in package.actors.iter_mut() {
+        let Some(placement) = placements
+            .iter()
+            .find(|placement| placement.reference_form_id == actor.reference_form_id)
+        else {
+            actor.asset_path = None;
+            actor.physics_asset_path = None;
+            actor.assembly = None;
+            continue;
+        };
+        actor.asset_path = placement.asset_path.clone();
+        actor.physics_asset_path = placement.physics_asset_path.clone();
+        actor.assembly = match &placement.semantic {
+            PreparedSemantic::Npc(prepared_actor) | PreparedSemantic::Creature(prepared_actor) => {
+                prepared_actor.assembly.clone()
+            }
+            _ => None,
+        };
+        if actor.assembly.is_none()
+            && let Some(reason) = placement.error.as_deref()
+        {
+            package.diagnostics.push(ExteriorDiagnostic {
+                code: "exterior_actor_unavailable".into(),
+                form_id: Some(actor.reference_form_id),
+                severity: "warning".into(),
+                message: reason.into(),
+            });
+        }
+    }
     for object in package
         .static_objects
         .iter_mut()

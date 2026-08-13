@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 
 pub const EXTERIOR_INDEX_REVISION: &str = "exterior-index-v4-shared-weather-catalog";
 pub const EXTERIOR_CELL_PACKAGE_REVISION: &str =
-    "exterior-cell-package-v9-shared-weather-catalog-object-store-terrain";
+    "exterior-cell-package-v10-actor-catalog";
 pub const EXTERIOR_COORDINATE_POLICY_REVISION: &str = "fo3-exterior-coordinates-v1";
 pub const EXTERIOR_LOD_POLICY_REVISION: &str = "exterior-lod-v3-worldspace-assets";
 pub const EXTERIOR_ENVIRONMENT_REVISION: &str = "exterior-environment-v3-shared-weather-catalog";
@@ -231,6 +231,13 @@ pub struct ExteriorCellPackage {
     pub static_objects: Vec<PreparedExteriorObject>,
     pub dynamic_objects: Vec<PreparedExteriorObject>,
     pub distant_objects: Vec<PreparedExteriorObject>,
+    /// `ACHR`/`ACRE` references. Kept separate from `dynamic_objects` so the
+    /// gameplay-actor assembly (skeleton, mesh parts, apparel, FaceGen) is
+    /// preserved end to end from `stage_placements_with_package_points`
+    /// rather than being projected down to a bare mesh entry and discarded
+    /// (issue #299).
+    #[serde(default)]
+    pub actors: Vec<PreparedExteriorActor>,
     pub local_lights: Vec<PreparedExteriorLight>,
     pub navigation: Option<PreparedExteriorNavigation>,
     pub environment: PreparedExteriorEnvironment,
@@ -323,6 +330,31 @@ pub struct PreparedExteriorObject {
     pub persistent: bool,
     pub dynamic: bool,
     pub distant: bool,
+}
+
+/// A prepared `ACHR`/`ACRE` gameplay actor reference. Unlike
+/// [`PreparedExteriorObject`], this carries the resolved
+/// [`crate::actor::ActorAssemblyBlueprint`] rather than a single mesh asset
+/// path: actor visuals are assembled from skeleton/mesh-part/apparel/FaceGen
+/// components at runtime, the same contract interior cells already use via
+/// `PreparedSemantic::Npc`/`PreparedSemantic::Creature`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct PreparedExteriorActor {
+    pub reference_form_id: u32,
+    pub base_form_id: u32,
+    pub kind: crate::actor::ActorKind,
+    /// Present only for diagnostic/compatibility purposes; the runtime
+    /// spawner assembles actor visuals from `assembly`, not this path.
+    #[serde(default)]
+    pub asset_path: Option<String>,
+    #[serde(default)]
+    pub physics_asset_path: Option<String>,
+    #[serde(default)]
+    pub assembly: Option<crate::actor::ActorAssemblyBlueprint>,
+    pub position: [f32; 3],
+    pub rotation_xyzw: [f32; 4],
+    pub scale: f32,
+    pub initially_enabled: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
