@@ -320,6 +320,16 @@ pub(crate) fn retarget_live_exterior_agents(
                 "exterior nav retarget skipped for agent {entity:?}: grid {},{} is not a navigation-ready resident generation",
                 grid.x, grid.y
             );
+            // Issue #305 review: an agent that already held a reference into
+            // an archipelago whose grid has since fallen out of the ready
+            // set (e.g. mid-eviction) must not keep pointing at it --
+            // `teardown_archipelago` despawns the archipelago entity without
+            // touching agents' component references to it.
+            if let Ok(mut agent) = world.get_entity_mut(entity)
+                && agent.contains::<ArchipelagoRef3d>()
+            {
+                agent.remove::<ArchipelagoRef3d>();
+            }
             continue;
         };
         if let Ok(mut agent) = world.get_entity_mut(entity) {

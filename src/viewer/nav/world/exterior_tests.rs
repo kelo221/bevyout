@@ -1,14 +1,17 @@
 //! Resident NAVM topology observation tests (M6 W3-C, defect 2).
 
-use bevy::prelude::World;
+use bevy::prelude::{Entity, GlobalTransform, World};
+use bevy_landmass::prelude::ArchipelagoRef3d;
 use bevyout_core::manifest::exterior::{
     EXTERIOR_CELL_PACKAGE_REVISION, ExteriorCellLifecycle, ExteriorCellPackage, ExteriorCellState,
     GridCoordinate, PreparedExteriorEnvironment, PreparedExteriorNavigation,
 };
 
-use super::{observe_resident_nav_cells, resident_border_portals};
+use super::{observe_resident_nav_cells, resident_border_portals, retarget_live_exterior_agents};
+use crate::viewer::nav::agent::NavAgent;
 use crate::viewer::nav::landmass_graph::{
-    MergeInput, MeshInput, PolygonInput, ResidentNavCellKey, ResidentNavTopology,
+    MergeInput, MeshInput, PolygonInput, ResidentArchipelago, ResidentNavCellKey,
+    ResidentNavTopology,
 };
 use crate::viewer::world::exterior::{
     ExteriorStreamState, begin_test_eviction, insert_test_resident_cell,
@@ -169,5 +172,44 @@ fn resident_nav_topology_drops_cross_cell_links_when_one_side_evicts() {
     assert!(
         archipelago.merge_links.is_empty(),
         "a cross-cell link cannot survive its side's eviction"
+    );
+}
+
+#[test]
+fn retarget_clears_stale_archipelago_ref_when_agent_grid_is_not_resident_ready() {
+    // Issue #305 review (defect 2): an agent whose grid drops out of the
+    // navigation-ready resident set (e.g. mid-eviction) must lose its old
+    // `ArchipelagoRef3d` instead of keeping a reference into an archipelago
+    // that may already be despawned.
+    let mut world = World::new();
+    world.init_resource::<ExteriorStreamState>();
+
+    let stale_archipelago = world.spawn_empty().id();
+    let agent = world
+        .spawn((NavAgent, GlobalTransform::default()))
+        .insert(ArchipelagoRef3d::new(stale_archipelago))
+        .id();
+    assert!(world.get::<ArchipelagoRef3d>(agent).is_some());
+
+    // The agent's grid (origin, since its transform is default) is not in
+    // the ready resident set below, so the retarget pass must skip it and
+    // clear the stale reference rather than leave it dangling.
+    let topology = ResidentNavTopology {
+        archipelago: Some(ResidentArchipelago {
+            resident_cells: vec![ResidentNavCellKey {
+                cell_form_id: CELL_A,
+                generation: 1,
+            }],
+            merge_links: Vec::new(),
+        }),
+    };
+
+    let new_archipelago =
+        Entity::from_raw_u32(9999).expect("9999 is a valid entity index for this test");
+    retarget_live_exterior_agents(&mut world, new_archipelago, &topology);
+
+    assert!(
+        world.get::<ArchipelagoRef3d>(agent).is_none(),
+        "a non-resident-ready agent must not keep a stale ArchipelagoRef3d"
     );
 }
