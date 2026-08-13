@@ -70,6 +70,12 @@ pub(crate) struct ExteriorActorResidency {
     pub(crate) unloads: u64,
     pub(crate) rejections: u64,
     pub(crate) last_rejection: BTreeMap<u32, &'static str>,
+    /// References this module has ever observed nav-bound (a `tna bind` or a
+    /// successful autonomous-driver bind). Once a reference enters this set it
+    /// stays until the process exits -- deliberately never cleared on unload,
+    /// so a bind survives the full evict/restore round trip, not just a
+    /// handoff. [`reconcile_actor_nav_bindings`] is the sole reader/writer.
+    pub(crate) bound_references: BTreeSet<u32>,
 }
 
 fn rejection_code(rejection: ActorResidencyRejection) -> &'static str {
@@ -103,6 +109,11 @@ pub(crate) fn sync_exterior_actor_residency(world: &mut World) {
     }
     let (planned_cells, snapshots) = observe_cells(world);
     let live = observe_live_actors(world);
+    // Observed and retried before this frame's own transitions run: a
+    // reference about to be unloaded this same frame is still a live,
+    // valid entity right here, so its bound state is captured before
+    // `apply_request`'s `Unload` arm despawns it a few lines down.
+    reconcile_actor_nav_bindings(world, &live);
     retire_evicted_catalogs(world, &planned_cells);
     if planned_cells.is_empty() && live.is_empty() {
         return;
@@ -113,6 +124,72 @@ pub(crate) fn sync_exterior_actor_residency(world: &mut World) {
     );
     for request in requests {
         apply_request(world, request, &snapshots, &live);
+    }
+}
+
+/// Recovers a previously nav-bound actor's binding once its post-transition
+/// state has settled, polled every frame alongside residency itself.
+///
+/// Neither `Handoff` nor `Restore` respawns a bound actor's nav agent
+/// itself (issue #303): `Handoff` never touches the nav components at all
+/// (the same `Entity` keeps them across the border), and `Restore` reuses
+/// the ordinary spawn chain (`project_prepared_actors` ->
+/// `seed_actor_states` -> `ai::autonomous`) verbatim, so it binds exactly
+/// when a fresh `Bind` would and no more -- an actor whose package fails to
+/// start (e.g. no linked-reference location resolves) is deliberately left
+/// unbound by that chain, same as on first load. Watching `is_bound` here
+/// catches the actual failure mode live re-verification found: a bind can
+/// be lost *after* a transition already committed, most visibly when a
+/// freshly-handed-off actor free-falls through not-yet-settled destination
+/// collision and `nav_fall_guard_system` releases it. Retrying next poll
+/// (rather than inside the transition arm) is what makes that recoverable
+/// instead of a permanent loss, and costs nothing when nothing is amiss:
+/// `nav::api::bind_actor` is idempotent-guarded (`already_bound`) for an
+/// actor that is still fine.
+fn reconcile_actor_nav_bindings(world: &mut World, live: &[(Entity, PlannedLiveActor)]) {
+    let mut newly_bound = Vec::new();
+    let mut unbound = Vec::new();
+    for (entity, actor) in live {
+        // `live` was snapshotted before this frame's own transitions ran; an
+        // actor this same poll just unloaded is despawned by the time this
+        // runs. `World::entity_mut` (inside `bind_actor`) panics on a dead
+        // entity, so a stale entry is skipped outright rather than treated
+        // as merely unbound.
+        if !world.entities().contains(*entity) {
+            continue;
+        }
+        if api::is_bound(world, *entity) {
+            newly_bound.push(actor.reference_form_id);
+        } else {
+            unbound.push((*entity, actor.reference_form_id));
+        }
+    }
+    if !newly_bound.is_empty() {
+        world
+            .resource_mut::<ExteriorActorResidency>()
+            .bound_references
+            .extend(newly_bound);
+    }
+    for (entity, reference_form_id) in unbound {
+        let should_retry = world
+            .resource::<ExteriorActorResidency>()
+            .bound_references
+            .contains(&reference_form_id);
+        if !should_retry {
+            continue;
+        }
+        match api::bind_actor(world, entity) {
+            Ok(()) => {
+                info!("exterior actor nav rebind {reference_form_id:08x}");
+            }
+            Err(error) => {
+                warn!(
+                    "exterior actor nav rebind {reference_form_id:08x} deferred: {} ({})",
+                    error.message(),
+                    error.code()
+                );
+            }
+        }
     }
 }
 

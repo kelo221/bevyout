@@ -20,9 +20,12 @@ use bevyout_core::manifest::exterior::{
 use super::super::lifecycle::{ExteriorStreamState, RuntimeCell};
 use super::super::{ExteriorCellRoot, finalize_evictions};
 use super::{ExteriorActorResidency, ExteriorResidentActor, sync_exterior_actor_residency};
+use crate::viewer::LoadedSceneManifest;
 use crate::viewer::actor_state::ActorDefinitionCatalogs;
 use crate::viewer::interaction::PlacementRoot;
+use crate::viewer::nav::api as nav_api;
 use crate::viewer::world::ActiveSaveState;
+use crate::vsa::{CellInfo, PreparedSceneManifest};
 
 const EYEBOT: u32 = 0x0006_38e8;
 const CELL_A: u32 = 0x0000_0c67;
@@ -85,6 +88,80 @@ fn grid_centre(grid: GridCoordinate) -> [f32; 3] {
     [(origin[0] + half) as f32, 0.0, (origin[2] - half) as f32]
 }
 
+/// Duplicated from `nav::tests::support::minimal_manifest` (private to that
+/// module, and to a `#[cfg(test)]` module tree this file cannot reach) --
+/// only the shape `ensure_archipelago`'s already-current short-circuit
+/// reads: `manifest.cell.form_id` and `manifest.exterior` (kept `None` so
+/// the nav build treats this as an ordinary interior-shaped cell, entirely
+/// independent of the *gameplay* exterior cells this module owns; nav's own
+/// archipelago identity is a fiction this harness only needs to hold still).
+fn minimal_manifest(cell_form_id: u32) -> PreparedSceneManifest {
+    PreparedSceneManifest {
+        schema_version: 17,
+        prepare_revision: None,
+        converter_revision: None,
+        physics_schema_version: None,
+        asset_root: ".".into(),
+        source_plugin: "Fallout3.esm".into(),
+        source_fingerprint: "content-hash".into(),
+        item_catalog_path: None,
+        item_catalog_revision: None,
+        item_catalog_hash: None,
+        recipe_catalog_path: None,
+        recipe_catalog_revision: None,
+        recipe_catalog_hash: None,
+        actor_catalog_path: None,
+        actor_catalog_revision: None,
+        actor_catalog_hash: None,
+        actor_animation_catalog_path: None,
+        actor_animation_catalog_revision: None,
+        actor_animation_catalog_hash: None,
+        image_space_modifier_catalog_path: None,
+        image_space_modifier_catalog_revision: None,
+        image_space_modifier_catalog_hash: None,
+        source_plugins: Vec::new(),
+        visual_issues: Vec::new(),
+        cell: CellInfo {
+            form_id: cell_form_id,
+            editor_id: None,
+            name: None,
+            interior: true,
+            behave_like_exterior: false,
+            ambient_rgba: [0.0; 4],
+            directional_rgba: [0.0; 4],
+            image_space_form_id: None,
+            image_space: None,
+            lighting_template_form_id: None,
+            lighting_template_flags: 0,
+            lighting_template: None,
+            raw_lighting: None,
+            effective_lighting: None,
+            water_form_id: None,
+            water_height: None,
+            grid: None,
+            worldspace_form_id: None,
+            day_night_profile: None,
+            day_night_preview_profile: None,
+        },
+        placements: Vec::new(),
+        lights: Vec::new(),
+        diagnostics: Vec::new(),
+        navmeshes: Vec::new(),
+        nav_graph: None,
+        cell_audio: Default::default(),
+        audio_clips: Vec::new(),
+        footstep_sets: Vec::new(),
+        hard_landing_clips: Vec::new(),
+        bake: None,
+        static_point_shadows: None,
+        reflection_probes: None,
+        mutability_summary: Default::default(),
+        leveled_lists: Default::default(),
+        dialogue: None,
+        exterior: None,
+    }
+}
+
 struct TestWorld {
     world: World,
 }
@@ -98,6 +175,19 @@ impl TestWorld {
         world.init_resource::<ActorDefinitionCatalogs>();
         world.init_resource::<crate::viewer::actor_animation::ActorAnimationCatalogs>();
         Self { world }
+    }
+
+    /// Makes `nav::api::bind_actor` succeed in this bare `World`, through
+    /// `ensure_archipelago`'s already-current short-circuit
+    /// (`nav::api::mark_test_archipelago_current`) rather than a real
+    /// prepared nav graph on disk. `cell_form_id` here is nav's own
+    /// bookkeeping key, independent of any `ExteriorStreamState` cell.
+    fn make_nav_bindable(&mut self, cell_form_id: u32) {
+        self.world
+            .insert_resource(LoadedSceneManifest(minimal_manifest(cell_form_id)));
+        nav_api::insert_test_archipelago_state(&mut self.world);
+        let archipelago = self.world.spawn_empty().id();
+        nav_api::mark_test_archipelago_current(&mut self.world, cell_form_id, archipelago);
     }
 
     fn insert_cell(
@@ -491,4 +581,116 @@ fn cancelled_eviction_reversal_leaves_exactly_one_projected_actor() {
     assert_eq!(projected.len(), 1, "no duplicate projection after reversal");
     assert_eq!(projected[0].1.generation, 2);
     assert_eq!(test.placement_roots(EYEBOT), 1);
+}
+
+/// Issue #303 regression. Live re-verification found a handoff itself never
+/// touches an actor's nav components -- the same `Entity` keeps them across
+/// the border -- but the actor can still lose its bind moments later (the
+/// KCC free-falling through not-yet-settled destination collision, caught by
+/// `nav_fall_guard_system::release_bound_actor`), and nothing used to notice.
+/// `release_actor` reproduces that release directly rather than depending on
+/// a physics harness this module's own test doc says is deliberately not
+/// installed here.
+#[test]
+fn handoff_preserves_a_live_nav_bind_and_recovers_one_lost_after_the_crossing() {
+    let mut test = TestWorld::new();
+    test.make_nav_bindable(0xFFFF_0001);
+    let (grid, destination) = (grid_a(), grid_b());
+    test.insert_cell(
+        CELL_A,
+        grid,
+        1,
+        vec![prepared_actor(EYEBOT, grid_centre(grid))],
+    );
+    test.insert_cell(CELL_B, destination, 1, Vec::new());
+    test.sync();
+    let entity = test.projected()[0].0;
+    test.seed_saved_state(CELL_A, EYEBOT);
+
+    // A `tna bind` (or a successful autonomous package start) already gave
+    // this actor a live nav agent before the border crossing.
+    nav_api::insert_test_nav_agent(&mut test.world, entity);
+    assert!(nav_api::is_bound(&test.world, entity));
+
+    test.set_actor_position(entity, grid_centre(destination));
+    test.sync();
+
+    let projected = test.projected();
+    assert_eq!(projected.len(), 1);
+    assert_eq!(projected[0].0, entity, "handoff never respawns the entity");
+    assert_eq!(projected[0].1.cell_form_id, CELL_B);
+    assert!(
+        nav_api::is_bound(&test.world, entity),
+        "a handoff must not drop the actor's live nav agent"
+    );
+
+    nav_api::release_actor(&mut test.world, entity);
+    assert!(!nav_api::is_bound(&test.world, entity));
+
+    test.sync();
+
+    assert!(
+        nav_api::is_bound(&test.world, entity),
+        "a nav bind lost after a handoff must be recovered on the residency module's next poll"
+    );
+}
+
+/// Issue #303 regression, restore side. A restore respawns a fresh `Entity`
+/// through the same chain a first bind uses (`project_prepared_actors` ->
+/// `seed_actor_states` -> `ai::autonomous`), which is not installed in this
+/// bare-`World` harness (see this file's module doc) -- so the fresh entity
+/// is, correctly, unbound the instant it spawns. What must not happen is the
+/// bind staying lost forever: a reference this module once observed bound
+/// stays tracked across the eviction, and the very next residency poll after
+/// restore recovers it.
+#[test]
+fn restore_recovers_a_nav_bind_the_spawn_chain_left_unbound() {
+    let mut test = TestWorld::new();
+    test.make_nav_bindable(0xFFFF_0002);
+    let grid = grid_a();
+    let root = test.insert_cell(
+        CELL_A,
+        grid,
+        1,
+        vec![prepared_actor(EYEBOT, grid_centre(grid))],
+    );
+    test.sync();
+    let first_entity = test.projected()[0].0;
+    test.seed_saved_state(CELL_A, EYEBOT);
+    nav_api::insert_test_nav_agent(&mut test.world, first_entity);
+    assert!(nav_api::is_bound(&test.world, first_entity));
+
+    test.begin_eviction(grid);
+    test.sync();
+    finalize_evictions(&mut test.world);
+    test.world.flush();
+    assert!(test.world.get_entity(root).is_err());
+    assert!(test.projected().is_empty());
+
+    test.insert_cell(
+        CELL_A,
+        grid,
+        2,
+        vec![prepared_actor(EYEBOT, grid_centre(grid))],
+    );
+    test.sync();
+
+    let projected = test.projected();
+    assert_eq!(projected.len(), 1);
+    let restored_entity = projected[0].0;
+    assert_ne!(
+        restored_entity, first_entity,
+        "a restore spawns a fresh entity, unlike a handoff"
+    );
+    assert!(
+        !nav_api::is_bound(&test.world, restored_entity),
+        "the fresh entity has no nav agent on the frame it spawns in this harness"
+    );
+
+    test.sync();
+
+    assert!(
+        nav_api::is_bound(&test.world, restored_entity),
+        "a nav bind established before an eviction must be recovered after restore"
+    );
 }
