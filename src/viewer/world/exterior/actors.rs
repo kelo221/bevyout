@@ -257,26 +257,32 @@ fn apply_request(
             note_rejection(world, reference_form_id, "DuplicateOwner");
             return;
         }
-        PlannedRequest::Bind { destination, .. } => ActorResidencyRequest::Bind {
-            destination: owner_token(destination),
-        },
-        PlannedRequest::Restore { destination, .. } => ActorResidencyRequest::Restore {
-            destination: owner_token(destination),
-        },
+        PlannedRequest::Bind { destination, .. } => {
+            owner_token(destination).map(|destination| ActorResidencyRequest::Bind { destination })
+        }
+        PlannedRequest::Restore { destination, .. } => owner_token(destination)
+            .map(|destination| ActorResidencyRequest::Restore { destination }),
         PlannedRequest::Handoff {
             source,
             destination,
             ..
-        } => ActorResidencyRequest::Handoff {
-            source: owner_token(source),
-            destination: owner_token(destination),
-        },
-        PlannedRequest::Unload { source, .. } => ActorResidencyRequest::Unload {
-            source: owner_token(source),
-        },
-        PlannedRequest::Retain { owner, .. } => ActorResidencyRequest::Retain {
-            owner: owner_token(owner),
-        },
+        } => owner_token(source)
+            .zip(owner_token(destination))
+            .map(|(source, destination)| ActorResidencyRequest::Handoff {
+                source,
+                destination,
+            }),
+        PlannedRequest::Unload { source, .. } => {
+            owner_token(source).map(|source| ActorResidencyRequest::Unload { source })
+        }
+        PlannedRequest::Retain { owner, .. } => {
+            owner_token(owner).map(|owner| ActorResidencyRequest::Retain { owner })
+        }
+    };
+    let Some(policy_request) = policy_request else {
+        warn!("exterior actor reject {reference_form_id:08x} InvalidOwner");
+        note_rejection(world, reference_form_id, "InvalidOwner");
+        return;
     };
 
     match decide_actor_residency(identity, &owners, policy_request) {
@@ -291,12 +297,11 @@ fn apply_request(
     }
 }
 
-fn owner_token(owner: PlannedOwner) -> ActorResidencyOwner {
-    // The planner only ever produces owners copied out of a live cell state,
-    // whose FormID is non-zero; a zero would be rejected by the policy as
-    // `InvalidOwner` anyway, which is what this fallback preserves.
-    ActorResidencyOwner::new(owner.cell_form_id, owner.generation)
-        .unwrap_or_else(|_| ActorResidencyOwner::new(u32::MAX, owner.generation).expect("non-zero"))
+/// A planned owner only becomes a policy owner token if its cell FormID is
+/// valid; an unidentifiable cell is refused rather than substituted, so no
+/// request is ever decided against an invented owner.
+fn owner_token(owner: PlannedOwner) -> Option<ActorResidencyOwner> {
+    ActorResidencyOwner::new(owner.cell_form_id, owner.generation).ok()
 }
 
 fn apply_transition(
