@@ -78,6 +78,13 @@ pub(crate) enum PlannedRequest {
         reference_form_id: u32,
         source: PlannedOwner,
     },
+    /// A live projection whose owning cell is present but at a different
+    /// generation. The policy decides (and rejects) it; the planner never
+    /// tears an entity down on its own.
+    Retain {
+        reference_form_id: u32,
+        owner: PlannedOwner,
+    },
     /// Two or more live entities claim one reference. The adapter reports
     /// this to `decide_actor_residency` as an owner slice so the rejection
     /// (`DuplicateOwner`) stays the policy's decision, not the planner's.
@@ -102,6 +109,9 @@ impl PlannedRequest {
             | Self::Unload {
                 reference_form_id, ..
             }
+            | Self::Retain {
+                reference_form_id, ..
+            }
             | Self::Duplicate {
                 reference_form_id, ..
             } => reference_form_id,
@@ -122,6 +132,7 @@ pub(crate) fn plan_actor_residency(
 ) -> Vec<PlannedRequest> {
     let mut duplicates = Vec::new();
     let mut unloads = Vec::new();
+    let mut retains = Vec::new();
     let mut handoffs = Vec::new();
     let mut binds = Vec::new();
 
@@ -144,16 +155,29 @@ pub(crate) fn plan_actor_residency(
             continue;
         }
         let actor = owners[0];
-        // The owning cell is gone, evicting, or has already moved on to a
-        // newer generation: the live projection must be checkpointed and
-        // released before its root disappears.
+        // The owning cell is evicting, or gone from the stream entirely: the
+        // live projection must be checkpointed and released before its root
+        // disappears. `source` is the live owner because that is the token the
+        // projection actually holds; the eviction's own generation bump must
+        // not turn an ordinary teardown into a stale one.
         let owning_cell = cells
             .iter()
-            .find(|cell| cell.owner() == actor.owner && !cell.evicting && cell.projectable);
-        if owning_cell.is_none() {
+            .find(|cell| cell.cell_form_id == actor.owner.cell_form_id);
+        let Some(owning_cell) = owning_cell.filter(|cell| !cell.evicting && cell.projectable)
+        else {
             unloads.push(PlannedRequest::Unload {
                 reference_form_id,
                 source: actor.owner,
+            });
+            continue;
+        };
+        // The cell is live but at a generation this projection never bound
+        // to: reloaded content must not silently adopt a stale entity, so the
+        // retention is put to the policy, which rejects it as `StaleSource`.
+        if owning_cell.owner() != actor.owner {
+            retains.push(PlannedRequest::Retain {
+                reference_form_id,
+                owner: owning_cell.owner(),
             });
             continue;
         }
@@ -200,6 +224,7 @@ pub(crate) fn plan_actor_residency(
     duplicates
         .into_iter()
         .chain(unloads)
+        .chain(retains)
         .chain(handoffs)
         .chain(binds)
         .collect()

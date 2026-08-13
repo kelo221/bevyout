@@ -275,6 +275,9 @@ fn apply_request(
         PlannedRequest::Unload { source, .. } => ActorResidencyRequest::Unload {
             source: owner_token(source),
         },
+        PlannedRequest::Retain { owner, .. } => ActorResidencyRequest::Retain {
+            owner: owner_token(owner),
+        },
     };
 
     match decide_actor_residency(identity, &owners, policy_request) {
@@ -385,11 +388,12 @@ fn apply_transition(
             capture_package_checkpoint(world, entity, reference_form_id);
             apply_canonical_state(world, reference_form_id, state);
             api::release_actor(world, entity);
-            // The cell root's despawn (finalize_evictions) removes the entity
-            // itself; dropping the projection marker now keeps the unload
-            // idempotent if that despawn is deferred or cancelled.
-            if let Ok(mut actor) = world.get_entity_mut(entity) {
-                actor.remove::<ExteriorResidentActor>();
+            // The cell root's own despawn would take this entity with it, but
+            // a cancelled eviction can keep that root alive: despawning the
+            // projection here is what makes the unload idempotent and
+            // reversal-safe (a cancel then re-binds one fresh actor).
+            if let Ok(actor) = world.get_entity_mut(entity) {
+                actor.despawn();
             }
             remove_cell_catalogs(world, owner.cell_form_id());
             let mut residency = world.resource_mut::<ExteriorActorResidency>();
