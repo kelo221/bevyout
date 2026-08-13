@@ -684,9 +684,28 @@ pub(crate) fn actor_residency_json(world: &mut World) -> serde_json::Value {
             })
         })
         .collect::<Vec<_>>();
+    // The resident NAVM topology the nav build gated agent retargeting on
+    // (W3-B/W3-C), so a border crossing can be inspected from one command.
+    let topology = world
+        .get_resource::<crate::viewer::nav::world::state::NavArchipelagoState>()
+        .and_then(|state| state.resident_nav_topology.archipelago.as_ref())
+        .map(|archipelago| {
+            serde_json::json!({
+                "resident_cells": archipelago
+                    .resident_cells
+                    .iter()
+                    .map(|key| serde_json::json!({
+                        "cell": format!("{:08x}", key.cell_form_id),
+                        "generation": key.generation,
+                    }))
+                    .collect::<Vec<_>>(),
+                "merge_links": archipelago.merge_links.len(),
+            })
+        });
     let residency = world.get_resource::<ExteriorActorResidency>();
     serde_json::json!({
         "actors": rows,
+        "nav_topology": topology,
         "binds": residency.map_or(0, |residency| residency.binds),
         "restores": residency.map_or(0, |residency| residency.restores),
         "handoffs": residency.map_or(0, |residency| residency.handoffs),

@@ -41,6 +41,37 @@ pub(crate) use actors::{actor_residency_json, saved_package_checkpoint};
 pub(crate) use diagnostics::{cells as exterior_cells_json, status as exterior_status_json};
 pub(crate) use lifecycle::ExteriorStreamState;
 
+/// Inserts a collision-ready resident cell for tests that need a real
+/// `ExteriorStreamState` transition without the streaming pipeline (the
+/// runtime cell type itself stays private to this module).
+#[cfg(test)]
+pub(crate) fn insert_test_resident_cell(
+    state: &mut ExteriorStreamState,
+    cell_state: bevyout_core::manifest::exterior::ExteriorCellState,
+    package: ExteriorCellPackage,
+) {
+    state.cells.insert(
+        cell_state.grid,
+        lifecycle::RuntimeCell {
+            state: cell_state,
+            root: None,
+            task: None,
+            package: Some(package),
+            collision_ready: true,
+            eviction_restore: None,
+        },
+    );
+}
+
+/// Begins an eviction on a test cell through the real lifecycle transition
+/// (including its generation bump).
+#[cfg(test)]
+pub(crate) fn begin_test_eviction(state: &mut ExteriorStreamState, grid: GridCoordinate) {
+    if let Some(cell) = state.cells.get_mut(&grid) {
+        cell.begin_eviction();
+    }
+}
+
 #[derive(Component)]
 pub(crate) struct ExteriorCellRoot {
     #[allow(dead_code)]

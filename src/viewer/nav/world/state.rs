@@ -62,6 +62,10 @@ pub(crate) struct NavArchipelagoState {
     /// A new streamed cell changes this signature and forces the ownership
     /// set to rebuild before a subsequent navigation command uses it.
     pub(crate) exterior_resident_grids: Vec<GridCoordinate>,
+    /// W3-B's resident NAVM topology for the current resident set (M6 W3-C).
+    /// Rebuilt with the archipelago and consulted before any live agent is
+    /// re-pointed at it, so a stale or evicting side can never be used.
+    pub(crate) resident_nav_topology: crate::viewer::nav::landmass_graph::ResidentNavTopology,
     pub(crate) archipelago: Option<Entity>,
     /// The landmass `Character3d` mirroring the FPS player (issue #114
     /// added scope, wave 5): a non-agent RVO obstacle agents steer around
