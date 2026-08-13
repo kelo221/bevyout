@@ -706,10 +706,40 @@ fn prepare_cell(
     if !cell.interior {
         let static_converter_revision = NATIVE_NIF_CONVERTER_REVISION;
         let actor_converter_revision = NATIVE_ACTOR_CONVERTER_REVISION;
+        let actor_animation_backend = args.actor_animation_converter.backend();
         progress.phase_started(
             format!("cell {selector_input}/parse and stage assets"),
             None,
         );
+        // Issue #299 (M6 W3-C stage 1): exterior ACHR/ACRE references need the
+        // same resolved `ActorAssemblyBlueprint` interior cells already get.
+        // Build the actor catalog inputs and appearance models up front, the
+        // same way the interior path does below, so `stage_placements_with_
+        // package_points` can assemble actor visuals instead of receiving an
+        // empty appearance map and silently producing bare, asset-less
+        // placements for every NPC/creature reference.
+        let actor_references = parsed
+            .references
+            .iter()
+            .filter(|reference| matches!(reference.kind, ReferenceKind::Npc | ReferenceKind::Creature))
+            .cloned()
+            .collect::<Vec<_>>();
+        let actor_catalog_inputs = build_actor_catalog_inputs(&parsed, &actor_references);
+        let mut actor_catalog = build_actor_catalog(&actor_catalog_inputs, &source_fingerprint);
+        let actor_models = build_actor_appearance_models(
+            &parsed,
+            &actor_references,
+            &actor_catalog,
+            &source_fingerprint,
+            &data_root,
+            &session.archives,
+            &mut diagnostics,
+        )?;
+        let actor_assemblies = actor_models
+            .iter()
+            .map(|(reference_form_id, appearance)| (*reference_form_id, appearance.blueprint.clone()))
+            .collect::<HashMap<_, _>>();
+        attach_actor_assemblies(&mut actor_catalog, &actor_assemblies);
         // Exterior workers share both the staging tree and the global
         // recipe-addressed `assets/` outputs. Hold the existing narrow
         // conversion lock before cache decisions are made, otherwise two
@@ -719,7 +749,7 @@ fn prepare_cell(
         let mut exterior_stage = stage_placements_with_package_points(
             parsed.references.clone(),
             &parsed.bases,
-            &HashMap::new(),
+            &actor_models,
             &early_package_linked_reference_ids,
             &data_root,
             &session.archives,
@@ -844,6 +874,23 @@ fn prepare_cell(
 
         session.record_persistent_assets(&exterior_stage.placements);
 
+        // Re-attach assemblies after native conversion/failed-asset scrubbing
+        // above may have cleared a placement's `asset_path`/`error`: the
+        // catalog must reflect the same finalized state the package receives
+        // below, mirroring the interior path's `finalized_actor_assemblies`.
+        let finalized_actor_assemblies = exterior_stage
+            .placements
+            .iter()
+            .filter_map(|placement| match &placement.semantic {
+                PreparedSemantic::Npc(actor) | PreparedSemantic::Creature(actor) => actor
+                    .assembly
+                    .as_ref()
+                    .map(|assembly| (placement.reference_form_id, assembly.clone())),
+                _ => None,
+            })
+            .collect::<HashMap<_, _>>();
+        attach_actor_assemblies(&mut actor_catalog, &finalized_actor_assemblies);
+
         // Exterior NAVM used to be flattened directly into the cell package,
         // which silently discarded authored adjacency, doors, NVEX targets,
         // merge records, and the collision-derived clearance verdict. Reuse
@@ -945,6 +992,73 @@ fn prepare_cell(
                 })
                 .collect(),
         );
+        let actor_catalog_artifact = write_actor_catalog(&cache_dir, cell_id, &actor_catalog)?;
+        let actor_catalog_summary = format!(
+            "actor catalog: prepared {}, inherited {}, unresolved {}, unsupported {}, skipped {}",
+            actor_catalog.counters.prepared,
+            actor_catalog.counters.inherited,
+            actor_catalog.counters.unresolved,
+            actor_catalog.counters.unsupported,
+            actor_catalog.counters.skipped
+        );
+        diagnostics.push(Diagnostic {
+            severity: "info".into(),
+            message: actor_catalog_summary.clone(),
+        });
+        output.push(actor_catalog_summary);
+        let actor_catalog_path = Some(actor_catalog_artifact.relative_path);
+        let actor_catalog_revision = Some(ACTOR_CATALOG_REVISION.into());
+        let actor_catalog_hash = Some(actor_catalog_artifact.hash);
+        let mut actor_animation_catalog = discover_actor_animation_catalog(
+            &actor_catalog,
+            &source_fingerprint,
+            &data_root,
+            &session.archives,
+            &parsed.idles,
+        )?;
+        let conversion_context = ActorAnimationConversionContext {
+            converter: actor_animation_backend,
+            converter_revision: actor_animation_converter_revision(actor_animation_backend),
+            data_root: &data_root,
+            archives: &session.archives,
+            staging_dir: &staging_dir,
+            assets_dir: &assets_dir,
+            rebuild: args.rebuild_assets,
+        };
+        let actor_animation_conversion =
+            convert_actor_animation_catalog(&mut actor_animation_catalog, &conversion_context)?;
+        let actor_animation_catalog_artifact =
+            write_actor_animation_catalog(&cache_dir, cell_id, &actor_animation_catalog)?;
+        let ready_animation_clips = actor_animation_catalog
+            .animation_sets
+            .iter()
+            .flat_map(|set| set.clips.iter())
+            .filter(|clip| {
+                clip.status == bevyout_core::actor_animation::PreparedActorAnimationClipStatus::Ready
+            })
+            .count();
+        let actor_animation_catalog_summary = format!(
+            "actor animation catalog: {} actor mappings, {} sets, {} ready clips, packs built {}, reused {}, failed clips {}, cache {}",
+            actor_animation_catalog.actor_mappings.len(),
+            actor_animation_catalog.animation_sets.len(),
+            ready_animation_clips,
+            actor_animation_conversion.built_packs,
+            actor_animation_conversion.reused_packs,
+            actor_animation_conversion.failed_clips,
+            if actor_animation_catalog_artifact.reused {
+                "reused"
+            } else {
+                "written"
+            }
+        );
+        diagnostics.push(Diagnostic {
+            severity: "info".into(),
+            message: actor_animation_catalog_summary.clone(),
+        });
+        output.push(actor_animation_catalog_summary);
+        let actor_animation_catalog_path = Some(actor_animation_catalog_artifact.relative_path);
+        let actor_animation_catalog_revision = Some(ACTOR_ANIMATION_CATALOG_REVISION.into());
+        let actor_animation_catalog_hash = Some(actor_animation_catalog_artifact.hash);
         let package_path = cache_dir
             .join("worldspaces")
             .join(format!("{:08x}", package.worldspace_form_id))
@@ -970,7 +1084,8 @@ fn prepare_cell(
         let terrain_prepared = package.terrain.is_some();
         let object_count = package.static_objects.len()
             + package.dynamic_objects.len()
-            + package.distant_objects.len();
+            + package.distant_objects.len()
+            + package.actors.len();
         let manifest = PreparedSceneManifest {
             schema_version: CURRENT_MANIFEST_SCHEMA_VERSION,
             prepare_revision: Some(CURRENT_PREPARE_REVISION.into()),
@@ -985,12 +1100,12 @@ fn prepare_cell(
             recipe_catalog_path: None,
             recipe_catalog_revision: None,
             recipe_catalog_hash: None,
-            actor_catalog_path: None,
-            actor_catalog_revision: None,
-            actor_catalog_hash: None,
-            actor_animation_catalog_path: None,
-            actor_animation_catalog_revision: None,
-            actor_animation_catalog_hash: None,
+            actor_catalog_path,
+            actor_catalog_revision,
+            actor_catalog_hash,
+            actor_animation_catalog_path,
+            actor_animation_catalog_revision,
+            actor_animation_catalog_hash,
             image_space_modifier_catalog_path: None,
             image_space_modifier_catalog_revision: None,
             image_space_modifier_catalog_hash: None,
