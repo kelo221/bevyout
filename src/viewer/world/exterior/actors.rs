@@ -388,6 +388,9 @@ fn apply_transition(
             capture_package_checkpoint(world, entity, reference_form_id);
             apply_canonical_state(world, reference_form_id, state);
             api::release_actor(world, entity);
+            if let Some(mut references) = world.get_resource_mut::<crate::console::RefRegistry>() {
+                references.unregister(entity);
+            }
             // The cell root's own despawn would take this entity with it, but
             // a cancelled eviction can keep that root alive: despawning the
             // projection here is what makes the unload idempotent and
@@ -534,6 +537,14 @@ fn spawn_exterior_actor(
     ));
     if let Some(handle) = asset {
         entity.insert(WorldAssetRoot(handle));
+    }
+    let entity = entity.id();
+    // Without this a streamed actor is invisible to every reference-addressed
+    // console command (`prid`, `actorinspect`, `actorstate`, `setpos`), the
+    // same registration `scene::spawn_cell_placements_chunk` performs for an
+    // interior placement.
+    if let Some(mut references) = world.get_resource_mut::<crate::console::RefRegistry>() {
+        references.register(entity, prepared.reference_form_id, None);
     }
 }
 
