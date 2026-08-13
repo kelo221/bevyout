@@ -1,0 +1,15 @@
+{
+  "name": "bevyout-harness",
+  "private": true,
+  "scripts": {
+    "pi": "bun tools/pi-bevyout.ts",
+    "pi:lean": "bun tools/pi-bevyout.ts --lean",
+    "harness:bootstrap": "bun tools/harness/bootstrap.ts",
+    "harness:doctor": "bun tools/harness/doctor.ts",
+    "harness:staged": "bun tools/harness/check.ts --mode Staged",
+    "harness:fast": "bun tools/harness/check.ts --mode Fast",
+    "harness:full": "bun tools/harness/check.ts --mode Full",
+    "harness:security": "bun tools/harness/check.ts --mode Security",
+    "harness:coverage": "bun tools/harness/check.ts --mode Coverage"
+  }
+}

@@ -9,15 +9,19 @@
 //! colours.
 
 use anyhow::{Context, Result};
-use image::{DynamicImage, Rgba, RgbaImage};
+use image::{DynamicImage, ImageFormat, Rgba, RgbaImage};
 use std::collections::{BTreeSet, HashMap};
-use std::fs;
+use std::io::Cursor;
 use std::path::Path;
 
 use bevyout_core::manifest::exterior::PreparedTerrain;
 
 use super::super::assets::{flip_directx_normal_y_texel, resolve_asset};
 use super::super::bsa::BsaArchive;
+use super::super::cache_store::{
+    CandidateObject, FsPreparedObjectStore, PreparedObjectKind, PreparedObjectStore,
+    PreparedRecipeInputs, normalize_source_path,
+};
 use super::super::manifest::Diagnostic;
 use super::super::openmw_esm4::{
     LandTextureAssignment, LandTextureWeight, LandscapeTextureRecord, TextureSetRecord,
@@ -29,7 +33,9 @@ const OUTPUT_SIZE: u32 = 1024;
 // tiles across one 4096-unit cell. Keep the bake self-contained, but retain
 // the source's per-quadrant BTXT/ATXT/VTXT semantics while doing so.
 const TEXTURE_TILES_PER_CELL: f32 = 12.0;
-const TERRAIN_MATERIAL_REVISION: &str = "terrain-material-v6-quadrant-layers-12-tiles";
+const TERRAIN_MATERIAL_REVISION: &str =
+    "terrain-material-v7-quadrant-layers-12-tiles-shared-payloads";
+const TERRAIN_IMAGE_FORMAT_REVISION: &str = "png-rgba8-v1";
 
 struct TerrainLayerSource {
     diffuse: Option<RgbaImage>,
@@ -197,39 +203,55 @@ pub(crate) fn prepare_terrain_albedo(
         }
     }
 
-    let identity = fingerprint(
-        format!("{TERRAIN_MATERIAL_REVISION}:{source_fingerprint}:{cell_form_id:08x}").as_bytes(),
-    );
-    let relative_path = format!("assets/terrain/{identity}.png");
-    let output_path = cache_dir.join(relative_path.replace('/', std::path::MAIN_SEPARATOR_STR));
-    if let Some(parent) = output_path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    DynamicImage::ImageRgba8(output)
-        .save(&output_path)
-        .with_context(|| {
-            format!(
-                "writing prepared terrain material {}",
-                output_path.display()
-            )
-        })?;
-    terrain.albedo_asset_path = Some(relative_path);
+    let store = FsPreparedObjectStore::open(cache_dir)?;
+    terrain.albedo_asset_path = Some(publish_terrain_image(
+        &store,
+        source_fingerprint,
+        cell_form_id,
+        "albedo",
+        output,
+    )?);
     terrain.normal_asset_path = if has_normal_layers {
-        let relative_path = format!("assets/terrain/{identity}-normal.png");
-        let output_path = cache_dir.join(relative_path.replace('/', std::path::MAIN_SEPARATOR_STR));
-        DynamicImage::ImageRgba8(normal_output)
-            .save(&output_path)
-            .with_context(|| {
-                format!(
-                    "writing prepared terrain normal map {}",
-                    output_path.display()
-                )
-            })?;
-        Some(relative_path)
+        Some(publish_terrain_image(
+            &store,
+            source_fingerprint,
+            cell_form_id,
+            "normal-specular",
+            normal_output,
+        )?)
     } else {
         None
     };
     Ok(())
+}
+
+fn publish_terrain_image(
+    store: &FsPreparedObjectStore,
+    source_fingerprint: &str,
+    cell_form_id: u32,
+    role: &str,
+    image: RgbaImage,
+) -> Result<String> {
+    let mut encoded = Cursor::new(Vec::new());
+    DynamicImage::ImageRgba8(image)
+        .write_to(&mut encoded, ImageFormat::Png)
+        .context("encoding prepared terrain PNG")?;
+    let recipe = PreparedRecipeInputs {
+        recipe_version: 1,
+        kind: PreparedObjectKind::Texture,
+        source_identity: normalize_source_path(&format!(
+            "generated/terrain/{cell_form_id:08x}-{role}.png"
+        ))?,
+        input_hashes: vec![fingerprint(source_fingerprint.as_bytes())],
+        converter_revision: TERRAIN_MATERIAL_REVISION.into(),
+        format_policy_revision: TERRAIN_IMAGE_FORMAT_REVISION.into(),
+        canonical_settings: Vec::new(),
+    };
+    let object = store.publish(
+        &recipe,
+        CandidateObject::from_bytes(PreparedObjectKind::Texture, "png", encoded.into_inner()),
+    )?;
+    Ok(store.object_asset_path(&object))
 }
 
 fn resolve_layer_source(

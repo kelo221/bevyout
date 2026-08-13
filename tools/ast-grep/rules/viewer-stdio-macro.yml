@@ -1,0 +1,10 @@
+id: viewer-stdio-macro
+language: Rust
+severity: error
+message: Viewer/runtime code must use stable tracing events instead of println!/eprintln!/dbg!.
+note: CLI paths are filtered out by the harness because deterministic CLI stdout is allowed.
+rule:
+  any:
+    - pattern: "println!($$$A)"
+    - pattern: "eprintln!($$$A)"
+    - pattern: "dbg!($$$A)"

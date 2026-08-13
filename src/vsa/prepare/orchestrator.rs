@@ -1,6 +1,7 @@
 use super::*;
 use crate::cli::progress::ProgressReporter;
 use crate::vsa::catalog::{CellCatalog, build_cell_map};
+use crate::vsa::paths::CellSelector;
 use bevyout_core::actor::{
     ActorAppearanceAvailability, ActorAssemblyBlueprint as CoreActorAssemblyBlueprint,
     ActorAttachmentPoint, ActorFallbackLevel, ActorFallbackReason, ActorKind, ActorMeshRole,
@@ -11,14 +12,14 @@ use bevyout_core::actor::{
 use bevyout_core::actor_state::{ActorSkill, ActorValue};
 use bevyout_core::facegen::{FaceGenAssetKind, FaceGenDiagnostic, FaceGenRaw};
 use bevyout_core::image_space::IMAGE_SPACE_MODIFIER_CATALOG_REVISION;
+use bevyout_core::manifest::CellInfo;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// Dispatches `prepare`: a single legacy selector goes straight through
-/// `prepare_single` below; `--all`/`--all-interiors`/`--worldspace`,
-/// `--list-only`, `--check-fingerprints`, `--retry-failed`, or more than one
-/// positional selector build a lightweight cell catalogue and resolve the
-/// batch through `resolve_selection` (#46). Fingerprint validation must use
-/// this route even for one cell because the single-cell path prepares it.
+/// `prepare_single` below; `--all`/`--all-interiors`/`--worldspace`/
+/// `--all-exteriors`, `--exterior-radius`, `--list-only`, `--check-fingerprints`,
+/// `--retry-failed`, or more than one positional selector build a lightweight
+/// cell catalogue and resolve the batch through `resolve_selection`.
 pub fn prepare(args: PrepareArgs) -> Result<()> {
     let progress = ProgressReporter::new(args.progress.mode);
     let mut explicit = args.selectors.clone();
@@ -30,7 +31,7 @@ pub fn prepare(args: PrepareArgs) -> Result<()> {
         let selector_input = explicit
             .into_iter()
             .next()
-            .context("provide a GECK EditorID/FormID selector or legacy --cell, or pass --all/--all-interiors/--worldspace/--retry-failed")?;
+            .context("provide a GECK EditorID/FormID selector or legacy --cell, or pass --all/--all-interiors/--all-exteriors/--worldspace/--exterior-radius/--retry-failed")?;
         return prepare_single(args, selector_input, &progress);
     }
 
@@ -42,7 +43,9 @@ fn prepare_requires_batch(args: &PrepareArgs, explicit_count: usize) -> bool {
         || args.check_fingerprints
         || args.all
         || args.all_interiors
+        || args.all_exteriors
         || args.worldspace.is_some()
+        || args.exterior_radius.is_some()
         || args.retry_failed
         || explicit_count > 1
 }
@@ -88,16 +91,43 @@ fn prepare_single(
         loaded_plugins,
         fingerprint,
     )?;
+    let selector = parse_cell_selector(&selector_input)?;
+    let exterior_worldspace = selected_exterior_worldspace(
+        session.parsed_content.cells().map(|(_, cell)| cell),
+        &selector,
+    );
     let mut output = Vec::new();
     progress.started("Prepare", Some(1));
     progress.phase_started("cell", Some(1));
-    let result = prepare_cell(&session, args, selector_input, &mut output, progress);
+    let mut result = prepare_cell(&session, args, selector_input, &mut output, progress);
+    if result.is_ok()
+        && let Some(worldspace_form_id) = exterior_worldspace
+    {
+        result = finalize_exterior_index(&session, &cache_dir, worldspace_form_id);
+    }
     for line in &output {
         println!("{line}");
     }
     progress.unit_completed_in_phase("cell", Some(1), None);
     progress.finished(result.is_ok());
     result
+}
+
+fn selected_exterior_worldspace<'a>(
+    cells: impl IntoIterator<Item = &'a CellInfo>,
+    selector: &CellSelector,
+) -> Option<u32> {
+    cells
+        .into_iter()
+        .find(|cell| match selector {
+            CellSelector::FormId(form_id) => cell.form_id == *form_id,
+            CellSelector::EditorId(editor_id) => cell
+                .editor_id
+                .as_deref()
+                .is_some_and(|candidate| candidate.eq_ignore_ascii_case(editor_id)),
+        })
+        .filter(|cell| !cell.interior)
+        .and_then(|cell| cell.worldspace_form_id)
 }
 
 fn prepare_batch(
@@ -108,7 +138,9 @@ fn prepare_batch(
     let spec = SelectionSpec {
         all: args.all,
         all_interiors: args.all_interiors,
+        all_exteriors: args.all_exteriors,
         worldspace: args.worldspace.clone(),
+        exterior_radius: args.exterior_radius,
         explicit,
     };
 
@@ -160,6 +192,7 @@ fn prepare_batch(
             name: entry.name.clone(),
             interior: entry.interior,
             worldspace_form_id: entry.worldspace_form_id,
+            grid: entry.grid,
         })
         .collect();
     let worldspace_names = catalog.worldspaces.clone();
@@ -321,7 +354,9 @@ fn prepare_batch(
                     cell_args.cell = None;
                     cell_args.all = false;
                     cell_args.all_interiors = false;
+                    cell_args.all_exteriors = false;
                     cell_args.worldspace = None;
+                    cell_args.exterior_radius = None;
                     cell_args.list_only = false;
                     cell_args.retry_failed = false;
                     cell_args.check_fingerprints = false;
@@ -379,6 +414,15 @@ fn prepare_batch(
             });
         }
     });
+
+    if resolved.iter().any(|form_id| {
+        cells
+            .iter()
+            .find(|cell| cell.form_id == *form_id)
+            .is_some_and(|cell| !cell.interior)
+    }) {
+        finalize_exterior_indexes(&session, &cache_dir)?;
+    }
 
     let manifest = manifest_mutex.into_inner().expect("mutex not poisoned");
     let mut failed_entries: Vec<(u32, String)> = Vec::new();
@@ -540,16 +584,12 @@ fn prepare_cell(
     let mut diagnostics = Vec::new();
     diagnostics.extend(session.plugin_diagnostics.iter().cloned());
     let plugin_sources = session.plugin_sources();
-    // Parse the content set once. Exterior preparation needs both the selected
-    // cell and the deterministic all-worldspace index; selecting first and
-    // reparsing here doubled the retained base/reference state and made large
-    // exterior cells spike memory unnecessarily.
-    let all_parsed =
-        parse_content_set_all(&plugin_sources).context("failed to parse Fallout content set")?;
-    let mut exterior_indexes =
-        crate::vsa::build_worldspace_indexes(&all_parsed, &source_fingerprint);
-    let mut parsed = all_parsed
-        .select(&selector)
+    // The batch session parses the content set once and shares that immutable
+    // state with all workers. Selection still returns an owned plugin because
+    // preparation mutates cell-local collections.
+    let mut parsed = session
+        .parsed_content
+        .select_shared(&selector)
         .context("failed to select Fallout content set cell")?;
     diagnostics.extend(parsed.diagnostics.drain(..).map(|message| Diagnostic {
         severity: "info".into(),
@@ -670,6 +710,12 @@ fn prepare_cell(
             format!("cell {selector_input}/parse and stage assets"),
             None,
         );
+        // Exterior workers share both the staging tree and the global
+        // recipe-addressed `assets/` outputs. Hold the existing narrow
+        // conversion lock before cache decisions are made, otherwise two
+        // cells can both schedule and atomically replace the same GLB on
+        // Windows.
+        let asset_stage_guard = session.asset_stage_lock.lock().unwrap();
         let mut exterior_stage = stage_placements_with_package_points(
             parsed.references.clone(),
             &parsed.bases,
@@ -691,7 +737,6 @@ fn prepare_cell(
                 + exterior_stage.cache_explicit_rebuilds) as u64,
         );
         {
-            let _asset_stage_guard = session.asset_stage_lock.lock().unwrap();
             if let Some(worldspace_form_id) = cell.worldspace_form_id {
                 let cached = session
                     .worldspace_lod_cache
@@ -699,10 +744,11 @@ fn prepare_cell(
                     .unwrap()
                     .get(&worldspace_form_id)
                     .cloned();
-                let lod_assets = if let Some(cached) = cached {
+                let _lod_assets = if let Some(cached) = cached {
                     cached
                 } else {
-                    let index = exterior_indexes
+                    let index = session
+                        .exterior_indexes
                         .iter()
                         .find(|index| index.worldspace_form_id == worldspace_form_id)
                         .cloned();
@@ -730,11 +776,6 @@ fn prepare_cell(
                         .insert(worldspace_form_id, assets.clone());
                     assets
                 };
-                for index in &mut exterior_indexes {
-                    if index.worldspace_form_id == worldspace_form_id {
-                        index.worldspace_lod = lod_assets.clone();
-                    }
-                }
             }
         }
         let mut failed_native_assets = HashMap::new();
@@ -747,6 +788,7 @@ fn prepare_cell(
                 &exterior_stage.jobs,
                 &data_root,
                 &session.archives,
+                &cache_dir,
                 args.jobs,
                 args.strict,
             )
@@ -798,6 +840,9 @@ fn prepare_cell(
                 placement.step_support = false;
             }
         }
+        drop(asset_stage_guard);
+
+        session.record_persistent_assets(&exterior_stage.placements);
 
         // Exterior NAVM used to be flattened directly into the cell package,
         // which silently discarded authored adjacency, doors, NVEX targets,
@@ -912,23 +957,20 @@ fn prepare_cell(
             &package_path,
             to_string_pretty(&package, PrettyConfig::default())?,
         )?;
-        let _index_write_guard = session.index_write_lock.lock().unwrap();
-        for mut index in exterior_indexes {
-            let index_path = cache_dir
-                .join("worldspaces")
-                .join(format!("{:08x}", index.worldspace_form_id))
-                .join("index.ron");
-            if let Some(parent) = index_path.parent() {
-                fs::create_dir_all(parent)?;
-            }
-            apply_staged_persistent_assets(&mut index, &exterior_stage.placements);
-            merge_existing_persistent_assets(&index_path, &mut index);
-            index.sort_deterministically();
-            fs::write(
-                &index_path,
-                to_string_pretty(&index, PrettyConfig::default())?,
-            )?;
-        }
+        let storage_plan =
+            exterior_scene_storage_plan(package.worldspace_form_id, package.cell_form_id);
+        debug_assert_eq!(
+            package_path,
+            cache_dir.join(
+                storage_plan
+                    .package_path
+                    .replace('/', std::path::MAIN_SEPARATOR_STR,)
+            )
+        );
+        let terrain_prepared = package.terrain.is_some();
+        let object_count = package.static_objects.len()
+            + package.dynamic_objects.len()
+            + package.distant_objects.len();
         let manifest = PreparedSceneManifest {
             schema_version: CURRENT_MANIFEST_SCHEMA_VERSION,
             prepare_revision: Some(CURRENT_PREPARE_REVISION.into()),
@@ -956,7 +998,11 @@ fn prepare_cell(
             cell,
             placements: Vec::new(),
             lights: Vec::new(),
-            diagnostics,
+            diagnostics: if storage_plan.embed_content_diagnostics {
+                diagnostics
+            } else {
+                Vec::new()
+            },
             visual_issues: Vec::new(),
             navmeshes: Vec::new(),
             nav_graph: None,
@@ -970,7 +1016,7 @@ fn prepare_cell(
             mutability_summary: PreparedMutabilitySummary::default(),
             leveled_lists: std::collections::BTreeMap::new(),
             dialogue: None,
-            exterior: Some(package),
+            exterior: storage_plan.embed_package.then_some(package),
         };
         progress.phase_started(format!("cell {selector_input}/manifest publication"), None);
         let manifest_path = scene_dir.join("scene.ron");
@@ -981,16 +1027,8 @@ fn prepare_cell(
         output.push(format!(
             "prepared exterior {} terrain={} objects={} -> {}",
             super::super::manifest::cell_label(&manifest.cell),
-            manifest
-                .exterior
-                .as_ref()
-                .and_then(|package| package.terrain.as_ref())
-                .is_some(),
-            manifest.exterior.as_ref().map_or(0, |package| {
-                package.static_objects.len()
-                    + package.dynamic_objects.len()
-                    + package.distant_objects.len()
-            }),
+            terrain_prepared,
+            object_count,
             manifest_path.display()
         ));
         return Ok(());
@@ -1156,9 +1194,15 @@ fn prepare_cell(
                     format!("cell {selector_input}/native NIF/KF conversion"),
                     Some(jobs.len() as u64),
                 );
-                let batch =
-                    run_native_batch(&jobs, &data_root, &session.archives, args.jobs, args.strict)
-                        .context("native NIF batch conversion failed")?;
+                let batch = run_native_batch(
+                    &jobs,
+                    &data_root,
+                    &session.archives,
+                    &cache_dir,
+                    args.jobs,
+                    args.strict,
+                )
+                .context("native NIF batch conversion failed")?;
                 let summary = batch.summary();
                 let summary_line = summary.line();
                 output.push(summary_line.clone());
@@ -1732,19 +1776,67 @@ fn prepare_cell(
     Ok(())
 }
 
+fn finalize_exterior_indexes(session: &BatchSession, cache_dir: &Path) -> Result<()> {
+    for template in session.exterior_indexes.iter() {
+        publish_exterior_index(session, cache_dir, template)?;
+    }
+    Ok(())
+}
+
+fn finalize_exterior_index(
+    session: &BatchSession,
+    cache_dir: &Path,
+    worldspace_form_id: u32,
+) -> Result<()> {
+    let template = session
+        .exterior_indexes
+        .iter()
+        .find(|index| index.worldspace_form_id == worldspace_form_id)
+        .with_context(|| format!("missing exterior worldspace index {worldspace_form_id:08x}"))?;
+    publish_exterior_index(session, cache_dir, template)
+}
+
+fn publish_exterior_index(
+    session: &BatchSession,
+    cache_dir: &Path,
+    template: &bevyout_core::manifest::exterior::ExteriorWorldspaceIndex,
+) -> Result<()> {
+    let persistent_assets = session.persistent_assets.lock().unwrap().clone();
+    let worldspace_lod = session.worldspace_lod_cache.lock().unwrap().clone();
+    let mut index = template.clone();
+    if let Some(lod_assets) = worldspace_lod.get(&index.worldspace_form_id) {
+        index.worldspace_lod = lod_assets.clone();
+    }
+    apply_staged_persistent_assets(&mut index, &persistent_assets);
+    let index_path = cache_dir
+        .join("worldspaces")
+        .join(format!("{:08x}", index.worldspace_form_id))
+        .join("index.ron");
+    if let Some(parent) = index_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    merge_existing_persistent_assets(&index_path, &mut index);
+    index.sort_deterministically();
+    fs::write(
+        &index_path,
+        to_string_pretty(&index, PrettyConfig::default())?,
+    )?;
+    Ok(())
+}
+
 fn apply_staged_persistent_assets(
     index: &mut bevyout_core::manifest::exterior::ExteriorWorldspaceIndex,
-    placements: &[PreparedPlacement],
+    updates: &HashMap<u32, PersistentAssetUpdate>,
 ) {
     let mut unavailable = Vec::new();
     for reference in &mut index.persistent_references {
-        let placement = placements
-            .iter()
-            .find(|placement| placement.reference_form_id == reference.reference_form_id);
-        reference.asset_path = placement
-            .and_then(|placement| placement.asset_path.clone())
-            .filter(|path| path.to_ascii_lowercase().ends_with(".glb"));
-        if let Some(error) = placement.and_then(|placement| placement.error.as_deref()) {
+        reference.asset_path = updates
+            .get(&reference.reference_form_id)
+            .and_then(|update| update.asset_path.clone());
+        if let Some(error) = updates
+            .get(&reference.reference_form_id)
+            .and_then(|update| update.error.as_deref())
+        {
             unavailable.push((reference.reference_form_id, error.to_owned()));
         }
     }

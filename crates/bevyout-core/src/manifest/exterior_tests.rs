@@ -1,4 +1,38 @@
 use super::*;
+
+#[test]
+fn shared_weather_catalog_uses_cell_local_timings() {
+    let environment = PreparedExteriorEnvironment {
+        timings: crate::time_of_day::DayNightTimings {
+            sunrise_begin_hour: 4.0,
+            sunrise_end_hour: 8.0,
+            sunset_begin_hour: 17.0,
+            sunset_end_hour: 21.0,
+        },
+        ..Default::default()
+    };
+    let mut ambient = crate::time_of_day::ColorKeyframes::default();
+    ambient.day = [0.75; 4];
+    let catalog = vec![PreparedWeatherCatalogEntry {
+        form_id: 0x50,
+        editor_id: Some("WastelandClear".into()),
+        sky_upper: Default::default(),
+        sky_lower: Default::default(),
+        ambient,
+        sunlight: Default::default(),
+    }];
+
+    let profile = resolve_prepared_weather_profile(&environment, &catalog, 0x50).unwrap();
+    assert_eq!(profile.timings, environment.timings);
+    assert_eq!(profile.ambient.day, [0.75; 4]);
+}
+
+#[test]
+fn empty_legacy_weather_profiles_are_omitted_from_ron() {
+    let environment = PreparedExteriorEnvironment::default();
+    let encoded = ron::ser::to_string(&environment).unwrap();
+    assert!(!encoded.contains("weather_profiles"));
+}
 use crate::manifest::{PreparedDoorDestination, PreparedSemantic};
 
 #[test]

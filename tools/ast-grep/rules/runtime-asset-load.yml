@@ -1,0 +1,19 @@
+id: runtime-asset-load
+language: Rust
+severity: warning
+message: Review runtime AssetServer::load; cache the handle and keep strong ownership for its required lifetime.
+note: Startup/setup/load/prepare functions and non-runtime paths are excluded by the harness.
+rule:
+  all:
+    - pattern: fn $FUNC($$$ARGS) { $$$BODY }
+    - has:
+        any:
+          - pattern: "$ASSET_SERVER.load($$$A)"
+          - pattern: "$ASSET_SERVER.load_with_settings($$$A)"
+        stopBy: end
+constraints:
+  ARGS:
+    regex: "(?:Query|Res|ResMut|EventReader|EventWriter)<|\\bCommands\\b"
+  FUNC:
+    not:
+      regex: "^(test|bench|prepare|load|startup|setup)_"

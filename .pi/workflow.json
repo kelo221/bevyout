@@ -1,0 +1,25 @@
+{
+  "version": 1,
+  "profile": "custom",
+  "concurrency": 4,
+  "maxAgents": 12,
+  "approvalMode": "always",
+  "routes": {
+    "scout": {
+      "model": "nebius/deepseek-ai/DeepSeek-V4-Flash",
+      "thinking": "high"
+    },
+    "worker": {
+      "model": "agentrouter/gpt-5.6-sol",
+      "thinking": "high"
+    },
+    "reviewer": {
+      "model": "openai-codex/gpt-5.6-luna",
+      "thinking": "high"
+    },
+    "synthesizer": {
+      "model": "agentrouter/gpt-5.6-sol",
+      "thinking": "high"
+    }
+  }
+}

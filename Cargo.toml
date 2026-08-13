@@ -2,6 +2,7 @@
 name = "bevyout"
 version = "0.1.0"
 edition = "2024"
+license = "GPL-3.0-or-later"
 
 [workspace]
 members = [".", "crates/bevyout-core", "crates/bevyout-xatlas"]
@@ -19,13 +20,13 @@ dialogue-yarn = ["dep:yarnspinner"]
 lightmap-gpu-solari = ["bevy/bevy_solari"]
 
 [dependencies]
-bevyout-core = { path = "crates/bevyout-core" }
-bevyout-xatlas = { path = "crates/bevyout-xatlas" }
+bevyout-core = { version = "0.1.0", path = "crates/bevyout-core" }
+bevyout-xatlas = { version = "0.1.0", path = "crates/bevyout-xatlas" }
 # WAV covers the ambient and interaction clips staged by the importer, while
 # Vorbis enables the original Fallout OGG voice assets. MP3 metadata is
 # retained in manifests, but Bevy's MP3 feature currently resolves to an
 # unavailable symphonia patch in this workspace's offline cache.
-bevy = { version = "0.19.0", features = [
+bevy = { version = "0.19.1", features = [
   "wav",
   "vorbis",
   "pbr_specular_textures",
@@ -34,13 +35,6 @@ bevy = { version = "0.19.0", features = [
   "ktx2",
   "basis-universal",
   "system_clipboard",
-] }
-avian3d = { version = "=0.7.0", default-features = false, features = [
-  "3d",
-  "f32",
-  "parry-f32",
-  "parallel",
-  "xpbd_joints",
 ] }
 bevy_boxddd = { version = "0.2.0", features = ["debug-gizmos"] }
 bvh = "0.12"
@@ -64,7 +58,7 @@ libc = "0.2"
 ktx2 = "0.5.0"
 lewton = "0.10.2"
 nalgebra = "0.34"
-nif = { git = "https://github.com/kelo221/nifty.git", rev = "17f5769", default-features = false, features = [
+nif = { version = "0.5.0", git = "https://github.com/kelo221/nifty.git", rev = "17f5769", default-features = false, features = [
   "fo3_glb",
 ] }
 rayon = "1.10"
@@ -75,7 +69,7 @@ sha2 = "0.10"
 sysinfo = "0.38.4"
 toml = "0.8"
 # M4 wave 3 (#112): bevy_landmass navigation-backend spike. Pinned exact per
-# the wave plan. `glam` is pinned to the exact version `bevy_math` 0.19.0
+# the wave plan. `glam` is pinned to the exact version `bevy_math` 0.19.1
 # resolves to (see Cargo.lock) so `src/viewer/nav/landmass_graph.rs`'s plain
 # `glam::Vec3` values are the literal same type as `bevy_landmass::coords`'s
 # `ThreeD::Coordinate` without that pure module depending on `bevy_math`/
@@ -104,7 +98,7 @@ windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem"] }
 [patch.crates-io]
 # The viewer binds prepared static point-shadow cubemaps through Bevy's existing
 # depth-comparison path and limits point-shadow shading to one lookup per pixel.
-bevy_pbr = { path = "third_party/bevy_pbr-0.19.0" }
+bevy_pbr = { path = "third_party/bevy_pbr-0.19.1" }
 
 [dev-dependencies]
 # Executable-spec seed (WP6): Gherkin feature files run against real code via
@@ -112,7 +106,6 @@ bevy_pbr = { path = "third_party/bevy_pbr-0.19.0" }
 # no lib target).
 cucumber = "0.23"
 futures = "0.3"
-proptest = "1.6"
 
 [[test]]
 name = "features"

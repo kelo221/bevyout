@@ -224,8 +224,9 @@ pub(crate) fn spawn_preload_parse_task(commands: &mut Commands, asset_root: &Pat
     let pool = AsyncComputeTaskPool::get();
     let task = pool.spawn(async move {
         let text = fs::read_to_string(&path).map_err(|error| error.to_string())?;
-        let manifest =
+        let mut manifest =
             ron::de::from_str::<PreparedSceneManifest>(&text).map_err(|error| error.to_string())?;
+        crate::vsa::hydrate_exterior_package(&mut manifest).map_err(|error| error.to_string())?;
         // Read the cell's physics sidecars here too; failures are left for
         // the collider build's lazy `ensure_sidecar_loaded` to warn about.
         let mut seen = HashSet::new();

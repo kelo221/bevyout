@@ -13,9 +13,22 @@ fn help_lists_the_supported_commands() {
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
     for command in [
-        "prepare", "bake", "render", "view", "report", "cells", "script",
+        "cache", "prepare", "bake", "render", "view", "report", "cells", "script",
     ] {
         assert!(stdout.contains(command), "help should mention {command}");
+    }
+}
+
+#[test]
+fn cache_stats_subcommand_exposes_inventory_outputs() {
+    let output = run_cli(&["cache", "stats", "--help"]);
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    for flag in ["--cache", "--manifest-set", "--json", "--csv"] {
+        assert!(
+            stdout.contains(flag),
+            "cache stats --help should mention {flag}"
+        );
     }
 }
 

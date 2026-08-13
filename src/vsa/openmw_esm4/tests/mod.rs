@@ -2052,6 +2052,35 @@ fn unknown_rcpe_subrecords_are_retained_as_diagnostics() {
     );
 }
 
+#[test]
+fn shared_selection_reuses_global_catalog_storage() {
+    let mut plugin = tes4(&[]);
+    for (form_id, editor_id) in [
+        (0x801_u32, &b"FirstCell\0"[..]),
+        (0x802, &b"SecondCell\0"[..]),
+    ] {
+        plugin.extend(record(
+            b"CELL",
+            0,
+            form_id,
+            &[subrecord(b"EDID", editor_id), subrecord(b"DATA", &[1])].concat(),
+        ));
+    }
+    plugin.extend(record(b"STAT", 0, 0x900, &[]));
+    let content = parse_content_set_all(&[PluginSource {
+        name: "Fallout3.esm",
+        bytes: &plugin,
+    }])
+    .unwrap();
+
+    let first = content.select_shared(&CellSelector::FormId(0x801)).unwrap();
+    let second = content.select_shared(&CellSelector::FormId(0x802)).unwrap();
+
+    assert!(first.bases.shares_storage_with(&second.bases));
+    assert_eq!(first.cell.as_ref().map(|cell| cell.form_id), Some(0x801));
+    assert_eq!(second.cell.as_ref().map(|cell| cell.form_id), Some(0x802));
+}
+
 mod actor_support;
 
 mod actors;

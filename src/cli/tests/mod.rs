@@ -89,7 +89,7 @@ fn animation_zoo_requires_an_actor_and_validates_bridge_options() {
 }
 
 #[test]
-fn ragdoll_lab_defaults_to_avian_and_accepts_boxddd_comparison() {
+fn ragdoll_lab_defaults_to_boxddd() {
     let cli = Cli::try_parse_from([
         "bevyout",
         "ragdoll-lab",
@@ -103,7 +103,7 @@ fn ragdoll_lab_defaults_to_avian_and_accepts_boxddd_comparison() {
     };
     assert_eq!(args.selector, "SuperDuperMart");
     assert_eq!(args.actor, "00041606");
-    assert_eq!(args.backend, RagdollLabBackend::Avian);
+    assert_eq!(args.backend, RagdollLabBackend::Boxddd);
     assert_eq!(args.agent_port, 15_702);
 
     let cli = Cli::try_parse_from([
@@ -749,4 +749,33 @@ fn prepared_shadow_resolution_and_rebuild_contract_parse() {
             .is_err()
         );
     }
+}
+
+#[test]
+fn cache_stats_contract_parses() {
+    let cli = Cli::try_parse_from([
+        "bevyout",
+        "cache",
+        "stats",
+        "--cache",
+        "prepared-cache",
+        "--manifest-set",
+        "reports/sample-cells.ron",
+        "--json",
+        "reports/cache.json",
+        "--csv",
+        "reports/cache.csv",
+    ])
+    .unwrap();
+    let CommandLine::Cache(args) = cli.command else {
+        panic!("expected cache command");
+    };
+    let CacheCommand::Stats(args) = args.command;
+    assert_eq!(args.cache, PathBuf::from("prepared-cache"));
+    assert_eq!(
+        args.manifest_set.as_deref(),
+        Some(Path::new("reports/sample-cells.ron"))
+    );
+    assert_eq!(args.json.as_deref(), Some(Path::new("reports/cache.json")));
+    assert_eq!(args.csv.as_deref(), Some(Path::new("reports/cache.csv")));
 }

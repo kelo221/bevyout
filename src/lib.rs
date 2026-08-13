@@ -19,5 +19,5 @@ pub use save::{
 };
 pub use viewer::{animation_zoo, ragdoll_lab, render, view};
 pub use vsa::{
-    bake, cells, exterior_catalog, exterior_conversion_report, nif_convert, prepare, report,
+    bake, cache, cells, exterior_catalog, exterior_conversion_report, nif_convert, prepare, report,
 };

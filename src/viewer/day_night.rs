@@ -7,7 +7,7 @@ use bevy::prelude::*;
 use bevy::render::render_resource::{
     Extent3d, TextureDimension, TextureFormat, TextureViewDescriptor, TextureViewDimension,
 };
-use bevyout_core::manifest::exterior::PreparedWeatherProfile;
+use bevyout_core::manifest::exterior::{PreparedWeatherProfile, resolve_prepared_weather_profile};
 use bevyout_core::manifest::{CellInfo, PreparedDayNightProfile, PreparedDayNightProfileSource};
 use bevyout_core::time_of_day::{
     advance_game_hour, interpolate_keyframes, normalize_hour, uses_dynamic_lighting,
@@ -405,8 +405,8 @@ fn interpolate_weather(
 }
 
 fn weather_profile_for_world(world: &World, form_id: u32) -> Option<PreparedWeatherProfile> {
-    let streamed = world
-        .get_resource::<super::world::exterior::ExteriorStreamState>()
+    let stream_state = world.get_resource::<super::world::exterior::ExteriorStreamState>();
+    let streamed = stream_state
         .and_then(|state| state.cells.get(&state.current_grid))
         .and_then(|cell| cell.package.as_ref())
         .map(|package| &package.environment);
@@ -416,11 +416,11 @@ fn weather_profile_for_world(world: &World, form_id: u32) -> Option<PreparedWeat
             .and_then(|manifest| manifest.exterior.as_ref())
             .map(|package| &package.environment)
     })?;
-    environment
-        .weather_profiles
-        .iter()
-        .find(|profile| profile.form_id == form_id)
-        .cloned()
+    let catalog = stream_state
+        .and_then(|state| state.index.as_ref())
+        .map(|index| index.weather_profiles.as_slice())
+        .unwrap_or_default();
+    resolve_prepared_weather_profile(environment, catalog, form_id)
 }
 
 fn weather_tint(form_id: u32) -> [f32; 4] {

@@ -17,6 +17,7 @@ mod cache;
 mod container_audio;
 mod container_audio_policy;
 mod dialogue_discovery;
+mod exterior_scene_policy;
 mod facegen;
 mod fingerprints;
 mod imad;
@@ -56,6 +57,7 @@ pub(crate) use cache::*;
 pub(crate) use container_audio::*;
 pub(crate) use container_audio_policy::*;
 pub(crate) use dialogue_discovery::*;
+pub(crate) use exterior_scene_policy::*;
 pub(crate) use facegen::*;
 pub(crate) use fingerprints::*;
 pub(crate) use imad::*;
@@ -112,7 +114,7 @@ use super::manifest::{
     REFLECTION_PROBE_REVISION, STATIC_POINT_SHADOW_REVISION,
 };
 use super::openmw_esm4::{
-    ClimateRecord, LightingData, OpenMwItemStats, WeatherRecord, WorldspaceRecord,
+    ClimateRecord, LightingData, OpenMwItemStats, ParsedContentSet, WeatherRecord, WorldspaceRecord,
 };
 use super::paths::{
     FO3_SCALE, absolutize, fingerprint, is_editor_marker, is_non_rendering_effect,
@@ -127,7 +129,7 @@ pub(crate) use super::plugin::parse_content_set;
 use super::plugin::{
     ActorBaseConfig, BaseRecord, ParsedPlugin, PluginSource, RECORD_DELETED, RECORD_DISABLED,
     RecipeItemRecord, RecipeRecord, ReferenceKind, ReferenceRecord, SoundRecord,
-    SoundReferenceRecord, parse_content_set_all, read_master_names,
+    SoundReferenceRecord, read_master_names,
 };
 use crate::cli::PrepareArgs;
 

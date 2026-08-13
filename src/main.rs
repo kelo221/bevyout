@@ -2,7 +2,7 @@ use anyhow::Result;
 use clap::Parser;
 
 use bevyout::{
-    Cli, CommandLine, animation_zoo, apply, bake, cells, exterior_catalog,
+    Cli, CommandLine, animation_zoo, apply, bake, cache, cells, exterior_catalog,
     exterior_conversion_report, nif_convert, prepare, ragdoll_lab, render, report, script, view,
 };
 
@@ -10,6 +10,7 @@ fn main() -> Result<()> {
     let mut cli = Cli::parse();
     apply(&mut cli)?;
     match cli.command {
+        CommandLine::Cache(args) => cache(args),
         CommandLine::Prepare(args) => prepare(args),
         CommandLine::Bake(args) => bake(args),
         CommandLine::Render(args) => render(args),

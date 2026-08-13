@@ -27,6 +27,9 @@ pub struct Cli {
 
 #[derive(Subcommand, Debug)]
 pub enum CommandLine {
+    /// Inspect, verify, migrate, and maintain the prepared cache.
+    #[command(name = "cache")]
+    Cache(CacheArgs),
     /// Extract a Fallout cell, stage its assets, and create a Bevy manifest.
     #[command(name = "prepare")]
     Prepare(PrepareArgs),
@@ -63,6 +66,35 @@ pub enum CommandLine {
     /// Print a prepared exterior worldspace index in stable catalog form.
     #[command(name = "exterior-catalog")]
     ExteriorCatalog(ExteriorCatalogArgs),
+}
+
+#[derive(Parser, Debug)]
+pub struct CacheArgs {
+    #[command(subcommand)]
+    pub(crate) command: CacheCommand,
+}
+
+#[derive(Subcommand, Debug)]
+pub(crate) enum CacheCommand {
+    /// Measure logical, allocated, categorized, and duplicate prepared-cache bytes.
+    #[command(name = "stats")]
+    Stats(CacheStatsArgs),
+}
+
+#[derive(Parser, Debug, Clone)]
+pub struct CacheStatsArgs {
+    /// Prepared cache root.
+    #[arg(long, default_value = ".bevyout/cache", value_name = "DIR")]
+    pub(crate) cache: PathBuf,
+    /// Optional RON document whose string paths select scene manifests or cache roots.
+    #[arg(long, value_name = "FILE.ron")]
+    pub(crate) manifest_set: Option<PathBuf>,
+    /// Write the deterministic full inventory as JSON.
+    #[arg(long, value_name = "FILE.json")]
+    pub(crate) json: Option<PathBuf>,
+    /// Write the deterministic per-file inventory as CSV.
+    #[arg(long, value_name = "FILE.csv")]
+    pub(crate) csv: Option<PathBuf>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
@@ -150,14 +182,12 @@ pub(crate) enum ActorAnimationConverter {
 
 #[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RagdollLabBackend {
-    Avian,
     Boxddd,
 }
 
 impl std::fmt::Display for RagdollLabBackend {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str(match self {
-            Self::Avian => "avian",
             Self::Boxddd => "boxddd",
         })
     }
@@ -217,22 +247,60 @@ pub struct PrepareArgs {
     pub(crate) progress: ProgressArgs,
     /// GECK EditorID, or an eight-digit hexadecimal FormID. May be repeated to
     /// prepare several cells in one run.
-    #[arg(value_name = "EDITOR_ID", conflicts_with_all = ["cell", "all"])]
+    #[arg(
+        value_name = "EDITOR_ID",
+        conflicts_with_all = ["cell", "all", "all_exteriors"]
+    )]
     pub(crate) selectors: Vec<String>,
     /// Prepare every cell in the resolved plugin chain.
     #[arg(
         long,
-        conflicts_with_all = ["all_interiors", "worldspace", "selectors", "cell"]
+        conflicts_with_all = [
+            "all_interiors",
+            "all_exteriors",
+            "worldspace",
+            "selectors",
+            "cell"
+        ]
     )]
     pub(crate) all: bool,
     /// Prepare every interior cell. Combinable with `--worldspace` and
     /// explicit selectors.
     #[arg(long)]
     pub(crate) all_interiors: bool,
+    /// Prepare every exterior cell in the resolved plugin chain.
+    #[arg(
+        long,
+        conflicts_with_all = [
+            "all",
+            "all_interiors",
+            "worldspace",
+            "exterior_radius",
+            "selectors",
+            "cell"
+        ]
+    )]
+    pub(crate) all_exteriors: bool,
     /// Prepare every cell belonging to this worldspace (EditorID or FormID).
     /// Combinable with `--all-interiors` and explicit selectors.
     #[arg(long, value_name = "WORLDSPACE")]
     pub(crate) worldspace: Option<String>,
+    /// Prepare the square exterior-cell neighborhood centered on the one
+    /// positional exterior cell selector. Distance is measured in CELL grid
+    /// coordinates, so radius 3 selects at most a 7x7 patch.
+    #[arg(
+        long,
+        value_name = "N",
+        requires = "selectors",
+        conflicts_with_all = [
+            "all",
+            "all_interiors",
+            "all_exteriors",
+            "worldspace",
+            "cell"
+        ]
+    )]
+    pub(crate) exterior_radius: Option<u32>,
     /// Print the resolved cell selection (`formid<TAB>editor_id` per line,
     /// sorted) and exit before any extraction or conversion work.
     #[arg(long, conflicts_with = "check_fingerprints")]
@@ -302,8 +370,9 @@ pub struct PrepareArgs {
     pub(crate) jobs: Option<usize>,
     /// Retry only cells currently recorded `failed` in the resumable job
     /// manifest, intersected with any other selector given. Alone (no
-    /// `--all`/`--all-interiors`/`--worldspace`/selectors), retries every
-    /// failed cell recorded in the manifest.
+    /// `--all`/`--all-interiors`/`--all-exteriors`/`--worldspace`/
+    /// `--exterior-radius`/selectors), retries every failed cell recorded in the
+    /// manifest.
     #[arg(long)]
     pub(crate) retry_failed: bool,
 }
@@ -372,7 +441,7 @@ pub struct RagdollLabArgs {
     #[arg(long, value_name = "FORM_ID")]
     pub(crate) actor: String,
     /// Physics solver used only by the isolated laboratory.
-    #[arg(long, value_enum, default_value_t = RagdollLabBackend::Avian)]
+    #[arg(long, value_enum, default_value_t = RagdollLabBackend::Boxddd)]
     pub(crate) backend: RagdollLabBackend,
     /// Prepared scene cache directory; defaults to .bevyout/cache.
     #[arg(long)]

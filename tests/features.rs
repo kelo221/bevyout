@@ -70,6 +70,18 @@ mod reflection_probe_distribution;
 #[path = "../src/vsa/overlay_policy.rs"]
 mod overlay_policy;
 
+#[path = "../src/vsa/cache_stats/policy.rs"]
+#[allow(dead_code, unused_imports)]
+mod cache_stats_policy;
+
+#[path = "../src/vsa/cache_store/policy.rs"]
+#[allow(dead_code, unused_imports)]
+mod cache_store_policy;
+
+#[path = "../src/vsa/prepare/exterior_scene_policy.rs"]
+#[allow(dead_code, unused_imports)]
+mod exterior_scene_policy;
+
 // These files are pulled in verbatim and cover far more ground than the three
 // pure seams this suite drives (placement math, cell selectors, manifest
 // (de)serialization, conversion-profile selection). Everything else in them
@@ -1218,6 +1230,25 @@ struct BevyoutWorld {
     fallout_overlay_editor_id: Option<String>,
     fallout_overlay_model: Option<String>,
     fallout_overlay_kind: Option<overlay_policy::FalloutOverlayKind>,
+
+    // -- cache_stats.feature (prepared-cache compression Wave 0) --
+    cache_stat_files: Vec<cache_stats_policy::CacheFileFacts>,
+    cache_stat_summary: Option<cache_stats_policy::CacheStorageSummary>,
+
+    // -- cache_object_store.feature (prepared-cache compression Wave 1) --
+    prepared_source_path: String,
+    normalized_prepared_source_path: Option<Result<String, String>>,
+    prepared_recipe_ids: Vec<String>,
+
+    // -- day_night_lighting.feature (shared exterior weather catalog) --
+    shared_weather_environment: bevyout_core::manifest::exterior::PreparedExteriorEnvironment,
+    shared_weather_catalog: Vec<bevyout_core::manifest::exterior::PreparedWeatherCatalogEntry>,
+    shared_weather_resolved: Option<bevyout_core::manifest::exterior::PreparedWeatherProfile>,
+
+    // -- exterior_scene_storage.feature (prepared-cache compression) --
+    exterior_storage_worldspace: u32,
+    exterior_storage_cell: u32,
+    exterior_storage_plan: Option<exterior_scene_policy::ExteriorSceneStoragePlan>,
 }
 
 fn synthetic_dialogue_source() -> dialogue::DialogueSource {
@@ -2355,6 +2386,7 @@ async fn given_selector_interior_cell(world: &mut BevyoutWorld, hex: String, edi
         name: None,
         interior: true,
         worldspace_form_id: None,
+        grid: None,
     });
 }
 
@@ -2366,6 +2398,7 @@ async fn given_selector_exterior_cell(world: &mut BevyoutWorld, hex: String, edi
         name: None,
         interior: false,
         worldspace_form_id: None,
+        grid: None,
     });
 }
 
@@ -2384,6 +2417,28 @@ async fn given_exterior_cell_in_worldspace(
         name: None,
         interior: false,
         worldspace_form_id: Some(parse_hex(&worldspace_hex)),
+        grid: None,
+    });
+}
+
+#[given(
+    regex = r#"^cell 0x([0-9a-fA-F]+) "([^"]*)" is an exterior cell in worldspace 0x([0-9a-fA-F]+) at grid \((-?\d+),(-?\d+)\)$"#
+)]
+async fn given_exterior_cell_in_worldspace_at_grid(
+    world: &mut BevyoutWorld,
+    hex: String,
+    editor_id: String,
+    worldspace_hex: String,
+    grid_x: i32,
+    grid_y: i32,
+) {
+    world.cells.push(CellSummary {
+        form_id: parse_hex(&hex),
+        editor_id: Some(editor_id),
+        name: None,
+        interior: false,
+        worldspace_form_id: Some(parse_hex(&worldspace_hex)),
+        grid: Some((grid_x, grid_y)),
     });
 }
 
@@ -2396,6 +2451,18 @@ async fn given_worldspace_named(world: &mut BevyoutWorld, hex: String, name: Str
 async fn when_selected_all_interiors(world: &mut BevyoutWorld) {
     let spec = SelectionSpec {
         all_interiors: true,
+        ..Default::default()
+    };
+    world.selection_result = Some(
+        resolve_selection(&world.cells, &world.worldspace_names, &spec)
+            .map_err(|error| error.to_string()),
+    );
+}
+
+#[when("cells are selected with --all-exteriors")]
+async fn when_selected_all_exteriors(world: &mut BevyoutWorld) {
+    let spec = SelectionSpec {
+        all_exteriors: true,
         ..Default::default()
     };
     world.selection_result = Some(
@@ -2424,6 +2491,19 @@ async fn when_selected_explicit(world: &mut BevyoutWorld, list: String) {
 async fn when_selected_worldspace(world: &mut BevyoutWorld, name: String) {
     let spec = SelectionSpec {
         worldspace: Some(name),
+        ..Default::default()
+    };
+    world.selection_result = Some(
+        resolve_selection(&world.cells, &world.worldspace_names, &spec)
+            .map_err(|error| error.to_string()),
+    );
+}
+
+#[when(regex = r#"^cells are selected with anchor "([^"]*)" and --exterior-radius (\d+)$"#)]
+async fn when_selected_exterior_radius(world: &mut BevyoutWorld, anchor: String, radius: u32) {
+    let spec = SelectionSpec {
+        exterior_radius: Some(radius),
+        explicit: vec![anchor],
         ..Default::default()
     };
     world.selection_result = Some(
@@ -17225,4 +17305,385 @@ async fn then_overlay_is_excluded_from_static_lighting(world: &mut BevyoutWorld)
         world.fallout_overlay_kind,
         Some(overlay_policy::FalloutOverlayKind::None)
     );
+}
+
+// ---------------------------------------------------------------------
+// cache_stats.feature -- deterministic prepared-cache accounting.
+// ---------------------------------------------------------------------
+
+#[given("a fresh prepared cache inventory")]
+async fn given_fresh_prepared_cache_inventory(world: &mut BevyoutWorld) {
+    world.cache_stat_files.clear();
+    world.cache_stat_summary = None;
+}
+
+#[given(
+    regex = r#"^cache file \"([^\"]+)\" has (\d+) logical bytes, (\d+) allocated bytes, and payload \"([^\"]+)\"$"#
+)]
+async fn given_cache_file(
+    world: &mut BevyoutWorld,
+    path: String,
+    logical_bytes: u64,
+    allocated_bytes: u64,
+    payload: String,
+) {
+    world
+        .cache_stat_files
+        .push(cache_stats_policy::CacheFileFacts {
+            relative_path: path,
+            logical_bytes,
+            allocated_bytes,
+            payload_id: payload,
+        });
+}
+
+#[when("cache storage is summarized")]
+async fn when_cache_storage_is_summarized(world: &mut BevyoutWorld) {
+    world.cache_stat_summary = Some(cache_stats_policy::summarize_cache_files(
+        &world.cache_stat_files,
+    ));
+}
+
+#[then(regex = r"^cache logical bytes are (\d+)$")]
+async fn then_cache_logical_bytes(world: &mut BevyoutWorld, expected: u64) {
+    assert_eq!(
+        world.cache_stat_summary.as_ref().unwrap().logical_bytes,
+        expected
+    );
+}
+
+#[then(regex = r"^cache allocated bytes are (\d+)$")]
+async fn then_cache_allocated_bytes(world: &mut BevyoutWorld, expected: u64) {
+    assert_eq!(
+        world.cache_stat_summary.as_ref().unwrap().allocated_bytes,
+        expected
+    );
+}
+
+#[then(regex = r"^cache unique payload bytes are (\d+)$")]
+async fn then_cache_unique_payload_bytes(world: &mut BevyoutWorld, expected: u64) {
+    assert_eq!(
+        world
+            .cache_stat_summary
+            .as_ref()
+            .unwrap()
+            .unique_payload_bytes,
+        expected
+    );
+}
+
+#[then(regex = r"^cache duplicate logical bytes are (\d+)$")]
+async fn then_cache_duplicate_logical_bytes(world: &mut BevyoutWorld, expected: u64) {
+    assert_eq!(
+        world
+            .cache_stat_summary
+            .as_ref()
+            .unwrap()
+            .duplicate_logical_bytes,
+        expected
+    );
+}
+
+#[then(regex = r"^cache duplicate physical bytes are (\d+)$")]
+async fn then_cache_duplicate_physical_bytes(world: &mut BevyoutWorld, expected: u64) {
+    assert_eq!(
+        world
+            .cache_stat_summary
+            .as_ref()
+            .unwrap()
+            .duplicate_allocated_bytes,
+        expected
+    );
+}
+
+#[then(regex = r"^cache duplicate cluster count is (\d+)$")]
+async fn then_cache_duplicate_cluster_count(world: &mut BevyoutWorld, expected: usize) {
+    assert_eq!(
+        world
+            .cache_stat_summary
+            .as_ref()
+            .unwrap()
+            .duplicate_clusters
+            .len(),
+        expected
+    );
+}
+
+#[then(regex = r#"^cache category \"([^\"]+)\" has (\d+) logical bytes$"#)]
+async fn then_cache_category_logical_bytes(
+    world: &mut BevyoutWorld,
+    category: String,
+    expected: u64,
+) {
+    let actual = world
+        .cache_stat_summary
+        .as_ref()
+        .unwrap()
+        .categories
+        .iter()
+        .find(|entry| entry.category.as_str() == category)
+        .unwrap_or_else(|| panic!("missing cache category {category}"));
+    assert_eq!(actual.logical_bytes, expected);
+}
+
+#[then("cache categories are ordered alphabetically")]
+async fn then_cache_categories_are_ordered(world: &mut BevyoutWorld) {
+    let categories = &world.cache_stat_summary.as_ref().unwrap().categories;
+    assert!(
+        categories
+            .windows(2)
+            .all(|pair| pair[0].category <= pair[1].category)
+    );
+}
+
+#[then("cache duplicate clusters are ordered by recoverable bytes then payload")]
+async fn then_cache_duplicate_clusters_are_ordered(world: &mut BevyoutWorld) {
+    let clusters = &world
+        .cache_stat_summary
+        .as_ref()
+        .unwrap()
+        .duplicate_clusters;
+    assert!(clusters.windows(2).all(|pair| {
+        pair[0].duplicate_allocated_bytes > pair[1].duplicate_allocated_bytes
+            || (pair[0].duplicate_allocated_bytes == pair[1].duplicate_allocated_bytes
+                && pair[0].payload_id <= pair[1].payload_id)
+    }));
+}
+
+#[then("paths inside each duplicate cluster are ordered alphabetically")]
+async fn then_cache_duplicate_paths_are_ordered(world: &mut BevyoutWorld) {
+    for cluster in &world
+        .cache_stat_summary
+        .as_ref()
+        .unwrap()
+        .duplicate_clusters
+    {
+        assert!(cluster.paths.windows(2).all(|pair| pair[0] <= pair[1]));
+    }
+}
+
+// ---------------------------------------------------------------------
+// day_night_lighting.feature -- shared exterior weather catalog.
+// ---------------------------------------------------------------------
+
+#[given("an exterior environment with sunrise from hour 5 to 9 and no embedded weather catalog")]
+async fn given_shared_weather_environment(world: &mut BevyoutWorld) {
+    world.shared_weather_environment =
+        bevyout_core::manifest::exterior::PreparedExteriorEnvironment {
+            timings: bevyout_core::time_of_day::DayNightTimings {
+                sunrise_begin_hour: 5.0,
+                sunrise_end_hour: 9.0,
+                sunset_begin_hour: 16.0,
+                sunset_end_hour: 20.0,
+            },
+            weather_profiles: Vec::new(),
+            ..Default::default()
+        };
+    world.shared_weather_catalog.clear();
+    world.shared_weather_resolved = None;
+}
+
+#[given(regex = r"^shared weather ([0-9a-fA-F]{8}) has scalar ambient day color ([\d.]+)$")]
+async fn given_shared_weather_color(world: &mut BevyoutWorld, form_id: String, day: f32) {
+    let ambient = bevyout_core::time_of_day::ColorKeyframes {
+        day: [day; 4],
+        ..Default::default()
+    };
+    world.shared_weather_catalog.push(
+        bevyout_core::manifest::exterior::PreparedWeatherCatalogEntry {
+            form_id: u32::from_str_radix(&form_id, 16).unwrap(),
+            editor_id: Some("SharedWeather".into()),
+            sky_upper: Default::default(),
+            sky_lower: Default::default(),
+            ambient,
+            sunlight: Default::default(),
+        },
+    );
+}
+
+#[when(regex = r"^shared exterior weather ([0-9a-fA-F]{8}) is resolved$")]
+async fn when_shared_weather_is_resolved(world: &mut BevyoutWorld, form_id: String) {
+    world.shared_weather_resolved =
+        bevyout_core::manifest::exterior::resolve_prepared_weather_profile(
+            &world.shared_weather_environment,
+            &world.shared_weather_catalog,
+            u32::from_str_radix(&form_id, 16).unwrap(),
+        );
+}
+
+#[then(regex = r"^the resolved exterior weather uses sunrise hours ([\d.]+) to ([\d.]+)$")]
+async fn then_shared_weather_uses_cell_timings(world: &mut BevyoutWorld, begin: f32, end: f32) {
+    let profile = world.shared_weather_resolved.as_ref().unwrap();
+    assert_eq!(profile.timings.sunrise_begin_hour, begin);
+    assert_eq!(profile.timings.sunrise_end_hour, end);
+}
+
+#[then(regex = r"^the resolved exterior weather ambient day color is ([\d.]+)$")]
+async fn then_shared_weather_uses_catalog_color(world: &mut BevyoutWorld, expected: f32) {
+    assert_eq!(
+        world.shared_weather_resolved.as_ref().unwrap().ambient.day,
+        [expected; 4]
+    );
+}
+
+#[then("the exterior cell package embeds zero weather profiles")]
+async fn then_exterior_package_embeds_no_weather(world: &mut BevyoutWorld) {
+    assert!(world.shared_weather_environment.weather_profiles.is_empty());
+}
+
+// ---------------------------------------------------------------------
+// cache_object_store.feature -- canonical recipe identities.
+// ---------------------------------------------------------------------
+
+#[given(regex = r#"^prepared source path \"([^\"]+)\"$"#)]
+async fn given_prepared_source_path(world: &mut BevyoutWorld, path: String) {
+    world.prepared_source_path = path;
+    world.normalized_prepared_source_path = None;
+}
+
+#[when("the prepared source path is normalized")]
+async fn when_prepared_source_path_is_normalized(world: &mut BevyoutWorld) {
+    world.normalized_prepared_source_path = Some(
+        cache_store_policy::normalize_source_path(&world.prepared_source_path)
+            .map_err(|error| error.to_string()),
+    );
+}
+
+#[then(regex = r#"^the normalized prepared source path is \"([^\"]+)\"$"#)]
+async fn then_normalized_prepared_source_path_is(world: &mut BevyoutWorld, expected: String) {
+    assert_eq!(
+        world
+            .normalized_prepared_source_path
+            .as_ref()
+            .unwrap()
+            .as_ref()
+            .unwrap(),
+        &expected
+    );
+}
+
+#[then("prepared source path normalization is rejected")]
+async fn then_prepared_source_path_normalization_is_rejected(world: &mut BevyoutWorld) {
+    assert!(
+        world
+            .normalized_prepared_source_path
+            .as_ref()
+            .unwrap()
+            .is_err()
+    );
+}
+
+#[given(regex = r#"^a prepared GLB recipe for \"([^\"]+)\"$"#)]
+async fn given_prepared_glb_recipe(world: &mut BevyoutWorld, path: String) {
+    world.prepared_source_path = path;
+    world.prepared_recipe_ids.clear();
+}
+
+#[when("its prepared recipe identities are calculated")]
+async fn when_prepared_recipe_identities_are_calculated(world: &mut BevyoutWorld) {
+    let normalized =
+        cache_store_policy::normalize_source_path(&world.prepared_source_path).unwrap();
+    let base = cache_store_policy::recipe_identity(
+        "glb",
+        1,
+        &normalized,
+        &["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into()],
+        "converter-v1",
+        "format-v1",
+        b"settings",
+    )
+    .unwrap();
+    let unchanged = cache_store_policy::recipe_identity(
+        "glb",
+        1,
+        &normalized,
+        &["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into()],
+        "converter-v1",
+        "format-v1",
+        b"settings",
+    )
+    .unwrap();
+    let converter = cache_store_policy::recipe_identity(
+        "glb",
+        1,
+        &normalized,
+        &["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into()],
+        "converter-v2",
+        "format-v1",
+        b"settings",
+    )
+    .unwrap();
+    let format = cache_store_policy::recipe_identity(
+        "glb",
+        1,
+        &normalized,
+        &["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into()],
+        "converter-v1",
+        "format-v2",
+        b"settings",
+    )
+    .unwrap();
+    world.prepared_recipe_ids = vec![base, unchanged, converter, format];
+}
+
+#[then("the unchanged prepared recipe identity is stable")]
+async fn then_unchanged_prepared_recipe_identity_is_stable(world: &mut BevyoutWorld) {
+    assert_eq!(world.prepared_recipe_ids[0], world.prepared_recipe_ids[1]);
+}
+
+#[then("changing the converter revision changes the prepared recipe identity")]
+async fn then_converter_revision_changes_prepared_recipe_identity(world: &mut BevyoutWorld) {
+    assert_ne!(world.prepared_recipe_ids[0], world.prepared_recipe_ids[2]);
+}
+
+// ---------------------------------------------------------------------
+// exterior_scene_storage.feature -- compact exterior scene roots.
+// ---------------------------------------------------------------------
+
+#[given(regex = r"^exterior cell ([0-9a-fA-F]{8}) belongs to worldspace ([0-9a-fA-F]{8})$")]
+async fn given_exterior_scene_storage_ids(
+    world: &mut BevyoutWorld,
+    cell: String,
+    worldspace: String,
+) {
+    world.exterior_storage_cell = u32::from_str_radix(&cell, 16).unwrap();
+    world.exterior_storage_worldspace = u32::from_str_radix(&worldspace, 16).unwrap();
+    world.exterior_storage_plan = None;
+}
+
+#[when("its exterior scene storage is planned")]
+async fn when_exterior_scene_storage_is_planned(world: &mut BevyoutWorld) {
+    world.exterior_storage_plan = Some(exterior_scene_policy::exterior_scene_storage_plan(
+        world.exterior_storage_worldspace,
+        world.exterior_storage_cell,
+    ));
+}
+
+#[then(regex = r#"^the exterior package path is \"([^\"]+)\"$"#)]
+async fn then_exterior_package_path_is(world: &mut BevyoutWorld, expected: String) {
+    assert_eq!(
+        world.exterior_storage_plan.as_ref().unwrap().package_path,
+        expected
+    );
+}
+
+#[then("the scene root does not embed the exterior package")]
+async fn then_exterior_scene_does_not_embed_package(world: &mut BevyoutWorld) {
+    assert!(!world.exterior_storage_plan.as_ref().unwrap().embed_package);
+}
+
+#[then("the scene root does not embed content-wide diagnostics")]
+async fn then_exterior_scene_does_not_embed_content_diagnostics(world: &mut BevyoutWorld) {
+    assert!(
+        !world
+            .exterior_storage_plan
+            .as_ref()
+            .unwrap()
+            .embed_content_diagnostics
+    );
+}
+
+#[then("changing the format policy changes the prepared recipe identity")]
+async fn then_format_policy_changes_prepared_recipe_identity(world: &mut BevyoutWorld) {
+    assert_ne!(world.prepared_recipe_ids[0], world.prepared_recipe_ids[3]);
 }

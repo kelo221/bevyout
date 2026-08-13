@@ -793,7 +793,7 @@ fn prepared_static_meshes_leave_runtime_casters_but_physics_meshes_do_not() {
 
 #[test]
 fn forward_shader_combines_prepared_and_realtime_visibility() {
-    let shader = include_str!("../../../third_party/bevy_pbr-0.19.0/src/render/pbr_functions.wgsl");
+    let shader = include_str!("../../../third_party/bevy_pbr-0.19.1/src/render/pbr_functions.wgsl");
     assert_eq!(shader.matches("shadows::fetch_point_shadow(").count(), 2);
     assert!(shader.contains("dominant_point_light_uses_baked_shadow"));
     assert!(shader.contains("dominant_point_light_uses_realtime_shadow"));

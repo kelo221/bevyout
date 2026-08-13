@@ -1,5 +1,20 @@
 use super::*;
 
+#[test]
+fn gltf_root_relative_objects_resolve_from_the_asset_root() {
+    let asset_root = Path::new("C:/cache");
+    let glb = Path::new("C:/cache/assets/model.glb");
+    assert_eq!(
+        resolve_gltf_external_path(asset_root, glb, "/objects/texture/aa/bb/payload.ktx2").unwrap(),
+        asset_root.join("objects/texture/aa/bb/payload.ktx2")
+    );
+    assert_eq!(
+        resolve_gltf_external_path(asset_root, glb, "legacy.png").unwrap(),
+        glb.parent().unwrap().join("legacy.png")
+    );
+    assert!(resolve_gltf_external_path(asset_root, glb, "/objects/../escape.ktx2").is_err());
+}
+
 fn open_sheet_fragment(material: usize) -> ComposedPrimitive {
     ComposedPrimitive {
         name: "paper_sheet".into(),

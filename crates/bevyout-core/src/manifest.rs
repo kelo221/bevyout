@@ -78,6 +78,7 @@ pub struct PreparedSceneManifest {
     pub cell: CellInfo,
     pub placements: Vec<PreparedPlacement>,
     pub lights: Vec<PreparedLight>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub diagnostics: Vec<Diagnostic>,
     #[serde(default)]
     pub visual_issues: Vec<PreparedVisualIssue>,
@@ -121,7 +122,7 @@ pub struct PreparedSceneManifest {
     pub dialogue: Option<PreparedDialogueBundleRef>,
     /// Optional self-contained exterior cell package. Interior manifests do
     /// not populate this field; the default keeps older caches readable.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exterior: Option<exterior::ExteriorCellPackage>,
 }
 

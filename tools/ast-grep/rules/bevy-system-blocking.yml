@@ -1,0 +1,26 @@
+id: bevy-system-blocking
+language: Rust
+severity: error
+message: Bevy system may block the executor; move I/O/waits/locks to a task pool or nonblocking state machine.
+note: High-confidence only after runtime path filtering; inspect lock contention and poll tasks without blocking.
+rule:
+  all:
+    - pattern: fn $FUNC($$$ARGS) { $$$BODY }
+    - has:
+        any:
+          - pattern: "std::thread::sleep($$$A)"
+          - pattern: "thread::sleep($$$A)"
+          - pattern: "block_on($$$A)"
+          - pattern: "$X.recv()"
+          - pattern: "$X.recv_timeout($$$A)"
+          - pattern: "$X.lock()"
+          - pattern: "$X.read().unwrap()"
+          - pattern: "$X.read().expect($$$A)"
+          - pattern: "$X.write()"
+        stopBy: end
+constraints:
+  ARGS:
+    regex: "(?:Query|Res|ResMut|EventReader|EventWriter)<|\\bCommands\\b"
+  FUNC:
+    not:
+      regex: "^(test|bench|prepare|load|startup|setup)_"

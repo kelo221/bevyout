@@ -40,6 +40,7 @@ fn output_is_deterministic_and_sanitizes_tsv_fields() {
                 winning_plugin: "Patch.esp".into(),
                 provenance: vec!["Fallout3.esm".into(), "Patch.esp".into()],
                 worldspace_form_id: Some(60),
+                grid: Some((4, -5)),
             },
             CellCatalogEntry {
                 form_id: 1,
@@ -49,6 +50,7 @@ fn output_is_deterministic_and_sanitizes_tsv_fields() {
                 winning_plugin: "Fallout3.esm".into(),
                 provenance: vec!["Fallout3.esm".into()],
                 worldspace_form_id: None,
+                grid: None,
             },
         ],
         worldspaces: vec![(60, "Wasteland".into())],

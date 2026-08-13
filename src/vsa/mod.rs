@@ -2,6 +2,8 @@ mod assets;
 mod audio_assets;
 mod bake;
 mod bsa;
+mod cache_stats;
+mod cache_store;
 mod catalog;
 mod cell_map;
 mod content_index;
@@ -30,6 +32,7 @@ pub(crate) use assets::PREPARED_CONVERTER_REVISION;
 pub(crate) use assets::SUPPORTED_PREPARED_CONVERTER_REVISIONS;
 pub use bake::bake;
 pub(crate) use bake::is_bake_static;
+pub use cache_stats::cache;
 pub use catalog::cells;
 // Issue #51's runtime preloader (`viewer::world`) reads the door-graph
 // connectivity `cells --map` (issue #45) emits at prepare time.
@@ -70,7 +73,7 @@ pub(crate) use manifest::{
     PreparedItemCategory, PreparedItemDefinition, PreparedItemStats, PreparedLeveledList,
     PreparedPhysicsClassification, PreparedPickup, PreparedPlacement, PreparedRuntimeMutability,
     PreparedSceneManifest, PreparedSemantic, cell_label, ensure_baked_scene_compatible,
-    ensure_prepared_manifest_compatible_any,
+    ensure_prepared_manifest_compatible_any, hydrate_exterior_package,
 };
 pub use nif_convert::nif_convert;
 pub(crate) use overlay_policy::{FalloutOverlayKind, classify_fallout_overlay};

@@ -107,7 +107,8 @@ pub fn apply(cli: &mut Cli) -> Result<()> {
                 args.cache_dir = config.output.cache_dir.clone();
             }
         }
-        CommandLine::View(_)
+        CommandLine::Cache(_)
+        | CommandLine::View(_)
         | CommandLine::Script(_)
         | CommandLine::ExteriorConversionReport(_)
         | CommandLine::ExteriorCatalog(_) => {}

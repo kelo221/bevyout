@@ -12,10 +12,8 @@ mod policy;
 use std::any::TypeId;
 use std::collections::{BTreeMap, HashSet};
 use std::fs;
-use std::io::{BufRead, BufReader};
 use std::path::Path;
 
-use avian3d::prelude::Collider;
 use bevy::asset::RenderAssetUsages;
 use bevy::camera::visibility::VisibleEntities;
 use bevy::mesh::{Indices, PrimitiveTopology};
@@ -196,10 +194,12 @@ impl Plugin for ExteriorWorldPlugin {
                     initialize,
                     place_player,
                     update_residency,
+                    // Release evicted roots and collision ownership before a
+                    // newly completed package is allowed to spawn this frame.
+                    finalize_evictions,
                     loading::poll,
                     apply_exterior_persistence,
                     attach_streamed_colliders,
-                    finalize_evictions,
                 )
                     .chain()
                     .run_if(in_state(AppState::InGame)),
@@ -227,6 +227,26 @@ impl Plugin for ExteriorWorldPlugin {
 struct ExteriorStreamBudget {
     resident_cells: usize,
     bytes: u64,
+}
+
+fn initial_cell_state(
+    cell_form_id: u32,
+    grid: GridCoordinate,
+    estimated_bytes: u64,
+) -> bevyout_core::manifest::exterior::ExteriorCellState {
+    bevyout_core::manifest::exterior::ExteriorCellState {
+        cell_form_id,
+        grid,
+        lifecycle: ExteriorCellLifecycle::Resident,
+        generation: 1,
+        // The active grid is retained by the residency planner itself. During
+        // a collision handoff, update_residency temporarily pins the previous
+        // grid in its planning snapshot. A permanent startup pin would leave
+        // this cell resident after both protections no longer apply.
+        pinned: false,
+        estimated_bytes,
+        failed_attempts: 0,
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -274,17 +294,11 @@ fn initialize(
     match fs::read_to_string(&index_path).and_then(|text| {
         ron::from_str::<ExteriorWorldspaceIndex>(&text).map_err(std::io::Error::other)
     }) {
-        Ok(mut index) if index.revision == EXTERIOR_INDEX_REVISION => {
-            let indexed_cells = index.cells.len();
-            index.cells.retain(|cell| {
-                let path = Path::new(&manifest.asset_root).join(&cell.package_path);
-                path.is_file() && exterior_package_has_current_revision(&path)
-            });
+        Ok(index) if index.revision == EXTERIOR_INDEX_REVISION => {
             info!(
-                "exterior package availability worldspace {:08x}: {}/{} indexed cells",
+                "exterior index ready worldspace {:08x}: {} cells; package availability validated on demand",
                 index.worldspace_form_id,
-                index.cells.len(),
-                indexed_cells
+                index.cells.len()
             );
             state.index = Some(index);
         }
@@ -327,15 +341,11 @@ fn initialize(
     state.cells.insert(
         package.grid,
         lifecycle::RuntimeCell {
-            state: bevyout_core::manifest::exterior::ExteriorCellState {
-                cell_form_id: package.cell_form_id,
-                grid: package.grid,
-                lifecycle: ExteriorCellLifecycle::Resident,
-                generation: 1,
-                pinned: true,
-                estimated_bytes: estimate_package_bytes(&package),
-                failed_attempts: 0,
-            },
+            state: initial_cell_state(
+                package.cell_form_id,
+                package.grid,
+                estimate_package_bytes(&package),
+            ),
             root: Some(root),
             task: None,
             package: Some(package),
@@ -363,27 +373,6 @@ fn initialize(
         );
     }
     info!("exterior resident {:08x}", manifest.cell.form_id);
-}
-
-fn exterior_package_has_current_revision(path: &Path) -> bool {
-    let Ok(file) = fs::File::open(path) else {
-        return false;
-    };
-    let Ok(lines) = BufReader::new(file)
-        .lines()
-        .take(4)
-        .collect::<Result<Vec<_>, _>>()
-    else {
-        return false;
-    };
-    exterior_package_header_has_current_revision(&lines)
-}
-
-fn exterior_package_header_has_current_revision(lines: &[String]) -> bool {
-    let expected = format!("revision: \"{}\"", EXTERIOR_CELL_PACKAGE_REVISION);
-    lines
-        .iter()
-        .any(|line| line.trim_start().starts_with("revision:") && line.contains(&expected))
 }
 
 fn place_player(
@@ -889,7 +878,6 @@ pub(crate) fn spawn_package(
     if let Some(terrain_data) = package.terrain.as_ref()
         && let Some(terrain) = terrain_mesh_with_stride(terrain_data, 1)
     {
-        let collider = terrain_collider(terrain_data);
         let near_handle = meshes.add(
             terrain_mesh_with_subdivisions(terrain_data, NEAR_TERRAIN_SUBDIVISIONS)
                 .unwrap_or(terrain),
@@ -908,43 +896,38 @@ pub(crate) fn spawn_package(
                 })
                 .load(path.to_owned())
         });
-        let entity = commands
-            .spawn((
-                Mesh3d(near_handle.clone()),
-                MeshMaterial3d(
-                    materials.add(StandardMaterial {
-                        base_color: Color::WHITE,
-                        base_color_texture: terrain_data
-                            .albedo_asset_path
-                            .as_deref()
-                            .map(|path| asset_server.load(path.to_owned())),
-                        normal_map_texture: normal_map.clone(),
-                        specular_texture: normal_map,
-                        flip_normal_map_y: false,
-                        // LAND normal alpha carries source specular data, but
-                        // the terrain is still a matte dielectric surface.
-                        // Maxing the dielectric F0 makes the high-frequency
-                        // normal detail sparkle like polished metal.
-                        reflectance: 0.25,
-                        perceptual_roughness: 1.0,
-                        ..default()
-                    }),
-                ),
-                ExteriorTerrain,
-                ExteriorTerrainLod {
-                    grid: package.grid,
-                    near: near_handle,
-                    middle: middle_handle,
-                    distant: distant_handle,
-                    current: TerrainLod::Near,
-                    center: terrain_center(package.terrain.as_ref(), package.origin),
-                },
-                ChildOf(root),
-            ))
-            .id();
-        if let Some(collider) = collider {
-            commands.entity(entity).insert(collider);
-        }
+        commands.spawn((
+            Mesh3d(near_handle.clone()),
+            MeshMaterial3d(
+                materials.add(StandardMaterial {
+                    base_color: Color::WHITE,
+                    base_color_texture: terrain_data
+                        .albedo_asset_path
+                        .as_deref()
+                        .map(|path| asset_server.load(path.to_owned())),
+                    normal_map_texture: normal_map.clone(),
+                    specular_texture: normal_map,
+                    flip_normal_map_y: false,
+                    // LAND normal alpha carries source specular data, but
+                    // the terrain is still a matte dielectric surface.
+                    // Maxing the dielectric F0 makes the high-frequency
+                    // normal detail sparkle like polished metal.
+                    reflectance: 0.25,
+                    perceptual_roughness: 1.0,
+                    ..default()
+                }),
+            ),
+            ExteriorTerrain,
+            ExteriorTerrainLod {
+                grid: package.grid,
+                near: near_handle,
+                middle: middle_handle,
+                distant: distant_handle,
+                current: TerrainLod::Near,
+                center: terrain_center(package.terrain.as_ref(), package.origin),
+            },
+            ChildOf(root),
+        ));
     }
     for object in package
         .static_objects
@@ -1309,30 +1292,6 @@ fn append_terrain_skirts(buffers: &mut TerrainMeshBuffers<'_>, columns: usize, r
         let right = y * columns + columns - 1;
         add_segment(right, right + columns);
     }
-}
-
-fn terrain_collider(terrain: &PreparedTerrain) -> Option<Collider> {
-    if !terrain.is_well_formed() || terrain.width < 2 || terrain.height < 2 {
-        return None;
-    }
-    let width = usize::from(terrain.width);
-    let height = usize::from(terrain.height);
-    let mut indices = Vec::with_capacity((width - 1) * (height - 1) * 2);
-    for y in 0..height - 1 {
-        for x in 0..width - 1 {
-            let i = (y * width + x) as u32;
-            let next = i + width as u32;
-            indices.extend_from_slice(&[[i, i + 1, next], [i + 1, next + 1, next]]);
-        }
-    }
-    Some(Collider::trimesh(
-        terrain
-            .positions
-            .iter()
-            .map(|position| Vec3::from_array(*position))
-            .collect(),
-        indices,
-    ))
 }
 
 fn estimate_package_bytes(package: &ExteriorCellPackage) -> u64 {

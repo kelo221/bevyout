@@ -1,0 +1,7 @@
+id: bevy-overlapping-mut-query-review
+language: Rust
+severity: warning
+message: Multiple mutable queries may overlap; prove disjoint filters or use ParamSet deliberately.
+note: Advisory structural review; Rust LSP must resolve aliases and component identity.
+rule:
+  pattern: "fn $FUNC($Q1: Query<&mut $COMP>, $Q2: Query<&mut $COMP>) { $$$BODY }"

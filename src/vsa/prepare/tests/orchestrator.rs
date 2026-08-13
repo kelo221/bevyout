@@ -10,6 +10,114 @@ fn fingerprint_check_always_uses_the_report_only_batch_path() {
 }
 
 #[test]
+fn exterior_radius_always_uses_the_batch_path() {
+    let args = PrepareArgs::try_parse_from(["prepare", "00000c49", "--exterior-radius", "3"])
+        .expect("valid prepare arguments");
+
+    assert_eq!(args.exterior_radius, Some(3));
+    assert!(prepare_requires_batch(&args, 1));
+}
+
+#[test]
+fn exterior_radius_conflicts_with_whole_catalogue_selectors() {
+    for conflicting in ["--all", "--all-interiors", "--worldspace"] {
+        let mut argv = vec!["prepare", "00000c49", "--exterior-radius", "3", conflicting];
+        if conflicting == "--worldspace" {
+            argv.push("Wasteland");
+        }
+
+        assert!(PrepareArgs::try_parse_from(argv).is_err(), "{conflicting}");
+    }
+}
+
+#[test]
+fn all_exteriors_always_uses_the_batch_path() {
+    let args = PrepareArgs::try_parse_from(["prepare", "--all-exteriors"])
+        .expect("valid prepare arguments");
+
+    assert!(args.all_exteriors);
+    assert!(prepare_requires_batch(&args, 0));
+}
+
+#[test]
+fn all_exteriors_conflicts_with_every_other_cell_selector() {
+    for conflicting in [
+        "--all",
+        "--all-interiors",
+        "--worldspace",
+        "--exterior-radius",
+        "positional",
+    ] {
+        let mut argv = vec!["prepare", "--all-exteriors"];
+        match conflicting {
+            "--worldspace" => argv.extend(["--worldspace", "Wasteland"]),
+            "--exterior-radius" => argv.extend(["00000c49", "--exterior-radius", "3"]),
+            "positional" => argv.push("00000c49"),
+            flag => argv.push(flag),
+        }
+
+        assert!(PrepareArgs::try_parse_from(argv).is_err(), "{conflicting}");
+    }
+}
+
+#[test]
+fn single_exterior_selection_identifies_the_worldspace_index_to_publish() {
+    let exterior = CellInfo {
+        form_id: 0x0000_0aaa,
+        editor_id: Some("WastelandSynthetic".into()),
+        interior: false,
+        worldspace_form_id: Some(0x0000_003c),
+        ..synthetic_cell_info()
+    };
+    let interior = CellInfo {
+        form_id: 0x0001_7f37,
+        editor_id: Some("SuperDuperMart".into()),
+        interior: true,
+        worldspace_form_id: None,
+        ..synthetic_cell_info()
+    };
+    let cells = [&exterior, &interior];
+
+    assert_eq!(
+        selected_exterior_worldspace(cells, &CellSelector::FormId(0x0000_0aaa)),
+        Some(0x0000_003c)
+    );
+    assert_eq!(
+        selected_exterior_worldspace(cells, &CellSelector::EditorId("wastelandsynthetic".into())),
+        Some(0x0000_003c)
+    );
+    assert_eq!(
+        selected_exterior_worldspace(cells, &CellSelector::EditorId("SuperDuperMart".into())),
+        None
+    );
+}
+
+fn synthetic_cell_info() -> CellInfo {
+    CellInfo {
+        form_id: 0,
+        editor_id: None,
+        name: None,
+        interior: false,
+        behave_like_exterior: false,
+        ambient_rgba: [0.0; 4],
+        directional_rgba: [0.0; 4],
+        image_space_form_id: None,
+        image_space: None,
+        lighting_template_form_id: None,
+        lighting_template_flags: 0,
+        lighting_template: None,
+        raw_lighting: None,
+        effective_lighting: None,
+        water_form_id: None,
+        water_height: None,
+        grid: None,
+        worldspace_form_id: None,
+        day_night_profile: None,
+        day_night_preview_profile: None,
+    }
+}
+
+#[test]
 fn dialogue_voice_discovery_is_automatic_without_the_legacy_flag() {
     assert!(should_discover_dialogue_voice(false));
     assert!(should_discover_dialogue_voice(true));
@@ -409,7 +517,8 @@ mod actor_assembly_policy_tests {
                 apparel(0x101),
                 apparel(0x200),
                 apparel(0x201),
-            ]),
+            ])
+            .into(),
             ..ParsedPlugin::default()
         };
 
@@ -434,7 +543,8 @@ mod actor_assembly_policy_tests {
                 leveled(0x10, 0, &[0x100, 0x200]),
                 apparel(0x100),
                 apparel(0x200),
-            ]),
+            ])
+            .into(),
             ..ParsedPlugin::default()
         };
 
@@ -449,7 +559,7 @@ mod actor_assembly_policy_tests {
         let mut root = leveled(0x10, 0, &[0x100]).1;
         root.leveled.as_mut().expect("leveled fixture").chance_none = 100;
         let parsed = ParsedPlugin {
-            bases: HashMap::from([(0x10, root), apparel(0x100)]),
+            bases: HashMap::from([(0x10, root), apparel(0x100)]).into(),
             ..ParsedPlugin::default()
         };
 

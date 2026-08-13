@@ -47,7 +47,7 @@ fn base_app() -> App {
     app
 }
 
-fn wait_for_task_pool() {
+fn test_wait_for_task_pool() {
     std::thread::sleep(Duration::from_millis(10));
 }
 
@@ -102,9 +102,10 @@ fn stale_completion_cannot_spawn_a_root_or_leave_a_task_owner() {
             eviction_restore: None,
         },
     );
+    state.resident_budget = 1;
     app.insert_resource(state);
 
-    wait_for_task_pool();
+    test_wait_for_task_pool();
     app.update();
 
     let state = app
@@ -166,10 +167,11 @@ fn duplicate_same_generation_tasks_can_commit_only_one_package_root() {
             eviction_restore: None,
         },
     );
+    state.resident_budget = 1;
     app.insert_resource(state);
 
     let _ = first;
-    wait_for_task_pool();
+    test_wait_for_task_pool();
     app.update();
 
     let state = app

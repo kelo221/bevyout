@@ -44,3 +44,11 @@ Feature: Fallout time-of-day lighting policy
     Given preview weather candidates "00000020:Cloudy,00000002:Rain"
     When preview fallback weather is selected
     Then preview weather 00000002 is selected
+
+  Scenario: Exterior cells resolve shared weather colors with cell climate timings
+    Given an exterior environment with sunrise from hour 5 to 9 and no embedded weather catalog
+    And shared weather 00000050 has scalar ambient day color 0.75
+    When shared exterior weather 00000050 is resolved
+    Then the resolved exterior weather uses sunrise hours 5 to 9
+    And the resolved exterior weather ambient day color is 0.75
+    And the exterior cell package embeds zero weather profiles

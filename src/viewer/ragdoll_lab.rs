@@ -8,8 +8,6 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
-use avian3d::prelude as avian;
-use avian3d::schedule::PhysicsTime;
 use bevy::gltf::GltfAssetLabel;
 use bevy::prelude::*;
 use bevy::transform::TransformSystems;
@@ -40,28 +38,7 @@ use super::player::{
 const LAB_DROP_HEIGHT: f32 = 1.75;
 const LAB_FLOOR_HALF_EXTENTS: Vec3 = Vec3::new(6.0, 0.25, 6.0);
 const LAB_FLOOR_CENTER: Vec3 = Vec3::new(0.0, -0.25, 0.0);
-const LAB_WORLD_LAYER: u32 = 1 << 0;
-const LAB_RAGDOLL_LAYER: u32 = 1 << 1;
 const DIAGNOSTIC_TIMES: [f32; 3] = [0.25, 1.25, 3.5];
-
-fn lab_floor_collision_layers() -> avian::CollisionLayers {
-    avian::CollisionLayers::from_bits(LAB_WORLD_LAYER, LAB_RAGDOLL_LAYER)
-}
-
-fn lab_ragdoll_collision_layers() -> avian::CollisionLayers {
-    avian::CollisionLayers::from_bits(LAB_RAGDOLL_LAYER, LAB_WORLD_LAYER)
-}
-
-fn lab_contact_friction(coefficient: f32) -> avian::Friction {
-    avian::Friction::new(coefficient.max(0.6)).with_combine_rule(avian::CoefficientCombine::Max)
-}
-
-fn lab_sleep_threshold() -> avian::SleepThreshold {
-    avian::SleepThreshold {
-        linear: 0.2,
-        angular: 0.8,
-    }
-}
 
 pub fn ragdoll_lab(args: RagdollLabArgs) -> Result<()> {
     let cache_dir = args
@@ -121,21 +98,12 @@ pub fn ragdoll_lab(args: RagdollLabArgs) -> Result<()> {
                 ..default()
             }),
     );
-    match args.backend {
-        RagdollLabBackend::Avian => {
-            app.add_plugins(avian::PhysicsPlugins::default())
-                .insert_resource(avian::SubstepCount(8))
-                .insert_resource(avian::Gravity(Vec3::new(0.0, -9.81, 0.0)));
-        }
-        RagdollLabBackend::Boxddd => {
-            app.add_plugins(BoxdddPhysicsPlugin::new(BoxdddPhysicsSettings {
-                gravity: Vec3::new(0.0, -9.81, 0.0),
-                sub_step_count: 8,
-                error_policy: BoxdddErrorPolicy::MessageAndLog,
-                ..default()
-            }));
-        }
-    }
+    app.add_plugins(BoxdddPhysicsPlugin::new(BoxdddPhysicsSettings {
+        gravity: Vec3::new(0.0, -9.81, 0.0),
+        sub_step_count: 8,
+        error_policy: BoxdddErrorPolicy::MessageAndLog,
+        ..default()
+    }));
     if args.agent_bridge {
         app.add_plugins(RagdollLabAgentBridgePlugin {
             port: args.agent_port,
@@ -151,12 +119,9 @@ pub fn ragdoll_lab(args: RagdollLabArgs) -> Result<()> {
             Update,
             (
                 resolve_actor_nodes,
-                activate_avian_ragdoll,
                 activate_boxddd_ragdoll,
-                update_avian_poses,
                 update_boxddd_poses,
                 lab_controls,
-                reset_avian_ragdoll,
                 reset_boxddd_ragdoll,
                 draw_lab_reference,
                 update_lab_hud,
@@ -313,28 +278,15 @@ struct RagdollLabRuntime {
     node_rest_globals: HashMap<Entity, Affine3A>,
     bindings: Vec<LabNodeBinding>,
     body_bounds: HashMap<u32, Vec<LabBoundSample>>,
-    bodies: HashMap<u32, LabBodyHandle>,
-    joints: Vec<LabJointHandle>,
+    bodies: HashMap<u32, BodyId>,
+    joints: Vec<JointId>,
     joint_diagnostics: Vec<LabJointDiagnostic>,
-    physics_entities: Vec<Entity>,
     reset_requested: bool,
     reset_count: u32,
     drop_elapsed: f32,
     emitted_snapshots: usize,
     failure: Option<String>,
     boxddd_floor_ready: bool,
-}
-
-#[derive(Clone, Copy)]
-enum LabBodyHandle {
-    Avian(Entity),
-    Boxddd(BodyId),
-}
-
-#[derive(Clone, Copy)]
-enum LabJointHandle {
-    Avian(Entity),
-    Boxddd(JointId),
 }
 
 struct LabNodeBinding {
@@ -395,12 +347,6 @@ pub(crate) struct RagdollLabProbe {
 struct LabActorRoot;
 
 #[derive(Component)]
-struct LabPhysicsEntity;
-
-#[derive(Component)]
-struct LabRagdollEntity;
-
-#[derive(Component)]
 struct LabHud;
 
 fn spawn_laboratory(
@@ -422,17 +368,6 @@ fn spawn_laboratory(
         MeshMaterial3d(floor_material),
         Transform::from_translation(LAB_FLOOR_CENTER),
     ));
-    if definition.backend == RagdollLabBackend::Avian {
-        commands.spawn((
-            avian::RigidBody::Static,
-            avian::Collider::cuboid(12.0, 0.5, 12.0),
-            lab_floor_collision_layers(),
-            lab_contact_friction(1.0),
-            avian::Restitution::ZERO,
-            Transform::from_translation(LAB_FLOOR_CENTER),
-            LabPhysicsEntity,
-        ));
-    }
     commands.spawn((
         DirectionalLight {
             illuminance: 6_000.0,
@@ -587,271 +522,6 @@ fn prepared_dynamic_body(source: &PreparedPhysicsBody) -> Option<(PreparedPhysic
     Some((body, anchor))
 }
 
-fn activate_avian_ragdoll(
-    mut commands: Commands,
-    definition: Res<RagdollLabDefinition>,
-    mut runtime: ResMut<RagdollLabRuntime>,
-) {
-    if definition.backend != RagdollLabBackend::Avian || runtime.phase != LabPhase::Ready {
-        return;
-    }
-    let scale = definition.placement.scale.abs().max(0.0001);
-    let origin = Vec3::from_array(definition.placement.translation);
-    let prepared = usable_bodies(&definition.physics)
-        .map(|source| {
-            prepared_dynamic_body(source)
-                .filter(|(body, _)| {
-                    body.shapes
-                        .iter()
-                        .all(|shape| avian_shape(shape, scale).is_some())
-                })
-                .map(|body| (source.group_id, body))
-        })
-        .collect::<Option<Vec<_>>>();
-    let Some(prepared) = prepared else {
-        fail_runtime(
-            &mut runtime,
-            "at least one body has no Avian-compatible collider",
-        );
-        return;
-    };
-    let mut body_anchors = HashMap::new();
-    for (group_id, (body, anchor)) in prepared {
-        runtime
-            .body_bounds
-            .insert(group_id, body_bound_samples(&body, scale));
-        let entity = spawn_avian_body(&mut commands, &body, origin + anchor * scale, scale);
-        runtime.physics_entities.push(entity);
-        runtime
-            .bodies
-            .insert(group_id, LabBodyHandle::Avian(entity));
-        body_anchors.insert(group_id, anchor);
-        add_node_binding(&mut runtime, group_id, origin + anchor * scale);
-    }
-    if !all_joint_endpoints_resolved(&definition.physics, &runtime.bodies) {
-        fail_runtime(
-            &mut runtime,
-            "Avian joint endpoint resolution changed during activation",
-        );
-        return;
-    }
-    for joint in &definition.physics.joints {
-        let (LabBodyHandle::Avian(body_a), LabBodyHandle::Avian(body_b)) =
-            (runtime.bodies[&joint.body_a], runtime.bodies[&joint.body_b])
-        else {
-            unreachable!("backend-specific handles are checked above");
-        };
-        let anchor_a =
-            ragdoll_joint_local_anchor(joint.anchor_a, body_anchors[&joint.body_a], scale);
-        let anchor_b =
-            ragdoll_joint_local_anchor(joint.anchor_b, body_anchors[&joint.body_b], scale);
-        let frame_a = local_joint_frame(joint.frame_a_rotation_xyzw);
-        let frame_b = local_joint_frame(joint.frame_b_rotation_xyzw);
-        let joint_entity = match joint.kind.as_str() {
-            "spherical" => {
-                let mut value = avian::SphericalJoint::new(body_a, body_b)
-                    .with_local_anchor1(anchor_a)
-                    .with_local_anchor2(anchor_b)
-                    .with_local_basis1(frame_a)
-                    .with_local_basis2(frame_b)
-                    .with_twist_axis(avian_twist_axis());
-                if let Some(cone) = joint.cone_limit {
-                    let cone = cone.max(0.0);
-                    value = value.with_swing_limits(-cone, cone);
-                }
-                if let (Some(lower), Some(upper)) =
-                    (joint.twist_lower_limit, joint.twist_upper_limit)
-                {
-                    value = value.with_twist_limits(lower, upper.max(lower));
-                }
-                commands
-                    .spawn((
-                        value,
-                        avian::JointCollisionDisabled,
-                        LabPhysicsEntity,
-                        LabRagdollEntity,
-                    ))
-                    .id()
-            }
-            "prismatic" => {
-                let mut value = avian::PrismaticJoint::new(body_a, body_b)
-                    .with_local_anchor1(anchor_a)
-                    .with_local_anchor2(anchor_b)
-                    .with_local_basis1(frame_a)
-                    .with_local_basis2(frame_b)
-                    .with_slider_axis(Vec3::X);
-                let (enabled, lower, upper) =
-                    ordered_limits(joint.lower_limit, joint.upper_limit, scale);
-                if enabled {
-                    value = value.with_limits(lower, upper);
-                }
-                commands
-                    .spawn((
-                        value,
-                        avian::JointCollisionDisabled,
-                        LabPhysicsEntity,
-                        LabRagdollEntity,
-                    ))
-                    .id()
-            }
-            _ => {
-                let mut value = avian::RevoluteJoint::new(body_a, body_b)
-                    .with_local_anchor1(anchor_a)
-                    .with_local_anchor2(anchor_b)
-                    .with_local_basis1(frame_a)
-                    .with_local_basis2(frame_b)
-                    .with_hinge_axis(Vec3::Z);
-                if joint.lower_limit.is_some() || joint.upper_limit.is_some() {
-                    let lower = joint.lower_limit.unwrap_or(0.0);
-                    let upper = joint.upper_limit.unwrap_or(lower).max(lower);
-                    value = value.with_angle_limits(lower, upper);
-                }
-                commands
-                    .spawn((
-                        value,
-                        avian::JointCollisionDisabled,
-                        LabPhysicsEntity,
-                        LabRagdollEntity,
-                    ))
-                    .id()
-            }
-        };
-        runtime.physics_entities.push(joint_entity);
-        runtime.joints.push(LabJointHandle::Avian(joint_entity));
-        runtime.joint_diagnostics.push(LabJointDiagnostic {
-            body_a: joint.body_a,
-            body_b: joint.body_b,
-            local_anchor_a: anchor_a,
-            local_anchor_b: anchor_b,
-        });
-    }
-    finish_activation(&mut runtime);
-}
-
-fn spawn_avian_body(
-    commands: &mut Commands,
-    body: &PreparedPhysicsBody,
-    position: Vec3,
-    scale: f32,
-) -> Entity {
-    let mut body_commands = commands.spawn((
-        avian::RigidBody::Dynamic,
-        Transform::from_translation(position),
-        avian::LinearVelocity(Vec3::ZERO),
-        avian::AngularVelocity(Vec3::ZERO),
-        avian::GravityScale(body.gravity_factor),
-        avian::LinearDamping(body.linear_damping.max(0.0)),
-        avian::AngularDamping(body.angular_damping.max(0.0)),
-        avian::Mass(body.mass),
-        avian::CenterOfMass(Vec3::from_array(body.center_of_mass) * scale),
-        avian::NoAutoMass,
-        avian::NoAutoCenterOfMass,
-        lab_sleep_threshold(),
-        LabPhysicsEntity,
-        LabRagdollEntity,
-    ));
-    if body.max_linear_velocity > 0.0 {
-        body_commands.insert(avian::MaxLinearSpeed(body.max_linear_velocity * scale));
-    }
-    if body.max_angular_velocity > 0.0 {
-        body_commands.insert(avian::MaxAngularSpeed(body.max_angular_velocity));
-    }
-    if body.ccd_enabled {
-        body_commands.insert(avian::SweptCcd::default());
-    }
-    if !body.sleep_enabled {
-        body_commands.insert(avian::SleepingDisabled);
-    }
-    if let Some(inertia) = avian_inertia(body, scale) {
-        body_commands.insert((inertia, avian::NoAutoAngularInertia));
-    }
-    let entity = body_commands.id();
-    commands.entity(entity).with_children(|children| {
-        for shape in &body.shapes {
-            if let Some((collider, transform)) = avian_shape(shape, scale) {
-                children.spawn((
-                    collider,
-                    transform,
-                    lab_ragdoll_collision_layers(),
-                    lab_contact_friction(body.friction),
-                    avian::Restitution::new(body.restitution.max(0.0))
-                        .with_combine_rule(avian::CoefficientCombine::Max),
-                ));
-            }
-        }
-    });
-    entity
-}
-
-fn avian_inertia(body: &PreparedPhysicsBody, scale: f32) -> Option<avian::AngularInertia> {
-    if body
-        .inertia
-        .iter()
-        .flatten()
-        .any(|value| !value.is_finite())
-        || body.inertia[0][0] <= 0.0
-        || body.inertia[1][1] <= 0.0
-        || body.inertia[2][2] <= 0.0
-    {
-        return None;
-    }
-    let factor = scale * scale;
-    let matrix = Mat3::from_cols(
-        Vec3::from_array(body.inertia[0]) * factor,
-        Vec3::from_array(body.inertia[1]) * factor,
-        Vec3::from_array(body.inertia[2]) * factor,
-    );
-    avian::AngularInertia::try_from_mat3(matrix).ok()
-}
-
-fn avian_shape(shape: &PreparedPhysicsShape, scale: f32) -> Option<(avian::Collider, Transform)> {
-    match shape {
-        PreparedPhysicsShape::Box {
-            center,
-            half_extents,
-            rotation_xyzw,
-        } => {
-            let half = Vec3::from_array(*half_extents) * scale;
-            Some((
-                avian::Collider::cuboid(half.x * 2.0, half.y * 2.0, half.z * 2.0),
-                Transform {
-                    translation: Vec3::from_array(*center) * scale,
-                    rotation: Quat::from_array(*rotation_xyzw).normalize(),
-                    ..default()
-                },
-            ))
-        }
-        PreparedPhysicsShape::Sphere { center, radius } => Some((
-            avian::Collider::sphere(radius * scale),
-            Transform::from_translation(Vec3::from_array(*center) * scale),
-        )),
-        PreparedPhysicsShape::Capsule {
-            point1,
-            point2,
-            radius,
-        } => Some((
-            avian::Collider::capsule_endpoints(
-                radius * scale,
-                Vec3::from_array(*point1) * scale,
-                Vec3::from_array(*point2) * scale,
-            ),
-            Transform::IDENTITY,
-        )),
-        PreparedPhysicsShape::ConvexHull { points } => avian::Collider::convex_hull(
-            points
-                .iter()
-                .map(|point| Vec3::from_array(*point) * scale)
-                .collect(),
-        )
-        .map(|collider| (collider, Transform::IDENTITY)),
-        PreparedPhysicsShape::TriangleMesh { .. } => None,
-    }
-}
-
-fn avian_twist_axis() -> Vec3 {
-    Vec3::Z
-}
-
 fn local_joint_frame(rotation_xyzw: [f32; 4]) -> Quat {
     Quat::from_array(rotation_xyzw).normalize()
 }
@@ -919,7 +589,7 @@ fn activate_boxddd_ragdoll(
     mut runtime: ResMut<RagdollLabRuntime>,
     mut context: Option<NonSendMut<BoxdddPhysicsContext>>,
 ) {
-    if definition.backend != RagdollLabBackend::Boxddd || runtime.phase != LabPhase::Ready {
+    if runtime.phase != LabPhase::Ready {
         return;
     }
     let Some(context) = context.as_deref_mut() else {
@@ -995,9 +665,7 @@ fn activate_boxddd_ragdoll(
             return;
         }
         normalize_dynamic_mass(world, body_id, &body, scale);
-        runtime
-            .bodies
-            .insert(group_id, LabBodyHandle::Boxddd(body_id));
+        runtime.bodies.insert(group_id, body_id);
         body_anchors.insert(group_id, anchor);
         let position = Vec3::from_array(definition.placement.translation) + anchor * scale;
         add_node_binding(&mut runtime, group_id, position);
@@ -1010,11 +678,8 @@ fn activate_boxddd_ragdoll(
         return;
     }
     for joint in &definition.physics.joints {
-        let (LabBodyHandle::Boxddd(body_a), LabBodyHandle::Boxddd(body_b)) =
-            (runtime.bodies[&joint.body_a], runtime.bodies[&joint.body_b])
-        else {
-            unreachable!("backend-specific handles are checked above");
-        };
+        let body_a = runtime.bodies[&joint.body_a];
+        let body_b = runtime.bodies[&joint.body_b];
         let anchor_a =
             ragdoll_joint_local_anchor(joint.anchor_a, body_anchors[&joint.body_a], scale);
         let anchor_b =
@@ -1071,7 +736,7 @@ fn activate_boxddd_ragdoll(
             }
         };
         match created {
-            Ok(id) => runtime.joints.push(LabJointHandle::Boxddd(id)),
+            Ok(id) => runtime.joints.push(id),
             Err(error) => {
                 destroy_boxddd_ragdoll(world, &mut runtime);
                 fail_runtime(
@@ -1096,14 +761,10 @@ fn activate_boxddd_ragdoll(
 
 fn destroy_boxddd_ragdoll(world: &mut boxddd::World, runtime: &mut RagdollLabRuntime) {
     for joint in runtime.joints.drain(..) {
-        if let LabJointHandle::Boxddd(joint) = joint {
-            let _ = world.try_destroy_joint(joint, true);
-        }
+        let _ = world.try_destroy_joint(joint, true);
     }
     for body in runtime.bodies.values() {
-        if let LabBodyHandle::Boxddd(body) = body {
-            let _ = world.try_destroy_body(*body);
-        }
+        let _ = world.try_destroy_body(*body);
     }
     runtime.bodies.clear();
     runtime.bindings.clear();
@@ -1113,7 +774,7 @@ fn destroy_boxddd_ragdoll(world: &mut boxddd::World, runtime: &mut RagdollLabRun
 
 fn all_joint_endpoints_resolved(
     physics: &PreparedPhysicsAsset,
-    bodies: &HashMap<u32, LabBodyHandle>,
+    bodies: &HashMap<u32, BodyId>,
 ) -> bool {
     physics
         .joints
@@ -1159,52 +820,11 @@ fn from_box_quat(value: boxddd::Quat) -> Quat {
     Quat::from_xyzw(value.v.x, value.v.y, value.v.z, value.s).normalize()
 }
 
-fn update_avian_poses(
-    definition: Res<RagdollLabDefinition>,
-    runtime: Res<RagdollLabRuntime>,
-    mut cache: ResMut<LabPoseCache>,
-    bodies: Query<
-        (
-            &Transform,
-            &avian::LinearVelocity,
-            &avian::AngularVelocity,
-            Has<avian::Sleeping>,
-        ),
-        With<LabRagdollEntity>,
-    >,
-) {
-    if definition.backend != RagdollLabBackend::Avian {
-        return;
-    }
-    cache.0.clear();
-    for (group, handle) in &runtime.bodies {
-        let LabBodyHandle::Avian(entity) = handle else {
-            continue;
-        };
-        let Ok((transform, linear, angular, sleeping)) = bodies.get(*entity) else {
-            continue;
-        };
-        cache.0.insert(
-            *group,
-            BodySample {
-                affine: transform.compute_affine(),
-                linear_speed: linear.0.length(),
-                angular_speed: angular.0.length(),
-                sleeping,
-            },
-        );
-    }
-}
-
 fn update_boxddd_poses(
-    definition: Res<RagdollLabDefinition>,
     runtime: Res<RagdollLabRuntime>,
     mut cache: ResMut<LabPoseCache>,
     context: Option<NonSend<BoxdddPhysicsContext>>,
 ) {
-    if definition.backend != RagdollLabBackend::Boxddd {
-        return;
-    }
     cache.0.clear();
     let Some(context) = context.as_deref() else {
         return;
@@ -1212,10 +832,7 @@ fn update_boxddd_poses(
     let Some(world) = context.world() else {
         return;
     };
-    for (group, handle) in &runtime.bodies {
-        let LabBodyHandle::Boxddd(body) = handle else {
-            continue;
-        };
+    for (group, body) in &runtime.bodies {
         let Ok(transform) = world.try_body_transform(*body) else {
             continue;
         };
@@ -1241,7 +858,7 @@ fn sync_ragdoll_nodes(
     cache: Res<LabPoseCache>,
     globals: Query<(Entity, &GlobalTransform)>,
     parents: Query<(Entity, &ChildOf)>,
-    mut nodes: Query<(Entity, &mut Transform), Without<LabPhysicsEntity>>,
+    mut nodes: Query<(Entity, &mut Transform)>,
 ) {
     if !matches!(runtime.phase, LabPhase::Active | LabPhase::Paused) {
         return;
@@ -1297,7 +914,6 @@ fn update_lab_diagnostics(
     mut runtime: ResMut<RagdollLabRuntime>,
     mut probe: ResMut<RagdollLabProbe>,
     globals: Query<&GlobalTransform>,
-    ragdoll_entities: Query<Entity, With<LabRagdollEntity>>,
 ) {
     if runtime.phase == LabPhase::Active {
         runtime.drop_elapsed += time.delta_secs();
@@ -1355,15 +971,6 @@ fn update_lab_diagnostics(
                 .reduce(f32::max)
         })
         .fold(0.0, f32::max);
-    let tracked = runtime
-        .physics_entities
-        .iter()
-        .copied()
-        .collect::<HashSet<_>>();
-    let orphaned = ragdoll_entities
-        .iter()
-        .filter(|entity| !tracked.contains(entity))
-        .count();
     *probe = RagdollLabProbe {
         backend: definition.backend.to_string(),
         actor_form_id: format!("{:08x}", definition.actor_form_id),
@@ -1385,7 +992,7 @@ fn update_lab_diagnostics(
         floor_penetration,
         sleeping: !cache.0.is_empty() && awake_bodies == 0,
         elapsed_drop_time: runtime.drop_elapsed,
-        orphaned_entities_after_reset: orphaned,
+        orphaned_entities_after_reset: 0,
         reset_count: runtime.reset_count,
         error: runtime.failure.clone(),
     };
@@ -1413,9 +1020,7 @@ fn phase_name(phase: LabPhase) -> &'static str {
 
 fn lab_controls(
     keys: Res<ButtonInput<KeyCode>>,
-    definition: Res<RagdollLabDefinition>,
     mut runtime: ResMut<RagdollLabRuntime>,
-    mut physics_time: Option<ResMut<Time<avian::Physics>>>,
     mut context: Option<NonSendMut<BoxdddPhysicsContext>>,
     mut exit: MessageWriter<AppExit>,
 ) {
@@ -1431,20 +1036,10 @@ fn lab_controls(
     match runtime.phase {
         LabPhase::Active => {
             runtime.phase = LabPhase::Paused;
-            if definition.backend == RagdollLabBackend::Avian
-                && let Some(time) = physics_time.as_deref_mut()
-            {
-                time.pause();
-            }
             set_boxddd_awake(&runtime, context.as_deref_mut(), false);
         }
         LabPhase::Paused => {
             runtime.phase = LabPhase::Active;
-            if definition.backend == RagdollLabBackend::Avian
-                && let Some(time) = physics_time.as_deref_mut()
-            {
-                time.unpause();
-            }
             set_boxddd_awake(&runtime, context.as_deref_mut(), true);
         }
         _ => {}
@@ -1462,69 +1057,33 @@ fn set_boxddd_awake(
     let Some(world) = context.world_mut() else {
         return;
     };
-    for handle in runtime.bodies.values() {
-        if let LabBodyHandle::Boxddd(body) = handle {
-            let _ = world.try_set_body_awake(*body, awake);
-        }
-    }
-}
-
-fn reset_avian_ragdoll(
-    mut commands: Commands,
-    definition: Res<RagdollLabDefinition>,
-    mut runtime: ResMut<RagdollLabRuntime>,
-    mut nodes: Query<&mut Transform, Without<LabPhysicsEntity>>,
-    mut physics_time: Option<ResMut<Time<avian::Physics>>>,
-) {
-    if definition.backend != RagdollLabBackend::Avian || !runtime.reset_requested {
-        return;
-    }
-    for joint in runtime.joints.drain(..) {
-        if let LabJointHandle::Avian(entity) = joint {
-            commands.entity(entity).despawn();
-        }
-    }
     for body in runtime.bodies.values() {
-        if let LabBodyHandle::Avian(entity) = body {
-            commands.entity(*entity).despawn();
-        }
+        let _ = world.try_set_body_awake(*body, awake);
     }
-    if let Some(time) = physics_time.as_deref_mut() {
-        time.unpause();
-    }
-    restore_and_clear(&mut runtime, &mut nodes);
 }
 
 fn reset_boxddd_ragdoll(
-    definition: Res<RagdollLabDefinition>,
     mut runtime: ResMut<RagdollLabRuntime>,
-    mut nodes: Query<&mut Transform, Without<LabPhysicsEntity>>,
+    mut nodes: Query<&mut Transform>,
     mut context: Option<NonSendMut<BoxdddPhysicsContext>>,
 ) {
-    if definition.backend != RagdollLabBackend::Boxddd || !runtime.reset_requested {
+    if !runtime.reset_requested {
         return;
     }
     if let Some(context) = context.as_deref_mut()
         && let Some(world) = context.world_mut()
     {
         for joint in runtime.joints.drain(..) {
-            if let LabJointHandle::Boxddd(joint) = joint {
-                let _ = world.try_destroy_joint(joint, true);
-            }
+            let _ = world.try_destroy_joint(joint, true);
         }
         for body in runtime.bodies.values() {
-            if let LabBodyHandle::Boxddd(body) = body {
-                let _ = world.try_destroy_body(*body);
-            }
+            let _ = world.try_destroy_body(*body);
         }
     }
     restore_and_clear(&mut runtime, &mut nodes);
 }
 
-fn restore_and_clear(
-    runtime: &mut RagdollLabRuntime,
-    nodes: &mut Query<&mut Transform, Without<LabPhysicsEntity>>,
-) {
+fn restore_and_clear(runtime: &mut RagdollLabRuntime, nodes: &mut Query<&mut Transform>) {
     for (node, rest) in &runtime.node_rest_locals {
         if let Ok(mut transform) = nodes.get_mut(*node) {
             *transform = *rest;
@@ -1535,7 +1094,6 @@ fn restore_and_clear(
     runtime.bodies.clear();
     runtime.joints.clear();
     runtime.joint_diagnostics.clear();
-    runtime.physics_entities.clear();
     runtime.reset_requested = false;
     runtime.reset_count += 1;
     runtime.drop_elapsed = 0.0;

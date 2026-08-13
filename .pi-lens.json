@@ -1,0 +1,26 @@
+{
+  "format": {
+    "enabled": true
+  },
+  "autofix": {
+    "enabled": false
+  },
+  "actionableWarnings": {
+    "autoFix": {
+      "enabled": false
+    }
+  },
+  "ignore": [
+    ".bevyout/**",
+    "target/**",
+    ".claude/worktrees/**",
+    ".pi/worktrees/**",
+    "BevyCheatSheet/**",
+    "BevyDocs/**",
+    "bevy_markdown_docs/**",
+    "tools/bevyout-mcp/node_modules/**",
+    "third_party/**",
+    "vendor/**",
+    "NifConverter/**"
+  ]
+}

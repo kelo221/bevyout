@@ -96,6 +96,7 @@ mod ragdoll_lab;
 mod realtime_shadow_policy;
 mod scene;
 mod screen_fx;
+mod task_pools;
 
 pub use animation_zoo::animation_zoo;
 pub(crate) use app::{RunViewOptions, run_view};
@@ -228,7 +229,7 @@ pub fn render(args: RenderArgs) -> Result<()> {
                 }
                 cache_action = next_render_cache_action(&manifest, args.actor_animation_converter);
             } else {
-                eprintln!("{}", actor_animation_static_warning());
+                warn!("{}", actor_animation_static_warning());
                 // Refusal is an explicit opt-out for this launch, not a reason
                 // to ask the same question again after the bake decision.
                 cache_action = next_render_bake_action(&manifest);
@@ -249,9 +250,7 @@ pub fn render(args: RenderArgs) -> Result<()> {
     if args.actor_animation_converter == ActorAnimationConverter::Disabled
         && manifest_has_runtime_actor_placements(&manifest)
     {
-        eprintln!(
-            "warning: actor animation conversion intentionally disabled; actors may render statically"
-        );
+        warn!("actor animation conversion intentionally disabled; actors may render statically");
     }
 
     if cache_action == RenderCacheAction::Rebake {
@@ -287,9 +286,9 @@ pub fn render(args: RenderArgs) -> Result<()> {
     }
     if let Some(status) = dialogue_voice_status(&manifest, &args.selector) {
         match status {
-            DialogueVoiceRenderStatus::Ready(message) => eprintln!("{message}"),
+            DialogueVoiceRenderStatus::Ready(message) => info!("{message}"),
             DialogueVoiceRenderStatus::TextFallback(message) => {
-                eprintln!("warning: {message}")
+                warn!("{message}")
             }
         }
     }
@@ -385,7 +384,9 @@ fn confirm(prompt: &str) -> Result<bool> {
         match answer.trim().to_ascii_lowercase().as_str() {
             "" | "y" | "yes" => return Ok(true),
             "n" | "no" => return Ok(false),
-            _ => eprintln!("Please answer yes or no."),
+            _ => {
+                let _ = io::stderr().write_all(b"Please answer yes or no.\n");
+            }
         }
     }
 }
@@ -690,7 +691,9 @@ fn prepare_args_for_render(
         selectors: vec![args.selector.clone()],
         all: false,
         all_interiors: false,
+        all_exteriors: false,
         worldspace: None,
+        exterior_radius: None,
         list_only: false,
         check_fingerprints: false,
         game_root: args.game_root.clone(),
