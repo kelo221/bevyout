@@ -37,7 +37,9 @@ use super::super::player::{
 use crate::app_state::AppState;
 use crate::viewer::day_night::GameClock;
 
-pub(crate) use actors::{actor_residency_json, saved_package_checkpoint};
+pub(crate) use actors::{
+    actor_residency_json, clear_saved_package_checkpoint, saved_package_checkpoint,
+};
 pub(crate) use diagnostics::{cells as exterior_cells_json, status as exterior_status_json};
 pub(crate) use lifecycle::ExteriorStreamState;
 
@@ -233,6 +235,10 @@ impl Plugin for ExteriorWorldPlugin {
                     // root still exists; projection of newly resident cells
                     // reuses the same pass one frame after collision attach.
                     actors::sync_exterior_actor_residency,
+                    // Non-blocking completion side of `ensure_cell_catalogs`
+                    // (issue #305 review): applies a background actor/
+                    // animation catalog read the same frame it resolves.
+                    actors::poll_cell_catalog_tasks,
                     // Release evicted roots and collision ownership before a
                     // newly completed package is allowed to spawn this frame.
                     finalize_evictions,

@@ -165,6 +165,11 @@ fn resume_saved_package_checkpoint(world: &mut World, entity: Entity, reference_
         "autonomous package driver: resumed {reference_form_id:08x} package {:08x} step {}",
         checkpoint.package_form_id, checkpoint.procedure_index
     );
+    // Issue #305 review: the checkpoint is a one-shot resume. Leaving it in
+    // `ActiveSaveState` would rewind the actor a second time if the same
+    // package starts again later in this session without an intervening
+    // exterior unload (the only writer of this field).
+    crate::viewer::world::exterior::clear_saved_package_checkpoint(world, reference_form_id);
 }
 
 fn game_instant(world: &World) -> GameInstant {

@@ -262,6 +262,55 @@ fn autonomous_selection_uses_the_live_game_clock() {
     assert_eq!(game_instant(&world).hour, 19.5);
 }
 
+/// Issue #305 review: a resumed checkpoint is a one-shot correction, not a
+/// standing rewind. Once `resume_saved_package_checkpoint` applies it, the
+/// saved `ActorInstanceState::package` field must be cleared so a later
+/// start of the same package in the same session (no intervening exterior
+/// unload -- the only writer of that field) is not rewound a second time.
+#[test]
+fn a_resumed_checkpoint_is_cleared_from_saved_state_after_applying() {
+    let mut fixture = build_fixture("resume-once", 0x1007, 5 /* Wander */);
+    let actor = spawn_actor(&mut fixture.world, 0x1007, ActorLifeState::Alive);
+
+    let mut save_state = crate::save::PersistentWorldState::default();
+    save_state.cells.entry(0xBEEF).or_default().actors.insert(
+        0x1007,
+        bevyout_core::actor_state::ActorInstanceState {
+            package: Some(bevyout_core::actor_state::ActorPackageCheckpoint {
+                package_form_id: 0x50,
+                procedure_index: 2,
+                elapsed_seconds: 4.5,
+            }),
+            ..Default::default()
+        },
+    );
+    fixture
+        .world
+        .insert_resource(crate::viewer::world::ActiveSaveState(save_state));
+
+    fixture
+        .world
+        .run_system_once(queue_autonomous_start_candidates)
+        .unwrap();
+    drive_pending_autonomous_starts(&mut fixture.world);
+
+    let controller = fixture
+        .world
+        .get::<ActorPackageController>(actor)
+        .expect("the actor must have a running package controller");
+    assert_eq!(
+        controller.lifecycle.step(),
+        Some(2),
+        "the checkpoint's step must be resumed"
+    );
+
+    assert_eq!(
+        crate::viewer::world::exterior::saved_package_checkpoint(&fixture.world, 0x1007),
+        None,
+        "the applied checkpoint must be cleared from saved state, not reapplied on a later start"
+    );
+}
+
 #[test]
 fn a_failed_package_start_rolls_back_the_autonomous_bind() {
     let mut fixture = build_fixture("rollback", 0x1006, 16 /* unsupported */);

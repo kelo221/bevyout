@@ -22,6 +22,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use bevy::prelude::*;
+use bevy::tasks::futures::check_ready;
+use bevy::tasks::{AsyncComputeTaskPool, Task, TaskPool};
 use bevyout_core::actor_state::ActorInstanceState;
 use bevyout_core::manifest::exterior::{
     ExteriorCellLifecycle, ExteriorCoordinatePolicy, GridCoordinate, PreparedExteriorActor,
@@ -64,6 +66,10 @@ pub(crate) struct ExteriorActorResidency {
     inserted_catalogs: BTreeSet<u32>,
     /// Cells whose catalog could not be read, so the warning is logged once.
     failed_catalogs: BTreeSet<u32>,
+    /// Cells with an in-flight background catalog read (issue #305 review):
+    /// guards [`ensure_cell_catalogs`] against spawning a second task for the
+    /// same cell while the first is still resolving.
+    pending_catalog_tasks: BTreeSet<u32>,
     pub(crate) binds: u64,
     pub(crate) restores: u64,
     pub(crate) handoffs: u64,
@@ -323,15 +329,19 @@ fn apply_request(
     let Ok(identity) =
         resolve_actor_identity(reference_form_id, reference_form_id, saved_reference)
     else {
-        warn!("exterior actor reject {reference_form_id:08x} InvalidIdentity");
-        note_rejection(world, reference_form_id, "InvalidIdentity");
+        if note_rejection(world, reference_form_id, "InvalidIdentity") {
+            warn!("exterior actor reject {reference_form_id:08x} InvalidIdentity");
+        }
         return;
     };
 
     let policy_request = match request {
         PlannedRequest::Duplicate { owners, .. } => {
-            warn!("exterior actor reject {reference_form_id:08x} DuplicateOwner owners={owners}");
-            note_rejection(world, reference_form_id, "DuplicateOwner");
+            if note_rejection(world, reference_form_id, "DuplicateOwner") {
+                warn!(
+                    "exterior actor reject {reference_form_id:08x} DuplicateOwner owners={owners}"
+                );
+            }
             return;
         }
         PlannedRequest::Bind { destination, .. } => {
@@ -357,16 +367,18 @@ fn apply_request(
         }
     };
     let Some(policy_request) = policy_request else {
-        warn!("exterior actor reject {reference_form_id:08x} InvalidOwner");
-        note_rejection(world, reference_form_id, "InvalidOwner");
+        if note_rejection(world, reference_form_id, "InvalidOwner") {
+            warn!("exterior actor reject {reference_form_id:08x} InvalidOwner");
+        }
         return;
     };
 
     match decide_actor_residency(identity, &owners, policy_request) {
         ActorResidencyDecision::Reject(rejection) => {
             let code = rejection_code(rejection);
-            warn!("exterior actor reject {reference_form_id:08x} {code}");
-            note_rejection(world, reference_form_id, code);
+            if note_rejection(world, reference_form_id, code) {
+                warn!("exterior actor reject {reference_form_id:08x} {code}");
+            }
         }
         ActorResidencyDecision::Apply(plan) => {
             apply_transition(world, identity, plan.transition(), snapshots, entity);
@@ -506,10 +518,22 @@ fn prepared_actor_for(
         .cloned()
 }
 
-fn note_rejection(world: &mut World, reference_form_id: u32, code: &'static str) {
+/// Records a rejection and reports whether it is a genuine *transition* --
+/// the first rejection for this reference, or a different code than last
+/// time. A live actor stuck on a persistent rejection (e.g. `StaleSource`
+/// every frame until its cell catches up) produces a `PlannedRequest::Retain`
+/// every frame, so without this check `rejections` would count frames, not
+/// events, and the log would flood for as long as the mismatch persists
+/// (issue #305 review). Only a real transition -- including the transition
+/// *into* a persistent rejection -- bumps the counter and returns `true`.
+fn note_rejection(world: &mut World, reference_form_id: u32, code: &'static str) -> bool {
     let mut residency = world.resource_mut::<ExteriorActorResidency>();
-    residency.rejections = residency.rejections.saturating_add(1);
-    residency.last_rejection.insert(reference_form_id, code);
+    let changed = residency.last_rejection.get(&reference_form_id) != Some(&code);
+    if changed {
+        residency.rejections = residency.rejections.saturating_add(1);
+        residency.last_rejection.insert(reference_form_id, code);
+    }
+    changed
 }
 
 fn saved_reference_form_id(world: &World, reference_form_id: u32) -> Option<u32> {
@@ -670,15 +694,28 @@ fn exterior_actor_placement(prepared: &PreparedExteriorActor) -> PreparedPlaceme
     }
 }
 
-/// Reads a streamed cell's prepared actor/animation catalogs once and hands
-/// them to the existing multi-cell registries. Both are keyed by cell FormID
-/// already; this module only decides *when* an exterior cell's catalogs enter
-/// and leave them.
+/// Background task carrying one streamed cell's prepared actor/animation
+/// catalog read (issue #305 review): `read_cell_catalogs` does a blocking
+/// file read plus a full `PreparedSceneManifest` RON parse, which must not
+/// stall the frame it first runs on. Mirrors the `ExteriorPackageTask`
+/// pattern in `loading.rs`.
+#[derive(Component)]
+pub(crate) struct ExteriorCatalogTask {
+    cell_form_id: u32,
+    task: Task<anyhow::Result<CellCatalogs>>,
+}
+
+/// Requests a streamed cell's prepared actor/animation catalogs, once, and
+/// hands them to the existing multi-cell registries when the background read
+/// resolves. Both are keyed by cell FormID already; this module only decides
+/// *when* an exterior cell's catalogs enter and leave them. Non-blocking: see
+/// [`poll_cell_catalog_tasks`] for the completion side.
 fn ensure_cell_catalogs(world: &mut World, cell_form_id: u32) {
     {
         let residency = world.resource::<ExteriorActorResidency>();
         if residency.inserted_catalogs.contains(&cell_form_id)
             || residency.failed_catalogs.contains(&cell_form_id)
+            || residency.pending_catalog_tasks.contains(&cell_form_id)
         {
             return;
         }
@@ -686,29 +723,51 @@ fn ensure_cell_catalogs(world: &mut World, cell_form_id: u32) {
     let Some(asset_root) = world.resource::<ExteriorStreamState>().asset_root.clone() else {
         return;
     };
-    match read_cell_catalogs(&asset_root, cell_form_id) {
-        Ok((definitions, animations)) => {
-            if let Some(catalog) = definitions {
-                world
-                    .resource_mut::<ActorDefinitionCatalogs>()
-                    .insert(cell_form_id, catalog);
+    let pool = AsyncComputeTaskPool::get_or_init(TaskPool::default);
+    let task = pool.spawn(async move { read_cell_catalogs(&asset_root, cell_form_id) });
+    world.spawn(ExteriorCatalogTask { cell_form_id, task });
+    world
+        .resource_mut::<ExteriorActorResidency>()
+        .pending_catalog_tasks
+        .insert(cell_form_id);
+}
+
+/// Polls in-flight [`ExteriorCatalogTask`]s and applies a resolved read to
+/// the same registries [`ensure_cell_catalogs`] used to update synchronously.
+/// Registered alongside [`sync_exterior_actor_residency`] so a completed read
+/// is applied the same frame it resolves.
+pub(crate) fn poll_cell_catalog_tasks(
+    mut commands: Commands,
+    mut tasks: Query<(Entity, &mut ExteriorCatalogTask)>,
+    mut residency: ResMut<ExteriorActorResidency>,
+    mut definitions: ResMut<ActorDefinitionCatalogs>,
+    mut animations: ResMut<crate::viewer::actor_animation::ActorAnimationCatalogs>,
+) {
+    for (entity, mut pending) in &mut tasks {
+        let Some(result) = check_ready(&mut pending.task) else {
+            continue;
+        };
+        commands.entity(entity).despawn();
+        residency
+            .pending_catalog_tasks
+            .remove(&pending.cell_form_id);
+        match result {
+            Ok((defs, anims)) => {
+                if let Some(catalog) = defs {
+                    definitions.insert(pending.cell_form_id, catalog);
+                }
+                if let Some(catalog) = anims {
+                    animations.insert(pending.cell_form_id, catalog);
+                }
+                residency.inserted_catalogs.insert(pending.cell_form_id);
             }
-            if let Some(catalog) = animations {
-                world
-                    .resource_mut::<crate::viewer::actor_animation::ActorAnimationCatalogs>()
-                    .insert(cell_form_id, catalog);
+            Err(error) => {
+                warn!(
+                    "exterior actor catalog unavailable for cell {:08x}: {error:#}",
+                    pending.cell_form_id
+                );
+                residency.failed_catalogs.insert(pending.cell_form_id);
             }
-            world
-                .resource_mut::<ExteriorActorResidency>()
-                .inserted_catalogs
-                .insert(cell_form_id);
-        }
-        Err(error) => {
-            warn!("exterior actor catalog unavailable for cell {cell_form_id:08x}: {error:#}");
-            world
-                .resource_mut::<ExteriorActorResidency>()
-                .failed_catalogs
-                .insert(cell_form_id);
         }
     }
 }
@@ -833,6 +892,25 @@ pub(crate) fn saved_package_checkpoint(
         .values()
         .find_map(|cell| cell.actors.get(&reference_form_id))
         .and_then(|state: &ActorInstanceState| state.package)
+}
+
+/// Clears a reference's saved package checkpoint once the autonomous driver
+/// has applied it (issue #305 review): [`capture_package_checkpoint`] is the
+/// only writer, so a resumed checkpoint that is never cleared is found again
+/// by [`saved_package_checkpoint`] on every later start of the same package
+/// in the same session, rewinding it a second time.
+pub(crate) fn clear_saved_package_checkpoint(world: &mut World, reference_form_id: u32) {
+    let Some(mut save) = world.get_resource_mut::<ActiveSaveState>() else {
+        return;
+    };
+    if let Some(state) = save
+        .0
+        .cells
+        .values_mut()
+        .find_map(|cell| cell.actors.get_mut(&reference_form_id))
+    {
+        state.package = None;
+    }
 }
 
 #[cfg(test)]

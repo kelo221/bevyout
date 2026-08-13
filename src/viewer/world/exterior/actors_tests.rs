@@ -19,7 +19,10 @@ use bevyout_core::manifest::exterior::{
 
 use super::super::lifecycle::{ExteriorStreamState, RuntimeCell};
 use super::super::{ExteriorCellRoot, finalize_evictions};
-use super::{ExteriorActorResidency, ExteriorResidentActor, sync_exterior_actor_residency};
+use super::{
+    ExteriorActorResidency, ExteriorResidentActor, ensure_cell_catalogs, poll_cell_catalog_tasks,
+    sync_exterior_actor_residency,
+};
 use crate::viewer::LoadedSceneManifest;
 use crate::viewer::actor_state::ActorDefinitionCatalogs;
 use crate::viewer::interaction::PlacementRoot;
@@ -547,6 +550,19 @@ fn stale_generation_unload_is_rejected_and_counted_without_tearing_down_the_live
         Some("StaleSource")
     );
     assert!(test.world.get::<ExteriorResidentActor>(entity).is_some());
+
+    // Issue #305 review: the mismatch persists (nothing changed the cell's
+    // generation back), so every subsequent frame replans the same
+    // `PlannedRequest::Retain` -> `StaleSource` rejection. `rejections` is an
+    // event counter, not a frame counter -- it must not keep climbing for as
+    // long as the same rejection persists.
+    test.sync();
+    test.sync();
+    assert_eq!(
+        test.world.resource::<ExteriorActorResidency>().rejections,
+        1,
+        "repeated frames of the same rejection must not keep incrementing the counter"
+    );
 }
 
 #[test]
@@ -693,4 +709,85 @@ fn restore_recovers_a_nav_bind_the_spawn_chain_left_unbound() {
         nav_api::is_bound(&test.world, restored_entity),
         "a nav bind established before an eviction must be recovered after restore"
     );
+}
+
+/// Issue #305 review (defect 3): `ensure_cell_catalogs` used to do a blocking
+/// file read + RON parse inline. It must now only *request* a background
+/// read; the catalog registries are only updated once `poll_cell_catalog_
+/// tasks` observes the task complete -- never synchronously in the same call
+/// that requested it, even when the read is fast enough to finish before the
+/// first poll.
+#[test]
+fn ensure_cell_catalogs_loads_in_the_background_without_blocking_the_requesting_call() {
+    use bevy::ecs::system::RunSystemOnce;
+
+    let mut test = TestWorld::new();
+    let cell_form_id = CELL_A;
+    let temp_root = std::env::temp_dir().join(format!(
+        "bevyout-exterior-catalog-{}-{cell_form_id:08x}",
+        std::process::id()
+    ));
+    let scene_dir = temp_root.join("scenes").join(format!("{cell_form_id:08x}"));
+    std::fs::create_dir_all(&scene_dir).expect("create synthetic scene dir");
+    // No `actor_catalog_path`/`actor_animation_catalog_path` set, so
+    // `read_cell_catalogs` resolves to an empty catalog pair without needing
+    // any further fixture files -- only the manifest itself is exercised.
+    let manifest_ron = ron::ser::to_string_pretty(
+        &minimal_manifest(cell_form_id),
+        ron::ser::PrettyConfig::default(),
+    )
+    .expect("serialize synthetic scene manifest");
+    std::fs::write(scene_dir.join("scene.ron"), &manifest_ron)
+        .expect("write synthetic scene manifest fixture");
+
+    test.world.resource_mut::<ExteriorStreamState>().asset_root = Some(temp_root.clone());
+
+    ensure_cell_catalogs(&mut test.world, cell_form_id);
+
+    assert!(
+        test.world
+            .resource::<ExteriorActorResidency>()
+            .pending_catalog_tasks
+            .contains(&cell_form_id),
+        "the read must be requested as a background task, not run inline"
+    );
+    assert!(
+        !test
+            .world
+            .resource::<ExteriorActorResidency>()
+            .inserted_catalogs
+            .contains(&cell_form_id),
+        "nothing may be applied before the background task is polled ready"
+    );
+
+    // First poll: give the task pool no time to run -- this tick is allowed
+    // to observe the task still pending.
+    test.world
+        .run_system_once(poll_cell_catalog_tasks)
+        .expect("poll system runs");
+
+    // Now give the background thread real time to finish, and poll again.
+    // Success is asserted only after this second, post-completion poll.
+    std::thread::sleep(std::time::Duration::from_millis(50));
+    test.world
+        .run_system_once(poll_cell_catalog_tasks)
+        .expect("poll system runs");
+
+    assert!(
+        test.world
+            .resource::<ExteriorActorResidency>()
+            .inserted_catalogs
+            .contains(&cell_form_id),
+        "the catalog read must be applied once the background task resolves"
+    );
+    assert!(
+        !test
+            .world
+            .resource::<ExteriorActorResidency>()
+            .pending_catalog_tasks
+            .contains(&cell_form_id),
+        "a resolved task must no longer be tracked as pending"
+    );
+
+    let _ = std::fs::remove_dir_all(&temp_root);
 }
