@@ -641,7 +641,7 @@ pub(crate) struct ParsedPlugin {
     pub(crate) diagnostics: Vec<String>,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default)]
 pub(crate) struct ParsedContentSet {
     state: ParsedState,
 }
@@ -916,6 +916,17 @@ impl ParsedContentSet {
             diagnostics,
         })
     }
+
+    /// Selects a cell from a content set that is shared by a batch session.
+    ///
+    /// The legacy selector consumes the parsed state because that was the
+    /// cheapest ownership shape for one-cell preparation. Batch workers need
+    /// independent, mutable `ParsedPlugin` values, so clone the immutable
+    /// parsed state once it has been built instead of reparsing every plugin
+    /// for every selected cell.
+    pub(crate) fn select_shared(&self, selector: &CellSelector) -> Result<ParsedPlugin> {
+        self.clone().select(selector)
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -924,7 +935,7 @@ pub(crate) struct PluginSource<'a> {
     pub(crate) bytes: &'a [u8],
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default)]
 pub(crate) struct ParsedState {
     bases: HashMap<u32, BaseRecord>,
     recipes: HashMap<u32, RecipeRecord>,

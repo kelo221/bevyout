@@ -31,11 +31,30 @@
 
 use super::*;
 use crate::vsa::audio_assets::load_dialogue_voice_archives;
-use bevyout_core::manifest::exterior::ExteriorWorldspaceLodAsset;
+use crate::vsa::openmw_esm4::parse_content_set_all;
+use bevyout_core::manifest::exterior::{ExteriorWorldspaceIndex, ExteriorWorldspaceLodAsset};
+use std::collections::HashSet;
+use std::sync::Arc;
+
+#[derive(Debug, Clone)]
+pub(crate) struct PersistentAssetUpdate {
+    pub(crate) asset_path: Option<String>,
+    pub(crate) error: Option<String>,
+}
 
 pub(crate) struct BatchSession {
     pub(crate) loaded_plugins: Vec<LoadedPlugin>,
     pub(crate) fingerprint: String,
+    /// Parsed content shared by every cell worker. `ParsedPlugin` remains
+    /// worker-owned because preparation resolves enable/teleport state and
+    /// consumes cell-local collections, but the expensive binary walk only
+    /// happens once per batch.
+    pub(crate) parsed_content: Arc<ParsedContentSet>,
+    /// The complete source-derived exterior index set. Workers use the
+    /// current worldspace entry for LOD discovery; final publication writes
+    /// the indexes once after all cell workers finish.
+    pub(crate) exterior_indexes: Arc<Vec<ExteriorWorldspaceIndex>>,
+    pub(crate) persistent_reference_ids: HashSet<u32>,
     /// esplugin validation diagnostics for the selected plugin, computed
     /// once. Same content `prepare_one` produced before this issue;
     /// `prepare_cell` extends it into each cell's diagnostics at the same
@@ -62,10 +81,9 @@ pub(crate) struct BatchSession {
     /// `staging_dir`, so this lock keeps concurrent cell workers from
     /// observing or overwriting another cell's intermediate files.
     pub(crate) asset_stage_lock: Mutex<()>,
-    /// Worldspace indexes are rewritten by every exterior cell worker. Keep
-    /// the read/merge/write transaction atomic so prepared persistent paths
-    /// accumulate deterministically across a batch.
-    pub(crate) index_write_lock: Mutex<()>,
+    /// Prepared asset paths for persistent references are collected by cell
+    /// workers and applied to the worldspace indexes in one final write pass.
+    pub(crate) persistent_assets: Mutex<HashMap<u32, PersistentAssetUpdate>>,
     /// Prepared worldspace LOD assets are shared by every cell worker in a
     /// batch. The first exterior cell for a worldspace stages/converts them;
     /// later cells reuse the descriptor without repeating archive work.
@@ -130,9 +148,33 @@ impl BatchSession {
             &cache_dir.join("audio"),
         )?;
 
+        let plugin_sources = loaded_plugins
+            .iter()
+            .map(|plugin| PluginSource {
+                name: &plugin.name,
+                bytes: &plugin.bytes,
+            })
+            .collect::<Vec<_>>();
+        let parsed_content = Arc::new(
+            parse_content_set_all(&plugin_sources)
+                .context("failed to parse Fallout content set for batch session")?,
+        );
+        let exterior_indexes = Arc::new(crate::vsa::build_worldspace_indexes(
+            &parsed_content,
+            &fingerprint,
+        ));
+        let persistent_reference_ids = exterior_indexes
+            .iter()
+            .flat_map(|index| index.persistent_references.iter())
+            .map(|reference| reference.reference_form_id)
+            .collect();
+
         Ok(Self {
             loaded_plugins,
             fingerprint,
+            parsed_content,
+            exterior_indexes,
+            persistent_reference_ids,
             plugin_diagnostics,
             archives,
             archive_diagnostics,
@@ -146,7 +188,7 @@ impl BatchSession {
             physics_cache: Mutex::new(KeyedBatchCache::default()),
             asset_totals: Mutex::new(BatchAssetTotals::default()),
             asset_stage_lock: Mutex::new(()),
-            index_write_lock: Mutex::new(()),
+            persistent_assets: Mutex::new(HashMap::new()),
             worldspace_lod_cache: Mutex::new(HashMap::new()),
         })
     }
@@ -163,6 +205,28 @@ impl BatchSession {
                 bytes: &plugin.bytes,
             })
             .collect()
+    }
+
+    pub(crate) fn record_persistent_assets(&self, placements: &[PreparedPlacement]) {
+        let mut updates = self.persistent_assets.lock().unwrap();
+        for placement in placements {
+            if !self
+                .persistent_reference_ids
+                .contains(&placement.reference_form_id)
+            {
+                continue;
+            }
+            updates.insert(
+                placement.reference_form_id,
+                PersistentAssetUpdate {
+                    asset_path: placement
+                        .asset_path
+                        .clone()
+                        .filter(|path| path.to_ascii_lowercase().ends_with(".glb")),
+                    error: placement.error.clone(),
+                },
+            );
+        }
     }
 }
 
