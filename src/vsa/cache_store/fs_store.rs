@@ -6,8 +6,9 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::model::{
-    CandidateObject, CandidatePayload, PreparedObjectKind, PreparedObjectRef, PreparedObjectStore,
-    PreparedRecipeInputs, PreparedRecipeRecord, Verification,
+    CandidateObject, CandidatePayload, PREPARED_RECIPE_RECORD_REVISION, PreparedObjectKind,
+    PreparedObjectRef, PreparedObjectStore, PreparedRecipeInputs, PreparedRecipeRecord,
+    Verification,
 };
 use super::policy::is_canonical_sha256;
 
@@ -197,10 +198,20 @@ impl PreparedObjectStore for FsPreparedObjectStore {
             if !path.is_file() {
                 continue;
             }
-            let text = fs::read_to_string(&path)
-                .with_context(|| format!("reading recipe record {}", path.display()))?;
-            let record: PreparedRecipeRecord = ron::from_str(&text)
-                .with_context(|| format!("decoding recipe record {}", path.display()))?;
+            let text = match fs::read_to_string(&path) {
+                Ok(text) => text,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(error) => {
+                    return Err(error)
+                        .with_context(|| format!("reading recipe record {}", path.display()));
+                }
+            };
+            let Ok(record) = ron::from_str::<PreparedRecipeRecord>(&text) else {
+                continue;
+            };
+            if record.revision != PREPARED_RECIPE_RECORD_REVISION {
+                continue;
+            }
             if record.recipe.try_id()? != recipe_id {
                 bail!("recipe record identity does not match its path")
             }
@@ -236,6 +247,7 @@ impl PreparedObjectStore for FsPreparedObjectStore {
             self.publish_recipe(
                 &recipe_id,
                 &PreparedRecipeRecord {
+                    revision: PREPARED_RECIPE_RECORD_REVISION.into(),
                     recipe: recipe.clone(),
                     output: object.clone(),
                 },

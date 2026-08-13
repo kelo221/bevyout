@@ -37,7 +37,8 @@ await probe("Pi full launcher", ["bun", "run", "tools/harness/launcher_smoke.ts"
 await probe("Pi lean launcher", ["bun", "run", "tools/harness/launcher_smoke.ts", "--lean"]);
 await probe("Pi workflow doctor", ["bun", "run", "tools/harness/launcher_smoke.ts", "--workflow-doctor"]);
 
-const hooks = (await $`git config --local --get core.hooksPath`.text()).trim();
+const hooksResult = await $`git config --local --get core.hooksPath`.quiet().nothrow();
+const hooks = new TextDecoder().decode(hooksResult.stdout).trim();
 if (hooks === ".githooks") console.log("PASS git hooks .githooks");
 else failures.push(`git hooks: expected .githooks, got '${hooks}'`);
 if (Bun.which("sccache")) console.log("PASS conditional sccache launcher support");

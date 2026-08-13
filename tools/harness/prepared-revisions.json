@@ -1,6 +1,13 @@
 {
   "schemas": [
     {
+      "path": "src/vsa/cache_store/model.rs",
+      "type_pattern": "^Prepared(?:RecipeRecord|ObjectRef)$",
+      "revisions": [
+        { "path": "src/vsa/cache_store/model.rs", "constant": "PREPARED_RECIPE_RECORD_REVISION" }
+      ]
+    },
+    {
       "path": "crates/bevyout-core/src/actor_animation.rs",
       "type_pattern": "^Prepared",
       "revisions": [

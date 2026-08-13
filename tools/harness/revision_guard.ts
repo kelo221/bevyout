@@ -67,9 +67,9 @@ function evaluate(before: Snapshot, after: Snapshot, changed: Set<string>, mappi
 				seen.add(key);
 				const oldValue = constantValue(before[revision.path] ?? "", revision.constant);
 				const newValue = constantValue(after[revision.path] ?? "", revision.constant);
-				if (oldValue === undefined || newValue === undefined) {
+				if (newValue === undefined || (oldTypes.has(typeName) && oldValue === undefined)) {
 					findings.push(`${path}: ${typeName} maps to missing ${revision.path}:${revision.constant}`);
-				} else if (oldValue === newValue) {
+				} else if (oldTypes.has(typeName) && oldValue === newValue) {
 					findings.push(`${path}: ${typeName} changed without bumping ${revision.path}:${revision.constant} (${newValue})`);
 				}
 			}
@@ -97,6 +97,16 @@ function selfTest(): void {
 	const multi = { ...fieldOnly, "schema.rs": "pub struct PreparedA { pub x: u64 }\npub struct PreparedB { pub y: u64 }", "rev.rs": revisionOnly["rev.rs"] };
 	const findings = evaluate(base, multi, new Set(["schema.rs", "rev.rs"]), mapping);
 	if (findings.length !== 1 || !findings[0].includes("B_REVISION")) throw new Error("multi-schema fixture failed");
+	const addedMapping: Mapping = { schemas: [
+		{ path: "schema.rs", type_pattern: "^PreparedC$", revisions: [{ path: "rev.rs", constant: "C_REVISION" }] },
+	] };
+	const withAddedType = {
+		"schema.rs": `${base["schema.rs"]}\npub struct PreparedC { pub z: u32 }`,
+		"rev.rs": `${base["rev.rs"]} const C_REVISION: &str = "c1";`,
+	};
+	if (evaluate(base, withAddedType, new Set(["schema.rs", "rev.rs"]), addedMapping).length !== 0) {
+		throw new Error("new type with new revision fixture failed");
+	}
 	console.log("revision guard self-test passed");
 }
 

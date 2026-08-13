@@ -4,6 +4,10 @@ use std::{fs::File, path::PathBuf};
 
 use super::policy::recipe_identity;
 
+/// Bump whenever [`PreparedRecipeRecord`] or [`PreparedObjectRef`] changes
+/// serialized shape, including fields with serde defaults.
+pub(crate) const PREPARED_RECIPE_RECORD_REVISION: &str = "prepared-recipe-record-v1";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub(crate) enum PreparedObjectKind {
@@ -75,6 +79,7 @@ impl PreparedRecipeInputs {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct PreparedRecipeRecord {
+    pub(crate) revision: String,
     pub(crate) recipe: PreparedRecipeInputs,
     pub(crate) output: PreparedObjectRef,
 }

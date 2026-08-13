@@ -1,3 +1,4 @@
+use super::model::PREPARED_RECIPE_RECORD_REVISION;
 use super::{
     CandidateObject, FsPreparedObjectStore, PreparedObjectKind, PreparedObjectStore,
     PreparedRecipeInputs, normalize_source_path,
@@ -25,6 +26,27 @@ fn recipe(label: &str) -> PreparedRecipeInputs {
         format_policy_revision: "format-v1".into(),
         canonical_settings: vec![1, 2, 3],
     }
+}
+
+fn only_recipe_record(cache: &std::path::Path) -> PathBuf {
+    let mut pending = vec![cache.join("recipes")];
+    let mut records = Vec::new();
+    while let Some(directory) = pending.pop() {
+        for entry in fs::read_dir(directory).unwrap() {
+            let entry = entry.unwrap();
+            if entry.file_type().unwrap().is_dir() {
+                pending.push(entry.path());
+            } else if entry
+                .path()
+                .extension()
+                .is_some_and(|extension| extension == "ron")
+            {
+                records.push(entry.path());
+            }
+        }
+    }
+    assert_eq!(records.len(), 1);
+    records.pop().unwrap()
 }
 
 #[test]
@@ -91,6 +113,52 @@ fn rejected_candidate_leaves_no_visible_object_or_recipe() {
     assert_eq!(store.resolve_recipe(&recipe.id()).unwrap(), None);
     assert_eq!(store.object_count().unwrap(), 0);
     assert_eq!(store.temporary_file_count().unwrap(), 0);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn stale_or_undecodable_recipe_records_regenerate_as_cache_misses() {
+    let root = temporary_directory("stale-recipe-record");
+    fs::create_dir_all(&root).unwrap();
+    let cache = root.join("cache");
+    let candidate = root.join("candidate.bin");
+    fs::write(&candidate, b"durable payload").unwrap();
+    let store = FsPreparedObjectStore::open(&cache).unwrap();
+    let recipe = recipe("stale-recipe-record");
+    let object = store
+        .publish(
+            &recipe,
+            CandidateObject::new(PreparedObjectKind::Other, "bin", &candidate),
+        )
+        .unwrap();
+    let record_path = only_recipe_record(&cache);
+    let valid = fs::read_to_string(&record_path).unwrap();
+    let missing_revision = valid
+        .lines()
+        .filter(|line| !line.trim_start().starts_with("revision:"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let mismatched_revision =
+        valid.replace(PREPARED_RECIPE_RECORD_REVISION, "prepared-recipe-record-v0");
+
+    for stale in [missing_revision, mismatched_revision, "not RON".into()] {
+        fs::write(&record_path, stale).unwrap();
+        assert_eq!(store.resolve_recipe(&recipe.id()).unwrap(), None);
+        assert_eq!(
+            store
+                .publish(
+                    &recipe,
+                    CandidateObject::new(PreparedObjectKind::Other, "bin", &candidate),
+                )
+                .unwrap(),
+            object
+        );
+        assert_eq!(
+            store.resolve_recipe(&recipe.id()).unwrap(),
+            Some(object.clone())
+        );
+    }
+
     fs::remove_dir_all(root).unwrap();
 }
 

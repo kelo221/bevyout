@@ -7,7 +7,10 @@ use anyhow::{Context, Result, anyhow, bail};
 use flate2::read::ZlibDecoder;
 use std::collections::HashMap;
 use std::fmt;
+use std::hash::Hash;
 use std::io::{Cursor, Read};
+use std::ops::{Deref, DerefMut};
+use std::sync::Arc;
 
 use bevyout_core::form_id::FormIdResolver;
 use bevyout_core::image_space::ImageSpaceModifier;
@@ -605,29 +608,78 @@ pub(crate) struct CellMetadata {
     ignored_subrecords: Vec<String>,
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct SharedCatalog<K, V>(Arc<HashMap<K, V>>);
+
+impl<K, V> Default for SharedCatalog<K, V> {
+    fn default() -> Self {
+        Self(Arc::new(HashMap::new()))
+    }
+}
+
+impl<K, V> From<HashMap<K, V>> for SharedCatalog<K, V> {
+    fn from(values: HashMap<K, V>) -> Self {
+        Self(Arc::new(values))
+    }
+}
+
+impl<K, V> Deref for SharedCatalog<K, V> {
+    type Target = HashMap<K, V>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl<K, V> DerefMut for SharedCatalog<K, V>
+where
+    K: Clone + Eq + Hash,
+    V: Clone,
+{
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        Arc::make_mut(&mut self.0)
+    }
+}
+
+impl<'a, K, V> IntoIterator for &'a SharedCatalog<K, V> {
+    type Item = (&'a K, &'a V);
+    type IntoIter = std::collections::hash_map::Iter<'a, K, V>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.iter()
+    }
+}
+
+impl<K, V> SharedCatalog<K, V> {
+    #[cfg(test)]
+    fn shares_storage_with(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
 #[derive(Debug, Default)]
 pub(crate) struct ParsedPlugin {
-    pub(crate) bases: HashMap<u32, BaseRecord>,
-    pub(crate) recipes: HashMap<u32, RecipeRecord>,
+    pub(crate) bases: SharedCatalog<u32, BaseRecord>,
+    pub(crate) recipes: SharedCatalog<u32, RecipeRecord>,
     // M4 wave 1 task B (#103): decoded for the actor catalog resolver built
     // in task C (`prepare::orchestrator::build_actor_catalog_inputs`).
-    pub(crate) races: HashMap<u32, RaceRecord>,
-    pub(crate) classes: HashMap<u32, ClassRecord>,
-    pub(crate) factions: HashMap<u32, FactionRecord>,
-    pub(crate) packages: HashMap<u32, PackageRecord>,
-    pub(crate) idles: HashMap<u32, IdleRecord>,
-    pub(crate) image_spaces: HashMap<u32, ImageSpaceInfo>,
-    pub(crate) image_space_modifiers: HashMap<u32, ImageSpaceModifier>,
-    pub(crate) sounds: HashMap<u32, SoundRecord>,
-    pub(crate) sound_references: HashMap<u32, SoundReferenceRecord>,
-    pub(crate) acoustic_spaces: HashMap<u32, AcousticSpaceRecord>,
-    pub(crate) music: HashMap<u32, MusicRecord>,
-    pub(crate) lighting_templates: HashMap<u32, LightingTemplateRecord>,
-    pub(crate) climates: HashMap<u32, ClimateRecord>,
-    pub(crate) weathers: HashMap<u32, WeatherRecord>,
-    pub(crate) landscape_textures: HashMap<u32, LandscapeTextureRecord>,
-    pub(crate) texture_sets: HashMap<u32, TextureSetRecord>,
-    pub(crate) worldspaces: HashMap<u32, WorldspaceRecord>,
+    pub(crate) races: SharedCatalog<u32, RaceRecord>,
+    pub(crate) classes: SharedCatalog<u32, ClassRecord>,
+    pub(crate) factions: SharedCatalog<u32, FactionRecord>,
+    pub(crate) packages: SharedCatalog<u32, PackageRecord>,
+    pub(crate) idles: SharedCatalog<u32, IdleRecord>,
+    pub(crate) image_spaces: SharedCatalog<u32, ImageSpaceInfo>,
+    pub(crate) image_space_modifiers: SharedCatalog<u32, ImageSpaceModifier>,
+    pub(crate) sounds: SharedCatalog<u32, SoundRecord>,
+    pub(crate) sound_references: SharedCatalog<u32, SoundReferenceRecord>,
+    pub(crate) acoustic_spaces: SharedCatalog<u32, AcousticSpaceRecord>,
+    pub(crate) music: SharedCatalog<u32, MusicRecord>,
+    pub(crate) lighting_templates: SharedCatalog<u32, LightingTemplateRecord>,
+    pub(crate) climates: SharedCatalog<u32, ClimateRecord>,
+    pub(crate) weathers: SharedCatalog<u32, WeatherRecord>,
+    pub(crate) landscape_textures: SharedCatalog<u32, LandscapeTextureRecord>,
+    pub(crate) texture_sets: SharedCatalog<u32, TextureSetRecord>,
+    pub(crate) worldspaces: SharedCatalog<u32, WorldspaceRecord>,
     pub(crate) land: Option<LandRecord>,
     pub(crate) road_count: usize,
     pub(crate) references: Vec<ReferenceRecord>,
@@ -641,7 +693,7 @@ pub(crate) struct ParsedPlugin {
     pub(crate) diagnostics: Vec<String>,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Default)]
 pub(crate) struct ParsedContentSet {
     state: ParsedState,
 }
@@ -748,8 +800,13 @@ impl ParsedContentSet {
         (edges, unresolved)
     }
 
+    #[cfg(test)]
     pub(crate) fn select(self, selector: &CellSelector) -> Result<ParsedPlugin> {
-        let mut state = self.state;
+        self.select_from(selector)
+    }
+
+    fn select_from(&self, selector: &CellSelector) -> Result<ParsedPlugin> {
+        let state = &self.state;
         let target_cell = match selector {
             CellSelector::FormId(form_id) => *form_id,
             CellSelector::EditorId(editor_id) => {
@@ -782,7 +839,7 @@ impl ParsedContentSet {
             }
         };
 
-        let all_references = state.references;
+        let all_references = &state.references;
         let mut references = all_references
             .values()
             .filter(|reference| reference.parent_cell_form_id == target_cell)
@@ -795,10 +852,10 @@ impl ParsedContentSet {
             let Some(teleport) = door.teleport.as_ref() else {
                 continue;
             };
-            door.destination = resolve_teleport_destination(teleport, &all_references);
+            door.destination = resolve_teleport_destination(teleport, all_references);
         }
         for reference in &mut references {
-            match resolve_initially_enabled(reference.form_id, &all_references) {
+            match resolve_initially_enabled(reference.form_id, all_references) {
                 Ok(enabled) => reference.initially_enabled = enabled,
                 Err(error) => {
                     reference.initially_enabled = true;
@@ -806,7 +863,7 @@ impl ParsedContentSet {
                 }
             }
             if reference.enable_parent.is_some() {
-                match resolve_enable_root(reference.form_id, &all_references) {
+                match resolve_enable_root(reference.form_id, all_references) {
                     Ok(root) => reference.enable_root_form_id = Some(root),
                     Err(error) => {
                         reference
@@ -852,8 +909,9 @@ impl ParsedContentSet {
         }
         let mut navmeshes = state
             .navmeshes
-            .into_values()
-            .filter_map(|(cell, navmesh)| (cell == target_cell).then_some(navmesh))
+            .values()
+            .filter(|(cell, _)| *cell == target_cell)
+            .map(|(_, navmesh)| navmesh.clone())
             .collect::<Vec<_>>();
         navmeshes.sort_by_key(|navmesh| navmesh.form_id);
 
@@ -875,14 +933,14 @@ impl ParsedContentSet {
                 }
             })
             .collect::<Vec<_>>();
-        diagnostics.extend(state.recipe_diagnostics);
-        diagnostics.extend(state.actor_support_diagnostics);
+        diagnostics.extend(state.recipe_diagnostics.iter().cloned());
+        diagnostics.extend(state.actor_support_diagnostics.iter().cloned());
         for idle in state.idles.values() {
             for message in &idle.diagnostics {
                 diagnostics.push(format!("IDLE {:08x}: {message}", idle.form_id));
             }
         }
-        diagnostics.extend(state.navigation_diagnostics);
+        diagnostics.extend(state.navigation_diagnostics.iter().cloned());
         for navmesh in &navmeshes {
             for message in &navmesh.diagnostics {
                 diagnostics.push(format!("NAVM {:08x}: {message}", navmesh.form_id));
@@ -891,45 +949,43 @@ impl ParsedContentSet {
         diagnostics.sort();
 
         Ok(ParsedPlugin {
-            bases: state.bases,
-            recipes: state.recipes,
-            races: state.races,
-            classes: state.classes,
-            factions: state.factions,
-            packages: state.packages,
-            idles: state.idles,
-            image_spaces: state.image_spaces,
-            image_space_modifiers: state.image_space_modifiers,
-            sounds: state.sounds,
-            sound_references: state.sound_references,
-            acoustic_spaces: state.acoustic_spaces,
-            music: state.music,
-            lighting_templates: state.lighting_templates,
-            climates: state.climates,
-            weathers: state.weathers,
-            landscape_textures: state.landscape_textures,
-            texture_sets: state.texture_sets,
-            worldspaces: state.worldspaces,
-            land: state.lands.remove(&target_cell).map(|(_, land)| land),
-            road_count: state.road_counts.remove(&target_cell).unwrap_or(0),
+            bases: state.bases.clone(),
+            recipes: state.recipes.clone(),
+            races: state.races.clone(),
+            classes: state.classes.clone(),
+            factions: state.factions.clone(),
+            packages: state.packages.clone(),
+            idles: state.idles.clone(),
+            image_spaces: state.image_spaces.clone(),
+            image_space_modifiers: state.image_space_modifiers.clone(),
+            sounds: state.sounds.clone(),
+            sound_references: state.sound_references.clone(),
+            acoustic_spaces: state.acoustic_spaces.clone(),
+            music: state.music.clone(),
+            lighting_templates: state.lighting_templates.clone(),
+            climates: state.climates.clone(),
+            weathers: state.weathers.clone(),
+            landscape_textures: state.landscape_textures.clone(),
+            texture_sets: state.texture_sets.clone(),
+            worldspaces: state.worldspaces.clone(),
+            land: state.lands.get(&target_cell).map(|(_, land)| land.clone()),
+            road_count: state.road_counts.get(&target_cell).copied().unwrap_or(0),
             references,
             navmeshes,
-            navigation: state.navigation,
-            cell: state.cells.remove(&target_cell),
-            cell_metadata: state.cell_metadata.remove(&target_cell),
+            navigation: state.navigation.clone(),
+            cell: state.cells.get(&target_cell).cloned(),
+            cell_metadata: state.cell_metadata.get(&target_cell).cloned(),
             diagnostics,
         })
     }
 
     /// Selects a cell from a content set that is shared by a batch session.
     ///
-    /// The legacy selector consumes the parsed state because that was the
-    /// cheapest ownership shape for one-cell preparation. Batch workers need
-    /// independent, mutable `ParsedPlugin` values, so clone the immutable
-    /// parsed state once it has been built instead of reparsing every plugin
-    /// for every selected cell.
+    /// Global parsed catalogs are Arc-backed and cloned by pointer. Only the
+    /// selected cell's references, navigation, land, and diagnostics are
+    /// projected into worker-owned values.
     pub(crate) fn select_shared(&self, selector: &CellSelector) -> Result<ParsedPlugin> {
-        self.clone().select(selector)
+        self.select_from(selector)
     }
 }
 
@@ -941,24 +997,24 @@ pub(crate) struct PluginSource<'a> {
 
 #[derive(Debug, Clone, Default)]
 pub(crate) struct ParsedState {
-    bases: HashMap<u32, BaseRecord>,
-    recipes: HashMap<u32, RecipeRecord>,
-    races: HashMap<u32, RaceRecord>,
-    classes: HashMap<u32, ClassRecord>,
-    factions: HashMap<u32, FactionRecord>,
-    packages: HashMap<u32, PackageRecord>,
-    idles: HashMap<u32, IdleRecord>,
-    image_spaces: HashMap<u32, ImageSpaceInfo>,
-    image_space_modifiers: HashMap<u32, ImageSpaceModifier>,
-    sounds: HashMap<u32, SoundRecord>,
-    sound_references: HashMap<u32, SoundReferenceRecord>,
-    acoustic_spaces: HashMap<u32, AcousticSpaceRecord>,
-    music: HashMap<u32, MusicRecord>,
-    lighting_templates: HashMap<u32, LightingTemplateRecord>,
-    climates: HashMap<u32, ClimateRecord>,
-    weathers: HashMap<u32, WeatherRecord>,
-    landscape_textures: HashMap<u32, LandscapeTextureRecord>,
-    texture_sets: HashMap<u32, TextureSetRecord>,
+    bases: SharedCatalog<u32, BaseRecord>,
+    recipes: SharedCatalog<u32, RecipeRecord>,
+    races: SharedCatalog<u32, RaceRecord>,
+    classes: SharedCatalog<u32, ClassRecord>,
+    factions: SharedCatalog<u32, FactionRecord>,
+    packages: SharedCatalog<u32, PackageRecord>,
+    idles: SharedCatalog<u32, IdleRecord>,
+    image_spaces: SharedCatalog<u32, ImageSpaceInfo>,
+    image_space_modifiers: SharedCatalog<u32, ImageSpaceModifier>,
+    sounds: SharedCatalog<u32, SoundRecord>,
+    sound_references: SharedCatalog<u32, SoundReferenceRecord>,
+    acoustic_spaces: SharedCatalog<u32, AcousticSpaceRecord>,
+    music: SharedCatalog<u32, MusicRecord>,
+    lighting_templates: SharedCatalog<u32, LightingTemplateRecord>,
+    climates: SharedCatalog<u32, ClimateRecord>,
+    weathers: SharedCatalog<u32, WeatherRecord>,
+    landscape_textures: SharedCatalog<u32, LandscapeTextureRecord>,
+    texture_sets: SharedCatalog<u32, TextureSetRecord>,
     references: HashMap<u32, ReferenceRecord>,
     navmeshes: HashMap<u32, (u32, NavMeshRecord)>,
     navigation: Option<NaviRecord>,
@@ -966,7 +1022,7 @@ pub(crate) struct ParsedState {
     cell_metadata: HashMap<u32, CellMetadata>,
     cell_winning_plugins: HashMap<u32, String>,
     cell_provenance: HashMap<u32, Vec<String>>,
-    worldspaces: HashMap<u32, WorldspaceRecord>,
+    worldspaces: SharedCatalog<u32, WorldspaceRecord>,
     lands: HashMap<u32, (u32, LandRecord)>,
     road_counts: HashMap<u32, usize>,
     recipe_diagnostics: Vec<String>,

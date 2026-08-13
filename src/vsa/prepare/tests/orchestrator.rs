@@ -517,7 +517,8 @@ mod actor_assembly_policy_tests {
                 apparel(0x101),
                 apparel(0x200),
                 apparel(0x201),
-            ]),
+            ])
+            .into(),
             ..ParsedPlugin::default()
         };
 
@@ -542,7 +543,8 @@ mod actor_assembly_policy_tests {
                 leveled(0x10, 0, &[0x100, 0x200]),
                 apparel(0x100),
                 apparel(0x200),
-            ]),
+            ])
+            .into(),
             ..ParsedPlugin::default()
         };
 
@@ -557,7 +559,7 @@ mod actor_assembly_policy_tests {
         let mut root = leveled(0x10, 0, &[0x100]).1;
         root.leveled.as_mut().expect("leveled fixture").chance_none = 100;
         let parsed = ParsedPlugin {
-            bases: HashMap::from([(0x10, root), apparel(0x100)]),
+            bases: HashMap::from([(0x10, root), apparel(0x100)]).into(),
             ..ParsedPlugin::default()
         };
 
