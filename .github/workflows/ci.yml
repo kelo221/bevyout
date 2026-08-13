@@ -153,7 +153,7 @@ jobs:
         uses: oven-sh/setup-bun@v2
 
       - name: Install MCP dependencies
-        run: bun install --cwd tools/bevyout-mcp --frozen-lockfile
+        run: bun install --cwd tools/bevyout-mcp --frozen-lockfile --ignore-scripts
 
       - name: AST rule fixtures
         run: bun run tools/harness/ast_guard.ts --self-test
