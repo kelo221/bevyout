@@ -45,6 +45,12 @@ impl ConsoleCommandProvider for WorldCommandProvider {
                 "Report canonical persisted deltas for one cell or exterior cell FormID.",
                 world_state,
             ),
+            ConsoleCommand::new(
+                "actorresidency",
+                "actorresidency",
+                "Report every exterior-resident gameplay actor: owning cell generation, nav binding, running package, and last residency rejection.",
+                actor_residency,
+            ),
         ] {
             registry.register(command)?;
         }
@@ -95,6 +101,28 @@ fn world_state(
         "dropped_items": cell.map_or(0, |cell| cell.dropped_items.len()),
         "actors": cell.map_or(0, |cell| cell.actors.len()),
     })))
+}
+
+/// Read-only projection of exterior actor residency (M6 W3-C). Every value
+/// comes from an existing authority: `ExteriorResidentActor` (the accepted
+/// residency transition), the nav API, and the running package controller.
+fn actor_residency(
+    world: &mut World,
+    invocation: &ConsoleInvocation,
+) -> Result<ConsoleCommandResult, ConsoleError> {
+    no_args(invocation)?;
+    if world
+        .get_resource::<super::super::world::exterior::ExteriorStreamState>()
+        .is_none()
+    {
+        return Err(ConsoleError::new(
+            "unavailable",
+            "exterior streaming is not installed",
+        ));
+    }
+    Ok(ConsoleCommandResult::value(
+        super::super::world::exterior::actor_residency_json(world),
+    ))
 }
 
 fn worldstream(

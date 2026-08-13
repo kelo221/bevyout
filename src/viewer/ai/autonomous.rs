@@ -42,6 +42,7 @@ use bevyout_core::actor_state::ActorLifeState;
 
 use super::autonomous_gate::eligible_for_autonomous_start;
 use super::family_runtime::ActorPackageController;
+use super::lifecycle::PackageLifecycle;
 use super::selection::GameInstant;
 use crate::viewer::actor::ActorRuntime;
 use crate::viewer::actor_state::ActorStateRuntime;
@@ -124,6 +125,7 @@ fn drive_pending_autonomous_starts(world: &mut World) {
         }
         match start_package(world, entity, reference_form_id, instant) {
             Ok(_) => {
+                resume_saved_package_checkpoint(world, entity, reference_form_id);
                 info!("autonomous package driver: bound + started actor {reference_form_id:08x}");
             }
             Err(error) => {
@@ -138,6 +140,31 @@ fn drive_pending_autonomous_starts(world: &mut World) {
             }
         }
     }
+}
+
+/// Resumes a package the actor was already running when its cell was
+/// unloaded (M6 W3-C). The selection/resolution work is still done by
+/// [`start_package`]; only the lifecycle's step and elapsed time are replaced,
+/// and only when the freshly selected package is the checkpointed one -- a
+/// different schedule choice must win over a stale checkpoint. No save shape
+/// changes: `ActorInstanceState::package` already carried this field.
+fn resume_saved_package_checkpoint(world: &mut World, entity: Entity, reference_form_id: u32) {
+    let Some(checkpoint) =
+        crate::viewer::world::exterior::saved_package_checkpoint(world, reference_form_id)
+    else {
+        return;
+    };
+    let Some(mut controller) = world.get_mut::<ActorPackageController>(entity) else {
+        return;
+    };
+    if controller.selected_form_id != checkpoint.package_form_id {
+        return;
+    }
+    controller.lifecycle = PackageLifecycle::from_checkpoint(checkpoint);
+    info!(
+        "autonomous package driver: resumed {reference_form_id:08x} package {:08x} step {}",
+        checkpoint.package_form_id, checkpoint.procedure_index
+    );
 }
 
 fn game_instant(world: &World) -> GameInstant {

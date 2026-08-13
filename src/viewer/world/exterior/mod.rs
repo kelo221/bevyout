@@ -4,6 +4,8 @@
 //! by preparation. No converter, Blender process, or source-plugin parser is
 //! reachable from this module.
 
+mod actor_residency_plan;
+mod actors;
 mod diagnostics;
 mod lifecycle;
 mod loading;
@@ -35,6 +37,7 @@ use super::super::player::{
 use crate::app_state::AppState;
 use crate::viewer::day_night::GameClock;
 
+pub(crate) use actors::{actor_residency_json, saved_package_checkpoint};
 pub(crate) use diagnostics::{cells as exterior_cells_json, status as exterior_status_json};
 pub(crate) use lifecycle::ExteriorStreamState;
 
@@ -188,12 +191,17 @@ impl Plugin for ExteriorWorldPlugin {
                 resident_cells: self.resident_cell_limit,
                 bytes: 128 * 1024 * 1024,
             })
+            .init_resource::<actors::ExteriorActorResidency>()
             .add_systems(
                 Update,
                 (
                     initialize,
                     place_player,
                     update_residency,
+                    // Actors are checkpointed and released while their cell
+                    // root still exists; projection of newly resident cells
+                    // reuses the same pass one frame after collision attach.
+                    actors::sync_exterior_actor_residency,
                     // Release evicted roots and collision ownership before a
                     // newly completed package is allowed to spawn this frame.
                     finalize_evictions,
