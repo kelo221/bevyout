@@ -292,6 +292,14 @@ mod landmass_graph;
 #[allow(dead_code, unused_imports)]
 mod door_link;
 
+// M6 W3-C's exterior actor-residency sequencing is std-only for exactly this
+// reason: the runtime ordering (unload before eviction, handoff on a border
+// crossing, restore at a new generation) is executable here, while the Bevy
+// adapter that applies it is unit tested against a bare `World`.
+#[path = "../src/viewer/world/exterior/actor_residency_plan.rs"]
+#[allow(dead_code, unused_imports)]
+mod exterior_actor_plan;
+
 // `viewer::nav::repath` (issue #113, M4 wave 4) is std-only, same flat
 // top-level include rationale as `door_link` above.
 #[path = "../src/viewer/nav/repath.rs"]
@@ -1249,6 +1257,12 @@ struct BevyoutWorld {
     exterior_storage_worldspace: u32,
     exterior_storage_cell: u32,
     exterior_storage_plan: Option<exterior_scene_policy::ExteriorSceneStoragePlan>,
+
+    // -- m6_wave3_runtime.feature (M6 W3-C exterior actor residency) --
+    w3c_cells: Vec<exterior_actor_plan::PlannedCell>,
+    w3c_live: Vec<exterior_actor_plan::PlannedLiveActor>,
+    w3c_plan: Vec<exterior_actor_plan::PlannedRequest>,
+    w3c_max_owners: usize,
 }
 
 fn synthetic_dialogue_source() -> dialogue::DialogueSource {
@@ -17686,4 +17700,249 @@ async fn then_exterior_scene_does_not_embed_content_diagnostics(world: &mut Bevy
 #[then("changing the format policy changes the prepared recipe identity")]
 async fn then_format_policy_changes_prepared_recipe_identity(world: &mut BevyoutWorld) {
     assert_ne!(world.prepared_recipe_ids[0], world.prepared_recipe_ids[3]);
+}
+
+// ---------------------------------------------------------------------
+// m6_wave3_runtime.feature -- exterior gameplay-actor residency sequencing.
+// ---------------------------------------------------------------------
+
+fn w3c_form_id(text: &str) -> u32 {
+    u32::from_str_radix(text, 16).expect("hexadecimal FormID")
+}
+
+fn w3c_owner(cell: &str, generation: u64) -> exterior_actor_plan::PlannedOwner {
+    exterior_actor_plan::PlannedOwner {
+        cell_form_id: w3c_form_id(cell),
+        generation,
+    }
+}
+
+#[given(
+    regex = r"^resident exterior cell ([0-9a-fA-F]{8}) at generation (\d+) covers grid (-?\d+),(-?\d+)$"
+)]
+async fn given_w3c_resident_cell(
+    world: &mut BevyoutWorld,
+    cell: String,
+    generation: u64,
+    x: i32,
+    y: i32,
+) {
+    world.w3c_cells.push(exterior_actor_plan::PlannedCell {
+        cell_form_id: w3c_form_id(&cell),
+        generation,
+        grid: (x, y),
+        projectable: true,
+        evicting: false,
+        actors: Vec::new(),
+    });
+}
+
+#[given(regex = r"^exterior cell ([0-9a-fA-F]{8}) prepares actor ([0-9a-fA-F]{8})$")]
+async fn given_w3c_prepared_actor(world: &mut BevyoutWorld, cell: String, actor: String) {
+    let cell_form_id = w3c_form_id(&cell);
+    let entry = exterior_actor_plan::PlannedActorEntry {
+        reference_form_id: w3c_form_id(&actor),
+        has_saved_state: false,
+    };
+    for planned in &mut world.w3c_cells {
+        if planned.cell_form_id == cell_form_id {
+            planned.actors.push(entry);
+        }
+    }
+}
+
+#[when("exterior actor residency is planned")]
+async fn when_w3c_residency_is_planned(world: &mut BevyoutWorld) {
+    world.w3c_plan = exterior_actor_plan::plan_actor_residency(&world.w3c_cells, &world.w3c_live);
+    world.w3c_max_owners = world.w3c_max_owners.max(world.w3c_live.len());
+}
+
+#[when(
+    regex = r"^actor ([0-9a-fA-F]{8}) is projected in cell ([0-9a-fA-F]{8}) at generation (\d+) on grid (-?\d+),(-?\d+)$"
+)]
+async fn when_w3c_actor_is_projected(
+    world: &mut BevyoutWorld,
+    actor: String,
+    cell: String,
+    generation: u64,
+    x: i32,
+    y: i32,
+) {
+    let reference_form_id = w3c_form_id(&actor);
+    world
+        .w3c_live
+        .retain(|live| live.reference_form_id != reference_form_id);
+    world.w3c_live.push(exterior_actor_plan::PlannedLiveActor {
+        reference_form_id,
+        owner: w3c_owner(&cell, generation),
+        grid: (x, y),
+    });
+}
+
+#[when(regex = r"^actor ([0-9a-fA-F]{8}) crosses into grid (-?\d+),(-?\d+)$")]
+async fn when_w3c_actor_crosses(world: &mut BevyoutWorld, actor: String, x: i32, y: i32) {
+    let reference_form_id = w3c_form_id(&actor);
+    for live in &mut world.w3c_live {
+        if live.reference_form_id == reference_form_id {
+            live.grid = (x, y);
+        }
+    }
+}
+
+#[when(regex = r"^exterior cell ([0-9a-fA-F]{8}) begins evicting at generation (\d+)$")]
+async fn when_w3c_cell_evicts(world: &mut BevyoutWorld, cell: String, generation: u64) {
+    let cell_form_id = w3c_form_id(&cell);
+    for planned in &mut world.w3c_cells {
+        if planned.cell_form_id == cell_form_id {
+            planned.evicting = true;
+            planned.generation = generation;
+        }
+    }
+}
+
+#[when(regex = r"^actor ([0-9a-fA-F]{8}) is no longer projected$")]
+async fn when_w3c_actor_is_gone(world: &mut BevyoutWorld, actor: String) {
+    let reference_form_id = w3c_form_id(&actor);
+    world
+        .w3c_live
+        .retain(|live| live.reference_form_id != reference_form_id);
+}
+
+#[when(regex = r"^actor ([0-9a-fA-F]{8}) has saved canonical state$")]
+async fn when_w3c_actor_has_saved_state(world: &mut BevyoutWorld, actor: String) {
+    let reference_form_id = w3c_form_id(&actor);
+    for planned in &mut world.w3c_cells {
+        for entry in &mut planned.actors {
+            if entry.reference_form_id == reference_form_id {
+                entry.has_saved_state = true;
+            }
+        }
+    }
+}
+
+#[when(regex = r"^exterior cell ([0-9a-fA-F]{8}) reloads at generation (\d+)$")]
+async fn when_w3c_cell_reloads(world: &mut BevyoutWorld, cell: String, generation: u64) {
+    let cell_form_id = w3c_form_id(&cell);
+    for planned in &mut world.w3c_cells {
+        if planned.cell_form_id == cell_form_id {
+            planned.evicting = false;
+            planned.projectable = true;
+            planned.generation = generation;
+        }
+    }
+}
+
+#[then(regex = r"^the plan binds actor ([0-9a-fA-F]{8}) to cell ([0-9a-fA-F]{8})$")]
+async fn then_w3c_plan_binds(world: &mut BevyoutWorld, actor: String, cell: String) {
+    assert!(
+        world
+            .w3c_plan
+            .contains(&exterior_actor_plan::PlannedRequest::Bind {
+                reference_form_id: w3c_form_id(&actor),
+                destination: world
+                    .w3c_cells
+                    .iter()
+                    .find(|planned| planned.cell_form_id == w3c_form_id(&cell))
+                    .map(|planned| exterior_actor_plan::PlannedOwner {
+                        cell_form_id: planned.cell_form_id,
+                        generation: planned.generation,
+                    })
+                    .expect("planned cell"),
+            })
+    );
+}
+
+#[then(regex = r"^the plan restores actor ([0-9a-fA-F]{8}) to cell ([0-9a-fA-F]{8})$")]
+async fn then_w3c_plan_restores(world: &mut BevyoutWorld, actor: String, cell: String) {
+    assert!(
+        world
+            .w3c_plan
+            .contains(&exterior_actor_plan::PlannedRequest::Restore {
+                reference_form_id: w3c_form_id(&actor),
+                destination: world
+                    .w3c_cells
+                    .iter()
+                    .find(|planned| planned.cell_form_id == w3c_form_id(&cell))
+                    .map(|planned| exterior_actor_plan::PlannedOwner {
+                        cell_form_id: planned.cell_form_id,
+                        generation: planned.generation,
+                    })
+                    .expect("planned cell"),
+            })
+    );
+}
+
+#[then(
+    regex = r"^the plan hands actor ([0-9a-fA-F]{8}) from cell ([0-9a-fA-F]{8}) to cell ([0-9a-fA-F]{8})$"
+)]
+async fn then_w3c_plan_hands_off(
+    world: &mut BevyoutWorld,
+    actor: String,
+    source: String,
+    destination: String,
+) {
+    let reference_form_id = w3c_form_id(&actor);
+    let matched = world.w3c_plan.iter().any(|request| {
+        matches!(
+            request,
+            exterior_actor_plan::PlannedRequest::Handoff {
+                reference_form_id: reference,
+                source: from,
+                destination: to,
+            } if *reference == reference_form_id
+                && from.cell_form_id == w3c_form_id(&source)
+                && to.cell_form_id == w3c_form_id(&destination)
+        )
+    });
+    assert!(matched, "expected a handoff in {:?}", world.w3c_plan);
+}
+
+#[then(regex = r"^the plan unloads actor ([0-9a-fA-F]{8}) from cell ([0-9a-fA-F]{8})$")]
+async fn then_w3c_plan_unloads(world: &mut BevyoutWorld, actor: String, cell: String) {
+    let reference_form_id = w3c_form_id(&actor);
+    let matched = world.w3c_plan.iter().any(|request| {
+        matches!(
+            request,
+            exterior_actor_plan::PlannedRequest::Unload {
+                reference_form_id: reference,
+                source,
+            } if *reference == reference_form_id && source.cell_form_id == w3c_form_id(&cell)
+        )
+    });
+    assert!(matched, "expected an unload in {:?}", world.w3c_plan);
+}
+
+#[then(regex = r"^the plan leaves actor ([0-9a-fA-F]{8}) alone$")]
+async fn then_w3c_plan_is_a_no_op(world: &mut BevyoutWorld, actor: String) {
+    let reference_form_id = w3c_form_id(&actor);
+    assert!(
+        !world
+            .w3c_plan
+            .iter()
+            .any(|request| request.reference_form_id() == reference_form_id),
+        "a settled actor must produce no residency request: {:?}",
+        world.w3c_plan
+    );
+}
+
+#[then(regex = r"^no more than one live owner claimed actor ([0-9a-fA-F]{8})$")]
+async fn then_w3c_single_owner(world: &mut BevyoutWorld, actor: String) {
+    let reference_form_id = w3c_form_id(&actor);
+    let owners = world
+        .w3c_live
+        .iter()
+        .filter(|live| live.reference_form_id == reference_form_id)
+        .count();
+    assert!(
+        owners <= 1,
+        "actor {reference_form_id:08x} has {owners} owners"
+    );
+    assert!(
+        !world.w3c_plan.iter().any(|request| matches!(
+            request,
+            exterior_actor_plan::PlannedRequest::Duplicate { .. }
+        )),
+        "no duplicate projection may ever be observed"
+    );
+    assert!(world.w3c_max_owners <= 1);
 }
