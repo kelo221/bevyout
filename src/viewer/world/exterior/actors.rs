@@ -24,7 +24,7 @@ use std::path::Path;
 use bevy::prelude::*;
 use bevyout_core::actor_state::ActorInstanceState;
 use bevyout_core::manifest::exterior::{
-    ExteriorCellLifecycle, ExteriorCoordinatePolicy, PreparedExteriorActor,
+    ExteriorCellLifecycle, ExteriorCoordinatePolicy, GridCoordinate, PreparedExteriorActor,
 };
 use bevyout_core::manifest::{PreparedActor, PreparedPlacement, PreparedSemantic};
 
@@ -82,12 +82,15 @@ fn rejection_code(rejection: ActorResidencyRejection) -> &'static str {
     }
 }
 
-/// Snapshot of one projectable cell taken while `ExteriorStreamState` is
-/// borrowed, so the exclusive phases below never re-borrow it.
+/// Snapshot of one cell's identity taken while `ExteriorStreamState` is
+/// borrowed, so the exclusive phases below never re-borrow it. Prepared actor
+/// data is deliberately *not* copied here: an assembly blueprint is large and
+/// this runs every frame, so it is read once, at the moment a bind actually
+/// spawns ([`prepared_actor_for`]).
 struct CellSnapshot {
     cell_form_id: u32,
+    grid: GridCoordinate,
     root: Option<Entity>,
-    actors: Vec<PreparedExteriorActor>,
 }
 
 /// Polls the exterior residency ring and keeps exactly one canonical actor
@@ -126,38 +129,34 @@ fn observe_cells(world: &mut World) -> (Vec<PlannedCell>, BTreeMap<u32, CellSnap
             )
             && cell.package.is_some()
             && cell.root.is_some();
-        let actors = cell
-            .package
-            .as_ref()
-            .map(|package| {
-                package
-                    .actors
-                    .iter()
-                    .filter(|actor| actor.initially_enabled && actor.reference_form_id != 0)
-                    .cloned()
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default();
         planned.push(PlannedCell {
             cell_form_id: cell.state.cell_form_id,
             generation: cell.state.generation,
             grid: (grid.x, grid.y),
             projectable,
             evicting: cell.state.lifecycle == ExteriorCellLifecycle::Evicting,
-            actors: actors
-                .iter()
-                .map(|actor| PlannedActorEntry {
-                    reference_form_id: actor.reference_form_id,
-                    has_saved_state: saved.contains(&actor.reference_form_id),
+            actors: cell
+                .package
+                .as_ref()
+                .map(|package| {
+                    package
+                        .actors
+                        .iter()
+                        .filter(|actor| actor.initially_enabled && actor.reference_form_id != 0)
+                        .map(|actor| PlannedActorEntry {
+                            reference_form_id: actor.reference_form_id,
+                            has_saved_state: saved.contains(&actor.reference_form_id),
+                        })
+                        .collect()
                 })
-                .collect(),
+                .unwrap_or_default(),
         });
         snapshots.insert(
             cell.state.cell_form_id,
             CellSnapshot {
                 cell_form_id: cell.state.cell_form_id,
+                grid: *grid,
                 root: cell.root,
-                actors,
             },
         );
     }
@@ -318,16 +317,12 @@ fn apply_transition(
             let Some(root) = snapshot.root else {
                 return;
             };
-            let Some(prepared) = snapshot
-                .actors
-                .iter()
-                .find(|actor| actor.reference_form_id == reference_form_id)
-            else {
+            let Some(prepared) = prepared_actor_for(world, snapshot.grid, reference_form_id) else {
                 return;
             };
             ensure_cell_catalogs(world, snapshot.cell_form_id);
             apply_canonical_state(world, reference_form_id, state);
-            spawn_exterior_actor(world, prepared, root, owner);
+            spawn_exterior_actor(world, &prepared, root, owner);
             let mut residency = world.resource_mut::<ExteriorActorResidency>();
             if restore {
                 residency.restores = residency.restores.saturating_add(1);
@@ -406,6 +401,24 @@ fn apply_transition(
         }
         ActorResidencyTransition::Retain { .. } => {}
     }
+}
+
+/// Reads one prepared actor entry out of the live package, at bind time only.
+fn prepared_actor_for(
+    world: &World,
+    grid: GridCoordinate,
+    reference_form_id: u32,
+) -> Option<PreparedExteriorActor> {
+    world
+        .get_resource::<ExteriorStreamState>()?
+        .cells
+        .get(&grid)?
+        .package
+        .as_ref()?
+        .actors
+        .iter()
+        .find(|actor| actor.reference_form_id == reference_form_id)
+        .cloned()
 }
 
 fn note_rejection(world: &mut World, reference_form_id: u32, code: &'static str) {
