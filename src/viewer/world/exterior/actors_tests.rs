@@ -766,12 +766,28 @@ fn ensure_cell_catalogs_loads_in_the_background_without_blocking_the_requesting_
         .run_system_once(poll_cell_catalog_tasks)
         .expect("poll system runs");
 
-    // Now give the background thread real time to finish, and poll again.
-    // Success is asserted only after this second, post-completion poll.
-    std::thread::sleep(std::time::Duration::from_millis(50));
-    test.world
-        .run_system_once(poll_cell_catalog_tasks)
-        .expect("poll system runs");
+    // Now give the background thread real time to finish, polling in a
+    // bounded loop rather than a single fixed sleep -- a busy CI runner can
+    // take longer than any fixed delay to schedule the AsyncComputeTaskPool
+    // thread. Success is asserted only after the loop observes completion
+    // (or the deadline elapses, in which case the assertions below fail
+    // clearly instead of hanging).
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    loop {
+        test.world
+            .run_system_once(poll_cell_catalog_tasks)
+            .expect("poll system runs");
+        if test
+            .world
+            .resource::<ExteriorActorResidency>()
+            .inserted_catalogs
+            .contains(&cell_form_id)
+            || std::time::Instant::now() >= deadline
+        {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
 
     assert!(
         test.world
