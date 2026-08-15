@@ -46,6 +46,20 @@ impl ActorDefinitionCatalogs {
         self.0.remove(&cell_form_id);
     }
 
+    /// Every resident cell's catalog in deterministic cell order. Streamed
+    /// exterior cells insert their catalogs here too (M6 W3-C), so a caller
+    /// that needs a blueprint must search this registry rather than the
+    /// startup manifest's single catalog.
+    pub(crate) fn catalogs(&self) -> Vec<(u32, Arc<PreparedActorCatalog>)> {
+        let mut catalogs = self
+            .0
+            .iter()
+            .map(|(cell_form_id, catalog)| (*cell_form_id, Arc::clone(catalog)))
+            .collect::<Vec<_>>();
+        catalogs.sort_by_key(|(cell_form_id, _)| *cell_form_id);
+        catalogs
+    }
+
     pub(crate) fn definition(
         &self,
         reference_form_id: u32,

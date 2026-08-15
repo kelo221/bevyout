@@ -25,6 +25,7 @@ fn empty_package() -> ExteriorCellPackage {
         static_objects: Vec::new(),
         dynamic_objects: Vec::new(),
         distant_objects: Vec::new(),
+        actors: Vec::new(),
         local_lights: Vec::new(),
         navigation: None,
         environment: PreparedExteriorEnvironment::default(),

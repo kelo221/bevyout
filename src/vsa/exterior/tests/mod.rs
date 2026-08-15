@@ -1,15 +1,283 @@
 use super::super::openmw_esm4::{
-    LandRecord, LandTextureAssignment, LandTextureWeight, ParsedPlugin,
+    BaseRecord, LandRecord, LandTextureAssignment, LandTextureWeight, ParsedPlugin, ReferenceKind,
+    ReferenceRecord,
 };
 use super::super::openmw_esm4::{LandscapeTextureRecord, TextureSetRecord};
 use super::terrain_from_land;
+use bevyout_core::actor::{ActorAssemblyBlueprint, ActorFallbackDecision, ActorKind};
 use bevyout_core::manifest::exterior::PreparedTerrain;
 use bevyout_core::manifest::exterior::{
     ExteriorCellPackage, ExteriorCoordinatePolicy, GridCoordinate, PreparedExteriorEnvironment,
     PreparedExteriorObject,
 };
+use bevyout_core::manifest::{CellInfo, PreparedActor, PreparedPlacement, PreparedSemantic};
 use std::collections::HashMap;
 use std::fs;
+
+fn synthetic_exterior_cell() -> CellInfo {
+    CellInfo {
+        form_id: 0x0c67,
+        editor_id: None,
+        name: None,
+        interior: false,
+        behave_like_exterior: false,
+        ambient_rgba: [0.0; 4],
+        directional_rgba: [0.0; 4],
+        image_space_form_id: None,
+        image_space: None,
+        lighting_template_form_id: None,
+        lighting_template_flags: 0,
+        lighting_template: None,
+        raw_lighting: None,
+        effective_lighting: None,
+        water_form_id: None,
+        water_height: None,
+        grid: Some((3, -1)),
+        worldspace_form_id: Some(0x3c),
+        day_night_profile: None,
+        day_night_preview_profile: None,
+    }
+}
+
+fn synthetic_actor_reference(
+    kind: ReferenceKind,
+    form_id: u32,
+    base_form_id: u32,
+) -> ReferenceRecord {
+    ReferenceRecord {
+        kind,
+        form_id,
+        parent_cell_form_id: 0x0c67,
+        base_form_id,
+        position: [10.0, 20.0, 30.0],
+        rotation: [0.0, 0.0, 0.0],
+        scale: 1.0,
+        count: 1,
+        initially_enabled: true,
+        ..Default::default()
+    }
+}
+
+/// `BaseRecord::ignored_subrecords` is private to `openmw_esm4` (not even
+/// `pub(crate)`), so cross-module fixtures cannot use `..Default::default()`
+/// struct-update syntax on it. Go through `BaseRecord::default()` and field
+/// assignment instead, which only touches the `pub(crate)` fields tests need.
+fn synthetic_base(kind: &str, model: &str) -> BaseRecord {
+    let mut base = BaseRecord::default();
+    base.kind = kind.into();
+    base.model = Some(model.into());
+    base
+}
+
+fn minimal_actor_blueprint(kind: ActorKind, reference_form_id: u32) -> ActorAssemblyBlueprint {
+    ActorAssemblyBlueprint {
+        source_base_form_id: 0x1000,
+        resolved_base_form_id: 0x1000,
+        reference_form_id,
+        kind,
+        female: false,
+        race_form_id: None,
+        root_scale: 1.0,
+        skeleton_path: Some("actors/eyebot/skeleton.glb".into()),
+        mesh_parts: Vec::new(),
+        apparel: Vec::new(),
+        eye_form_id: None,
+        eye_texture_path: None,
+        facegen: None,
+        facegen_reconstruction_fingerprint: None,
+        facegen_diagnostics: Vec::new(),
+        equipped_weapon: None,
+        fallback: ActorFallbackDecision::default(),
+    }
+}
+
+#[test]
+fn achr_reference_is_prepared_as_an_actor_entry_not_a_dynamic_mesh() {
+    let mut parsed = ParsedPlugin::default();
+    let reference = synthetic_actor_reference(ReferenceKind::Npc, 0x0006_38e8, 0x0001_cf73);
+    parsed.references.push(reference);
+    parsed.bases = HashMap::from([(
+        0x0001_cf73,
+        synthetic_base("NPC_", "Creatures\\Eyebot\\Skeleton.nif"),
+    )])
+    .into();
+    let cell = synthetic_exterior_cell();
+
+    let package = super::build_cell_package(&parsed, &cell, "content", None, false).unwrap();
+
+    assert!(
+        package
+            .dynamic_objects
+            .iter()
+            .all(|object| object.reference_form_id != 0x0006_38e8),
+        "actor reference must not be flattened into dynamic_objects"
+    );
+    assert_eq!(package.actors.len(), 1);
+    let actor = &package.actors[0];
+    assert_eq!(actor.reference_form_id, 0x0006_38e8);
+    assert_eq!(actor.base_form_id, 0x0001_cf73);
+    assert_eq!(actor.kind, ActorKind::Humanoid);
+    assert!(actor.initially_enabled);
+}
+
+#[test]
+fn acre_reference_is_prepared_as_a_creature_actor_entry() {
+    let mut parsed = ParsedPlugin::default();
+    let reference = synthetic_actor_reference(ReferenceKind::Creature, 0x0005_1efa, 0x0002_0000);
+    parsed.references.push(reference);
+    parsed.bases = HashMap::from([(
+        0x0002_0000,
+        synthetic_base("CREA", "Creatures\\Radroach\\Radroach.nif"),
+    )])
+    .into();
+    let cell = synthetic_exterior_cell();
+
+    let package = super::build_cell_package(&parsed, &cell, "content", None, false).unwrap();
+
+    assert_eq!(package.actors.len(), 1);
+    assert_eq!(package.actors[0].kind, ActorKind::Creature);
+    assert!(
+        package
+            .dynamic_objects
+            .iter()
+            .all(|object| object.reference_form_id != 0x0005_1efa)
+    );
+}
+
+#[test]
+fn apply_staged_assets_preserves_the_staged_actor_assembly() {
+    let mut parsed = ParsedPlugin::default();
+    let reference = synthetic_actor_reference(ReferenceKind::Npc, 0x0006_38e8, 0x0001_cf73);
+    parsed.references.push(reference);
+    parsed.bases = HashMap::from([(
+        0x0001_cf73,
+        synthetic_base("NPC_", "Creatures\\Eyebot\\Skeleton.nif"),
+    )])
+    .into();
+    let cell = synthetic_exterior_cell();
+    let mut package = super::build_cell_package(&parsed, &cell, "content", None, false).unwrap();
+    assert_eq!(package.actors.len(), 1);
+
+    let blueprint = minimal_actor_blueprint(ActorKind::Humanoid, 0x0006_38e8);
+    let placement = PreparedPlacement {
+        reference_form_id: 0x0006_38e8,
+        base_form_id: 0x0001_cf73,
+        asset_path: Some("actors/eyebot/skeleton.glb".into()),
+        translation: [10.0, 20.0, 30.0],
+        rotation_xyzw: [0.0, 0.0, 0.0, 1.0],
+        scale: 1.0,
+        error: None,
+        physics_asset_path: None,
+        physics_source: None,
+        physics_classification: Default::default(),
+        step_support: false,
+        mutability: Default::default(),
+        mutability_root_form_id: None,
+        reference_kind: "ACHR".into(),
+        base_kind: "NPC_".into(),
+        editor_id: None,
+        display_name: None,
+        count: 1,
+        semantic: PreparedSemantic::Npc(PreparedActor {
+            base_template_form_id: None,
+            assembly: Some(blueprint.clone()),
+        }),
+        initially_enabled: true,
+        enable_parent: None,
+        owner_form_id: None,
+        owner_faction_rank: None,
+        linked_reference_form_id: None,
+        inventory: Vec::new(),
+        audio: Default::default(),
+        ao_mode: "ao-none".into(),
+    };
+
+    super::apply_staged_assets(&mut package, &[placement], &HashMap::new());
+
+    assert_eq!(package.actors[0].assembly, Some(blueprint));
+    assert_eq!(
+        package.actors[0].asset_path.as_deref(),
+        Some("actors/eyebot/skeleton.glb")
+    );
+}
+
+/// Non-actor exterior objects (doors, movable statics) must round-trip
+/// through `apply_staged_assets` exactly as before: only `asset_path`/
+/// `physics_asset_path` are copied off the matching placement.
+#[test]
+fn non_actor_dynamic_object_shape_is_unchanged() {
+    let mut package = ExteriorCellPackage {
+        revision: "test".into(),
+        content_fingerprint: "test".into(),
+        cell_form_id: 1,
+        worldspace_form_id: 2,
+        grid: GridCoordinate::new(0, 0),
+        origin: [0.0; 3],
+        terrain: None,
+        water: None,
+        static_objects: Vec::new(),
+        dynamic_objects: vec![PreparedExteriorObject {
+            reference_form_id: 5,
+            base_form_id: 6,
+            asset_path: None,
+            physics_asset_path: None,
+            door_destination: None,
+            position: [0.0; 3],
+            rotation_xyzw: [0.0, 0.0, 0.0, 1.0],
+            scale: 1.0,
+            initially_enabled: true,
+            persistent: false,
+            dynamic: true,
+            distant: false,
+        }],
+        distant_objects: Vec::new(),
+        actors: Vec::new(),
+        local_lights: Vec::new(),
+        navigation: None,
+        environment: PreparedExteriorEnvironment::default(),
+        diagnostics: Vec::new(),
+    };
+    let placement = PreparedPlacement {
+        reference_form_id: 5,
+        base_form_id: 6,
+        asset_path: Some("assets/door.glb".into()),
+        translation: [0.0; 3],
+        rotation_xyzw: [0.0, 0.0, 0.0, 1.0],
+        scale: 1.0,
+        error: None,
+        physics_asset_path: Some("assets/door.physics.ron".into()),
+        physics_source: None,
+        physics_classification: Default::default(),
+        step_support: false,
+        mutability: Default::default(),
+        mutability_root_form_id: None,
+        reference_kind: "REFR".into(),
+        base_kind: "DOOR".into(),
+        editor_id: None,
+        display_name: None,
+        count: 1,
+        semantic: PreparedSemantic::Static,
+        initially_enabled: true,
+        enable_parent: None,
+        owner_form_id: None,
+        owner_faction_rank: None,
+        linked_reference_form_id: None,
+        inventory: Vec::new(),
+        audio: Default::default(),
+        ao_mode: "ao-none".into(),
+    };
+
+    super::apply_staged_assets(&mut package, &[placement], &HashMap::new());
+
+    assert_eq!(
+        package.dynamic_objects[0].asset_path.as_deref(),
+        Some("assets/door.glb")
+    );
+    assert_eq!(
+        package.dynamic_objects[0].physics_asset_path.as_deref(),
+        Some("assets/door.physics.ron")
+    );
+}
 
 #[test]
 fn unstaged_source_model_is_not_published_as_a_runtime_exterior_asset() {
@@ -38,6 +306,7 @@ fn unstaged_source_model_is_not_published_as_a_runtime_exterior_asset() {
         }],
         dynamic_objects: Vec::new(),
         distant_objects: Vec::new(),
+        actors: Vec::new(),
         local_lights: Vec::new(),
         navigation: None,
         environment: PreparedExteriorEnvironment::default(),

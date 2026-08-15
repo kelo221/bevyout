@@ -26,8 +26,8 @@ use crate::viewer::player::{CellPhysicsReadiness, PhysicsDisabled};
 
 use super::{
     exterior::{
-        exterior_resident_grid_signature, read_resident_exterior_graph,
-        retarget_live_exterior_agents,
+        exterior_resident_grid_signature, observe_resident_nav_cells, read_resident_exterior_graph,
+        resident_border_portals, retarget_live_exterior_agents,
     },
     links::{spawn_exterior_link_pair, spawn_link_pair},
     player_obstacle::spawn_player_nav_character,
@@ -135,14 +135,15 @@ pub(crate) fn ensure_archipelago(world: &mut World) -> Result<(), api::NavError>
     let manifest = world
         .get_resource::<crate::viewer::LoadedSceneManifest>()
         .ok_or_else(no_nav_graph_error)?;
-    let (graph, exterior_packages) = if exterior_mode {
-        read_resident_exterior_graph(world)?
+    let (graph, exterior_packages, exterior_mesh_owners) = if exterior_mode {
+        let resident = read_resident_exterior_graph(world)?;
+        (resident.graph, resident.packages, resident.mesh_owners)
     } else {
         let graph = crate::viewer::nav::read_nav_graph_for_manifest(manifest).map_err(|error| {
             warn!("nav graph read failed for cell {current_cell:08x}: {error:#}");
             no_nav_graph_error()
         })?;
-        (graph, Vec::new())
+        (graph, Vec::new(), Default::default())
     };
     // Issue #164: capture this cell's lowest prepared geometry Y so the fall
     // guard can derive its kill plane from real per-cell bounds rather than a
@@ -167,8 +168,18 @@ pub(crate) fn ensure_archipelago(world: &mut World) -> Result<(), api::NavError>
     let mesh_inputs = crate::viewer::nav::mesh_inputs(&graph);
     let mut merge_inputs = crate::viewer::nav::merge_inputs(&graph);
     let mut border_link_keys = BTreeSet::new();
+    let mut resident_nav_topology = landmass_graph::ResidentNavTopology::default();
     if exterior_mode {
         let border_links = exterior_portal_merge_inputs(&exterior_packages, &graph);
+        // W3-B's pure resident topology, rebuilt (never mutated) from the
+        // current resident set: it is what gates agent retargeting below, so
+        // a cross-cell link is only usable while both generation-exact sides
+        // are valid and navigation-ready.
+        resident_nav_topology.rebuild(
+            &observe_resident_nav_cells(world),
+            &mesh_inputs,
+            &resident_border_portals(&border_links, &exterior_mesh_owners),
+        );
         let border_link_count = border_links.len();
         border_link_keys.extend(border_links.iter().map(|link| {
             (
@@ -578,6 +589,7 @@ pub(crate) fn ensure_archipelago(world: &mut World) -> Result<(), api::NavError>
     *world.resource_mut::<NavArchipelagoState>() = NavArchipelagoState {
         cell_form_id: Some(current_cell),
         exterior_resident_grids,
+        resident_nav_topology: resident_nav_topology.clone(),
         archipelago: Some(archipelago_entity),
         player_character: Some(player_character),
         islands,
@@ -596,7 +608,7 @@ pub(crate) fn ensure_archipelago(world: &mut World) -> Result<(), api::NavError>
     };
     world.resource_mut::<NavCellFallBounds>().min_y = Some(graph_min_y);
     if exterior_mode {
-        retarget_live_exterior_agents(world, archipelago_entity);
+        retarget_live_exterior_agents(world, archipelago_entity, &resident_nav_topology);
     }
     Ok(())
 }

@@ -202,6 +202,33 @@ fn load_actor_catalog(world: &mut World) -> Result<Arc<PreparedActorCatalog>, Co
     Ok(catalog)
 }
 
+/// Resolves the prepared actor catalog that actually carries `key`.
+///
+/// M6 W3-C: an actor streamed in from a neighbouring exterior cell is not in
+/// the startup manifest's catalog, so resolving only through
+/// `LoadedSceneManifest` failed it with `no_actor_catalog`. The multi-cell
+/// [`ActorDefinitionCatalogs`](crate::viewer::actor_state::ActorDefinitionCatalogs)
+/// registry (which the startup cell is inserted into as well) is searched
+/// first, in deterministic cell order; the manifest path remains the fallback
+/// so single-cell behaviour, its validation, and its error codes are
+/// unchanged.
+fn resolve_actor_catalog(
+    world: &mut World,
+    key: &ActorLookupKey,
+) -> Result<Arc<PreparedActorCatalog>, ConsoleError> {
+    let resident = world
+        .get_resource::<crate::viewer::actor_state::ActorDefinitionCatalogs>()
+        .map(|catalogs| catalogs.catalogs())
+        .unwrap_or_default()
+        .into_iter()
+        .find(|(_, catalog)| find_actor_blueprint(catalog, key).is_ok())
+        .map(|(_, catalog)| catalog);
+    match resident {
+        Some(catalog) => Ok(catalog),
+        None => load_actor_catalog(world),
+    }
+}
+
 /// Reads and validates the content-set-wide package catalog
 /// (`catalogs/<fingerprint>/packages.ron`). Its path is fully deterministic
 /// from `source_fingerprint` -- the same construction
@@ -363,7 +390,7 @@ pub(super) fn show_packages(
         }
     };
     let key = resolve_actor_lookup_key(world, selector)?;
-    let actor_catalog = load_actor_catalog(world)?;
+    let actor_catalog = resolve_actor_catalog(world, &key)?;
     let blueprint = find_actor_blueprint(&actor_catalog, &key)?;
 
     if blueprint.package_form_ids.is_empty() {
@@ -549,11 +576,9 @@ pub(crate) fn start_package(
             ),
         ));
     }
-    let actor_catalog = load_actor_catalog(world)?;
-    let blueprint = find_actor_blueprint(
-        &actor_catalog,
-        &ActorLookupKey::Reference(reference_form_id),
-    )?;
+    let key = ActorLookupKey::Reference(reference_form_id);
+    let actor_catalog = resolve_actor_catalog(world, &key)?;
+    let blueprint = find_actor_blueprint(&actor_catalog, &key)?;
     if blueprint.package_form_ids.is_empty() {
         return Err(ConsoleError::new(
             "no_packages",

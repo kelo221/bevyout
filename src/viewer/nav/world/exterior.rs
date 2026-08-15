@@ -1,11 +1,17 @@
+use std::collections::BTreeMap;
+
 use bevy::prelude::*;
 use bevy_landmass::prelude::*;
 use bevyout_core::manifest::exterior::{
-    ExteriorCellLifecycle, ExteriorCellPackage, GridCoordinate,
+    ExteriorCellLifecycle, ExteriorCellPackage, ExteriorCoordinatePolicy, GridCoordinate,
 };
 
 use crate::viewer::nav::agent::NavAgent;
 use crate::viewer::nav::api;
+use crate::viewer::nav::landmass_graph::{
+    MergeInput, ResidentNavCell, ResidentNavCellKey, ResidentNavState, ResidentNavTopology,
+    ResidentPortal,
+};
 use crate::viewer::nav::world::build::no_nav_graph_error;
 use crate::viewer::world::exterior::ExteriorStreamState;
 use crate::vsa::PreparedNavGraph;
@@ -29,14 +35,87 @@ pub(crate) fn exterior_resident_grid_signature(world: &World) -> Vec<GridCoordin
         .collect()
 }
 
+/// The lifecycle-owned view of one resident cell's navigation, in the shape
+/// W3-B's pure resident-topology policy consumes. `Valid` is only reported
+/// with `navigation_ready` when the package's own semantic NAVM artifact is
+/// collision-cleared and present, which is the same condition
+/// [`read_resident_exterior_graph`] requires before admitting a graph.
+pub(crate) fn observe_resident_nav_cells(world: &World) -> Vec<ResidentNavCell> {
+    let Some(state) = world.get_resource::<ExteriorStreamState>() else {
+        return Vec::new();
+    };
+    state
+        .cells
+        .values()
+        .map(|cell| {
+            let navigation_ready = cell.collision_ready
+                && cell.package.as_ref().is_some_and(|package| {
+                    package.navigation.as_ref().is_some_and(|navigation| {
+                        navigation.clearance_ready && navigation.graph_asset_path.is_some()
+                    })
+                });
+            let state = match cell.state.lifecycle {
+                ExteriorCellLifecycle::Unloaded => ResidentNavState::Missing,
+                ExteriorCellLifecycle::Queued | ExteriorCellLifecycle::Loading => {
+                    ResidentNavState::Loading
+                }
+                ExteriorCellLifecycle::Failed => ResidentNavState::Failed,
+                ExteriorCellLifecycle::Evicting => ResidentNavState::Evicting,
+                ExteriorCellLifecycle::Ready | ExteriorCellLifecycle::Resident => {
+                    ResidentNavState::Valid { navigation_ready }
+                }
+            };
+            ResidentNavCell {
+                key: ResidentNavCellKey {
+                    cell_form_id: cell.state.cell_form_id,
+                    generation: cell.state.generation,
+                },
+                state,
+            }
+        })
+        .collect()
+}
+
+/// Pairs each cross-cell border link with the two generation-exact resident
+/// cells that own its meshes. A link whose mesh owner is unknown is dropped
+/// rather than guessed: an unowned side can never be proven still valid.
+pub(crate) fn resident_border_portals(
+    border_links: &[MergeInput],
+    mesh_owners: &BTreeMap<u32, ResidentNavCellKey>,
+) -> Vec<ResidentPortal> {
+    border_links
+        .iter()
+        .filter_map(|merge| {
+            let side_a = *mesh_owners.get(&merge.mesh_a_form_id)?;
+            let side_b = *mesh_owners.get(&merge.mesh_b_form_id)?;
+            Some(ResidentPortal {
+                side_a,
+                side_b,
+                merge: *merge,
+            })
+        })
+        .collect()
+}
+
 /// Reads every collision-ready resident exterior graph into one landmass
 /// input. The package lifecycle is the ownership authority: a graph is never
 /// admitted while its package is still loading or its BoxDDD collider is not
 /// attached. This also makes a newly resident neighbor visible to the next
 /// `tna` command without rebuilding from only the active manifest.
+/// One resident-set read: the combined graph, the packages it came from, and
+/// which generation-exact resident cell owns each NAVM mesh. The ownership map
+/// is what lets a cross-cell border link be validated against the W3-B
+/// resident topology instead of being trusted for as long as the archipelago
+/// exists.
+pub(crate) struct ResidentExteriorGraph {
+    pub(crate) graph: PreparedNavGraph,
+    pub(crate) packages: Vec<(GridCoordinate, ExteriorCellPackage)>,
+    pub(crate) mesh_owners: BTreeMap<u32, ResidentNavCellKey>,
+}
+
 pub(crate) fn read_resident_exterior_graph(
     world: &World,
-) -> Result<(PreparedNavGraph, Vec<(GridCoordinate, ExteriorCellPackage)>), api::NavError> {
+) -> Result<ResidentExteriorGraph, api::NavError> {
     let state = world.get_resource::<ExteriorStreamState>().ok_or_else(|| {
         api::NavError::new(
             "exterior_nav_not_ready",
@@ -59,9 +138,14 @@ pub(crate) fn read_resident_exterior_graph(
                     ExteriorCellLifecycle::Ready | ExteriorCellLifecycle::Resident
                 )
         })
-        .filter_map(|(grid, cell)| cell.package.clone().map(|package| (*grid, package)))
+        .filter_map(|(grid, cell)| {
+            cell.package
+                .clone()
+                .map(|package| (*grid, package, cell.state.generation))
+        })
         .collect::<Vec<_>>();
-    residents.sort_by_key(|(grid, package)| (*grid, package.cell_form_id));
+    residents.sort_by_key(|(grid, package, _)| (*grid, package.cell_form_id));
+    let mut mesh_owners = BTreeMap::new();
     if residents.is_empty() {
         return Err(api::NavError::new(
             "exterior_nav_not_ready",
@@ -70,7 +154,7 @@ pub(crate) fn read_resident_exterior_graph(
     }
 
     let mut combined = None;
-    for (_grid, package) in &residents {
+    for (_grid, package, generation) in &residents {
         let Some(navigation) = package.navigation.as_ref() else {
             return Err(api::NavError::new(
                 "exterior_nav_not_ready",
@@ -103,6 +187,15 @@ pub(crate) fn read_resident_exterior_graph(
                 ),
             )
         })?;
+        for mesh in &graph.meshes {
+            mesh_owners.insert(
+                mesh.form_id,
+                ResidentNavCellKey {
+                    cell_form_id: package.cell_form_id,
+                    generation: *generation,
+                },
+            );
+        }
         if let Some(target) = combined.as_mut() {
             append_exterior_nav_graph(target, graph);
         } else {
@@ -113,7 +206,14 @@ pub(crate) fn read_resident_exterior_graph(
     if let Some(current) = state.cells.get(&state.current_grid) {
         combined.cell_form_id = current.state.cell_form_id;
     }
-    Ok((combined, residents))
+    Ok(ResidentExteriorGraph {
+        graph: combined,
+        packages: residents
+            .into_iter()
+            .map(|(grid, package, _)| (grid, package))
+            .collect(),
+        mesh_owners,
+    })
 }
 
 pub(crate) fn append_exterior_nav_graph(target: &mut PreparedNavGraph, source: PreparedNavGraph) {
@@ -171,15 +271,77 @@ pub(crate) fn append_exterior_nav_graph(target: &mut PreparedNavGraph, source: P
 /// untouched; only the landmass ownership reference changes. Cell swaps use
 /// the existing ledger path instead because those agents may need a door
 /// marker or frozen-position restore in a different active manifest.
-pub(crate) fn retarget_live_exterior_agents(world: &mut World, archipelago_entity: Entity) {
+pub(crate) fn retarget_live_exterior_agents(
+    world: &mut World,
+    archipelago_entity: Entity,
+    topology: &ResidentNavTopology,
+) {
+    // W3-C defect fix: the resident topology, not the mere fact that a
+    // rebuild happened, decides whether an agent may be re-pointed. An agent
+    // standing in a cell that is evicting, still loading, or already on a
+    // newer generation would otherwise adopt an archipelago its own island is
+    // not (or no longer) part of, mid border crossing.
+    let Some(archipelago) = topology.archipelago.as_ref() else {
+        warn!("exterior nav retarget skipped: no navigation-ready resident cell");
+        return;
+    };
+    let ready = archipelago
+        .resident_cells
+        .iter()
+        .copied()
+        .collect::<std::collections::BTreeSet<_>>();
+    let policy = ExteriorCoordinatePolicy::default();
     let mut agents = world
         .query_filtered::<Entity, With<NavAgent>>()
         .iter(world)
         .collect::<Vec<_>>();
     agents.sort_unstable_by_key(|entity| entity.index_u32());
     for entity in agents {
+        let position = world
+            .get::<GlobalTransform>(entity)
+            .map(|transform| transform.translation());
+        let Some(position) = position else {
+            continue;
+        };
+        let grid = policy.grid_for_bevy([
+            f64::from(position.x),
+            f64::from(position.y),
+            f64::from(position.z),
+        ]);
+        let key = world
+            .get_resource::<ExteriorStreamState>()
+            .and_then(|state| state.cells.get(&grid))
+            .map(|cell| ResidentNavCellKey {
+                cell_form_id: cell.state.cell_form_id,
+                generation: cell.state.generation,
+            });
+        let Some(key) = key.filter(|key| ready.contains(key)) else {
+            warn!(
+                "exterior nav retarget skipped for agent {entity:?}: grid {},{} is not a navigation-ready resident generation",
+                grid.x, grid.y
+            );
+            // Issue #305 review: an agent that already held a reference into
+            // an archipelago whose grid has since fallen out of the ready
+            // set (e.g. mid-eviction) must not keep pointing at it --
+            // `teardown_archipelago` despawns the archipelago entity without
+            // touching agents' component references to it.
+            if let Ok(mut agent) = world.get_entity_mut(entity)
+                && agent.contains::<ArchipelagoRef3d>()
+            {
+                agent.remove::<ArchipelagoRef3d>();
+            }
+            continue;
+        };
         if let Ok(mut agent) = world.get_entity_mut(entity) {
             agent.insert(ArchipelagoRef3d::new(archipelago_entity));
         }
+        debug!(
+            "exterior nav retarget agent {entity:?} cell={:08x} generation={}",
+            key.cell_form_id, key.generation
+        );
     }
 }
+
+#[cfg(test)]
+#[path = "exterior_tests.rs"]
+mod tests;

@@ -34,7 +34,12 @@ pub(crate) const CURRENT_MANIFEST_SCHEMA_VERSION: u32 = 28;
 /// marker retention now change prepared placement meaning.
 /// Bumped for Lane C issue #290: authored IDLE definitions and their
 /// animation-catalog meaning are now part of prepared content.
-pub(crate) const CURRENT_PREPARE_REVISION: &str = "prepare-v27-compact-exterior-scene-root";
+/// Bumped for issue #299 (M6 W3-C stage 1): the exterior prepare path now
+/// populates `actor_catalog_path`/`actor_animation_catalog_path` instead of
+/// hardcoding `None`, and the exterior package's ACHR/ACRE references carry
+/// a resolved actor assembly. A stale exterior `scene.ron` would otherwise
+/// decode cleanly with no actor catalog pointer and no gameplay actors.
+pub(crate) const CURRENT_PREPARE_REVISION: &str = "prepare-v28-exterior-actor-catalog";
 pub(crate) const CURRENT_BAKE_REVISION: &str = "rust-cpu-irradiance-v16-material-extensions-local-thickness-emissive-quarter-cap-shader-emission-gate-v2-physical-effect-bulb-v1-effect-emission-control-v1-light-card-promotion-v1-env-light-emission-v1-17f5769-lighting-contract-v1-uv1-vendored-xatlas-v1-direct-surface-lightmaps-v7-edge-supersample-two-bounce-shared-volume-geometry-aware-ray-bias-invalid-normal-v1-in-tree-rgba16f-rgb9e5-ktx2-v1-adaptive-sampling-v1-feature-guided-atrous-denoise-v1-spot-cone-v1-configurable-bounces-v1-density-overrides-v1-partial-primitive-light-invalidation-v1-debug-images-v1-area-emissive-mis-rr-variance-v1-variance-manifest-v1-environment-map-hdr-v1-environment-mis-v1-linear-factor-env-single-count-solari-transport-v2-solari-p1-transport-correctness-v1-overlay-exclusion-v1";
 pub(crate) const STATIC_POINT_SHADOW_REVISION: &str =
     "bvh-d32-v8-light-cards-v1-overlay-exclusion-v1";

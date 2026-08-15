@@ -253,6 +253,12 @@ fn status_value(state: &ExteriorStreamState, memory: ProcessMemoryReport) -> Val
         "stale_completions": state.stale_completions,
         "failures": state.failures,
         "invalid_unload_count": state.invalid_unload_count,
+        "actors": state
+            .cells
+            .values()
+            .filter_map(|cell| cell.package.as_ref())
+            .map(|package| package.actors.len())
+            .sum::<usize>(),
         "collision_tracked": state.collision_cells.len(),
         "collision_pending": state
             .cells
@@ -352,6 +358,13 @@ pub(crate) fn cells(state: &ExteriorStreamState) -> serde_json::Value {
                     "generation": cell.state.generation,
                     "bytes": cell.state.estimated_bytes,
                     "collision_ready": cell.collision_ready,
+                    // Prepared gameplay actors (`ACHR`/`ACRE`) this cell
+                    // carries (M6 W3-C). The live canonical projection is
+                    // reported by the `actorresidency` command.
+                    "actors": cell
+                        .package
+                        .as_ref()
+                        .map_or(0, |package| package.actors.len()),
                 })
             })
             .collect(),
