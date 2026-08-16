@@ -10,7 +10,8 @@ pub(crate) mod policy;
 
 pub(crate) use fs_store::FsPreparedObjectStore;
 pub(crate) use model::{
-    CandidateObject, PreparedObjectKind, PreparedObjectStore, PreparedRecipeInputs,
+    CandidateObject, PreparedObjectKind, PreparedObjectRef, PreparedObjectStore,
+    PreparedRecipeInputs, PreparedRecipeRecord,
 };
 pub(crate) use policy::normalize_source_path;
 

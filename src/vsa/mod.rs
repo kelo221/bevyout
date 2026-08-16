@@ -2,6 +2,7 @@ mod assets;
 mod audio_assets;
 mod bake;
 mod bsa;
+mod cache_gc;
 mod cache_stats;
 mod cache_store;
 mod catalog;

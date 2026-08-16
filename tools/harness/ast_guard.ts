@@ -49,7 +49,8 @@ function shouldScan(path: string): boolean {
 		normalized.includes("/cli/") ||
 		normalized === "src/vsa/catalog.rs" ||
 		normalized.includes("src/vsa/bake/") ||
-		normalized.includes("src/vsa/cache_stats/")
+		normalized.includes("src/vsa/cache_stats/") ||
+		normalized.includes("src/vsa/cache_gc/")
 	) return false;
 	return normalized.startsWith("src/") || normalized.startsWith("crates/");
 }

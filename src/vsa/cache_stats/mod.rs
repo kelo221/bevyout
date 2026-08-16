@@ -4,7 +4,10 @@ mod output;
 pub(crate) mod policy;
 pub(crate) mod scan;
 
-use crate::cli::{CacheArgs, CacheCommand, CacheStatsArgs};
+use crate::{
+    cli::{CacheArgs, CacheCommand, CacheStatsArgs},
+    vsa::cache_gc,
+};
 use anyhow::Result;
 use model::{CACHE_STATS_SCHEMA_VERSION, CacheFileReport, CacheStatsReport};
 use policy::{CacheFileFacts, classify_cache_path, summarize_cache_files};
@@ -13,6 +16,7 @@ use std::collections::BTreeMap;
 pub fn cache(args: CacheArgs) -> Result<()> {
     match args.command {
         CacheCommand::Stats(args) => cache_stats(args),
+        CacheCommand::Gc(args) => cache_gc::cache_gc(args),
     }
 }
 

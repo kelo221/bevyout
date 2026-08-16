@@ -78,6 +78,10 @@ mod cache_stats_policy;
 #[allow(dead_code, unused_imports)]
 mod cache_store_policy;
 
+#[path = "../src/vsa/cache_gc/policy.rs"]
+#[allow(dead_code, unused_imports)]
+mod cache_gc_policy;
+
 #[path = "../src/vsa/prepare/exterior_scene_policy.rs"]
 #[allow(dead_code, unused_imports)]
 mod exterior_scene_policy;
@@ -1263,6 +1267,10 @@ struct BevyoutWorld {
     w3c_live: Vec<exterior_actor_plan::PlannedLiveActor>,
     w3c_plan: Vec<exterior_actor_plan::PlannedRequest>,
     w3c_max_owners: usize,
+
+    // -- cache_gc.feature (prepared-cache compression Wave 8) --
+    cache_gc_facts: Option<cache_gc_policy::CacheEntryFacts>,
+    cache_gc_reason: Option<cache_gc_policy::GcReason>,
 }
 
 fn synthetic_dialogue_source() -> dialogue::DialogueSource {
@@ -17945,4 +17953,89 @@ async fn then_w3c_single_owner(world: &mut BevyoutWorld, actor: String) {
         "no duplicate projection may ever be observed"
     );
     assert!(world.w3c_max_owners <= 1);
+}
+
+// ---------------------------------------------------------------------
+// cache_gc.feature -- reachability and grace-period retention policy.
+// ---------------------------------------------------------------------
+
+#[given(regex = r"^a reachable cache object that is (\d+) hours old$")]
+async fn given_reachable_cache_object(world: &mut BevyoutWorld, hours: u64) {
+    world.cache_gc_facts = Some(cache_gc_policy::CacheEntryFacts {
+        class: cache_gc_policy::CacheEntryClass::Object,
+        reachable: true,
+        age_seconds: hours.saturating_mul(3600),
+    });
+}
+
+#[given(regex = r"^an unreachable cache object that is (\d+) hours old$")]
+async fn given_unreachable_cache_object(world: &mut BevyoutWorld, hours: u64) {
+    world.cache_gc_facts = Some(cache_gc_policy::CacheEntryFacts {
+        class: cache_gc_policy::CacheEntryClass::Object,
+        reachable: false,
+        age_seconds: hours.saturating_mul(3600),
+    });
+}
+
+#[given(regex = r"^an unreachable quarantined cache entry that is (\d+) hours old$")]
+async fn given_unreachable_quarantined_cache_entry(world: &mut BevyoutWorld, hours: u64) {
+    world.cache_gc_facts = Some(cache_gc_policy::CacheEntryFacts {
+        class: cache_gc_policy::CacheEntryClass::Quarantine,
+        reachable: false,
+        age_seconds: hours.saturating_mul(3600),
+    });
+}
+
+#[given(regex = r"^an unreachable rebuildable cache asset that is (\d+) hours old$")]
+async fn given_unreachable_rebuildable_cache_asset(world: &mut BevyoutWorld, hours: u64) {
+    world.cache_gc_facts = Some(cache_gc_policy::CacheEntryFacts {
+        class: cache_gc_policy::CacheEntryClass::RebuildableAsset,
+        reachable: false,
+        age_seconds: hours.saturating_mul(3600),
+    });
+}
+
+#[when(regex = r"^cache garbage collection is planned with a (\d+) hour grace period$")]
+async fn when_cache_gc_is_planned(world: &mut BevyoutWorld, hours: u64) {
+    world.cache_gc_reason = cache_gc_policy::gc_reason(
+        world.cache_gc_facts.expect("cache GC facts"),
+        cache_gc_policy::GcPolicy {
+            grace_seconds: hours.saturating_mul(3600),
+            include_rebuildable: false,
+        },
+    );
+}
+
+#[when(
+    regex = r"^cache garbage collection is planned with rebuildable assets and a (\d+) hour grace period$"
+)]
+async fn when_cache_gc_with_rebuildable_is_planned(world: &mut BevyoutWorld, hours: u64) {
+    world.cache_gc_reason = cache_gc_policy::gc_reason(
+        world.cache_gc_facts.expect("cache GC facts"),
+        cache_gc_policy::GcPolicy {
+            grace_seconds: hours.saturating_mul(3600),
+            include_rebuildable: true,
+        },
+    );
+}
+
+#[then("the cache entry is retained")]
+async fn then_cache_entry_is_retained(world: &mut BevyoutWorld) {
+    assert_eq!(world.cache_gc_reason, None);
+}
+
+#[then("the cache entry is selected as an unreferenced object")]
+async fn then_cache_entry_is_unreferenced_object(world: &mut BevyoutWorld) {
+    assert_eq!(
+        world.cache_gc_reason,
+        Some(cache_gc_policy::GcReason::UnreferencedObject)
+    );
+}
+
+#[then("the cache entry is selected as an unreferenced rebuildable asset")]
+async fn then_cache_entry_is_unreferenced_rebuildable_asset(world: &mut BevyoutWorld) {
+    assert_eq!(
+        world.cache_gc_reason,
+        Some(cache_gc_policy::GcReason::UnreferencedRebuildableAsset)
+    );
 }

@@ -82,6 +82,99 @@ pub(super) fn scan_cache(cache_root: &Path, manifest_set: Option<&Path>) -> Resu
     })
 }
 
+pub(crate) fn collect_live_cache_files(cache_root: &Path) -> Result<BTreeSet<PathBuf>> {
+    let cache_root = fs::canonicalize(cache_root)
+        .with_context(|| format!("could not resolve cache root {}", cache_root.display()))?;
+    let mut selected = BTreeSet::new();
+
+    let scenes = cache_root.join("scenes");
+    if scenes.is_dir() {
+        let mut entries = fs::read_dir(&scenes)?.collect::<std::io::Result<Vec<_>>>()?;
+        entries.sort_by_key(|entry| entry.file_name());
+        for entry in entries {
+            let manifest = entry.path().join("scene.ron");
+            if manifest.is_file() {
+                select_scene_manifest(&cache_root, &manifest, &mut selected)?;
+            }
+        }
+    }
+
+    // Top-level RON files are authoritative catalogs, resumable job roots,
+    // or retained indexes. Parse their file references without treating the
+    // whole cache root as live.
+    let mut top_level = fs::read_dir(&cache_root)?.collect::<std::io::Result<Vec<_>>>()?;
+    top_level.sort_by_key(|entry| entry.file_name());
+    for entry in top_level {
+        let path = entry.path();
+        if path.is_file()
+            && path
+                .extension()
+                .and_then(|extension| extension.to_str())
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("ron"))
+        {
+            select_ron_root_and_references(&cache_root, &path, &mut selected)?;
+        }
+    }
+
+    let worldspaces = cache_root.join("worldspaces");
+    if worldspaces.is_dir() {
+        let mut entries = fs::read_dir(&worldspaces)?.collect::<std::io::Result<Vec<_>>>()?;
+        entries.sort_by_key(|entry| entry.file_name());
+        for entry in entries {
+            select_worldspace_index(&cache_root, &entry.path().join("index.ron"), &mut selected)?;
+        }
+    }
+
+    let mut directories = BTreeSet::new();
+    let mut files = BTreeSet::new();
+    for path in selected {
+        walk_path(&path, &mut directories, &mut files)?;
+    }
+    expand_transitive_file_references(&cache_root, &mut files)?;
+    Ok(files)
+}
+
+fn expand_transitive_file_references(
+    cache_root: &Path,
+    selected: &mut BTreeSet<PathBuf>,
+) -> Result<()> {
+    let mut pending = selected.iter().cloned().collect::<Vec<_>>();
+    let mut inspected = BTreeSet::new();
+    while let Some(path) = pending.pop() {
+        if !inspected.insert(path.clone()) {
+            continue;
+        }
+        let extension = path
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .unwrap_or_default();
+        let discovered = if extension.eq_ignore_ascii_case("ron") {
+            let source = fs::read_to_string(&path)
+                .with_context(|| format!("could not read live RON root {}", path.display()))?;
+            let value: ron::Value = ron::from_str(&source)
+                .with_context(|| format!("could not parse live RON root {}", path.display()))?;
+            let mut references = Vec::new();
+            collect_ron_strings(&value, &mut references);
+            references
+                .into_iter()
+                .filter_map(|value| {
+                    resolve_selected_file(cache_root, path.parent().unwrap_or(cache_root), value)
+                })
+                .collect::<Vec<_>>()
+        } else if extension.eq_ignore_ascii_case("glb") {
+            glb_external_references(cache_root, &path)?
+        } else {
+            Vec::new()
+        };
+        for reference in discovered {
+            if selected.insert(reference.clone()) {
+                pending.push(reference);
+            }
+        }
+    }
+    Ok(())
+}
+
 pub(super) fn expand_glb_external_references(
     cache_root: &Path,
     selected: &mut BTreeSet<PathBuf>,

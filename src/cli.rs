@@ -79,6 +79,9 @@ pub(crate) enum CacheCommand {
     /// Measure logical, allocated, categorized, and duplicate prepared-cache bytes.
     #[command(name = "stats")]
     Stats(CacheStatsArgs),
+    /// Remove unreachable generated artifacts after reachability and grace checks.
+    #[command(name = "gc")]
+    Gc(CacheGcArgs),
 }
 
 #[derive(Parser, Debug, Clone)]
@@ -95,6 +98,25 @@ pub struct CacheStatsArgs {
     /// Write the deterministic per-file inventory as CSV.
     #[arg(long, value_name = "FILE.csv")]
     pub(crate) csv: Option<PathBuf>,
+}
+
+#[derive(Parser, Debug, Clone)]
+pub(crate) struct CacheGcArgs {
+    /// Prepared cache root.
+    #[arg(long, default_value = ".bevyout/cache", value_name = "DIR")]
+    pub(crate) cache: PathBuf,
+    /// Report candidates without deleting them.
+    #[arg(long)]
+    pub(crate) dry_run: bool,
+    /// Retain unreachable files newer than this many hours.
+    #[arg(long, default_value_t = 168, value_name = "HOURS")]
+    pub(crate) grace_hours: u64,
+    /// Also remove unreachable, reproducible files beneath assets/.
+    #[arg(long)]
+    pub(crate) include_rebuildable: bool,
+    /// Write the deterministic candidate inventory as JSON.
+    #[arg(long, value_name = "FILE.json")]
+    pub(crate) json: Option<PathBuf>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]

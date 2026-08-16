@@ -770,7 +770,9 @@ fn cache_stats_contract_parses() {
     let CommandLine::Cache(args) = cli.command else {
         panic!("expected cache command");
     };
-    let CacheCommand::Stats(args) = args.command;
+    let CacheCommand::Stats(args) = args.command else {
+        panic!("expected cache stats command");
+    };
     assert_eq!(args.cache, PathBuf::from("prepared-cache"));
     assert_eq!(
         args.manifest_set.as_deref(),
@@ -778,4 +780,33 @@ fn cache_stats_contract_parses() {
     );
     assert_eq!(args.json.as_deref(), Some(Path::new("reports/cache.json")));
     assert_eq!(args.csv.as_deref(), Some(Path::new("reports/cache.csv")));
+}
+
+#[test]
+fn cache_gc_contract_parses() {
+    let cli = Cli::try_parse_from([
+        "bevyout",
+        "cache",
+        "gc",
+        "--cache",
+        "prepared-cache",
+        "--dry-run",
+        "--grace-hours",
+        "24",
+        "--include-rebuildable",
+        "--json",
+        "reports/gc.json",
+    ])
+    .unwrap();
+    let CommandLine::Cache(args) = cli.command else {
+        panic!("expected cache command");
+    };
+    let CacheCommand::Gc(args) = args.command else {
+        panic!("expected cache gc command");
+    };
+    assert_eq!(args.cache, PathBuf::from("prepared-cache"));
+    assert!(args.dry_run);
+    assert_eq!(args.grace_hours, 24);
+    assert!(args.include_rebuildable);
+    assert_eq!(args.json.as_deref(), Some(Path::new("reports/gc.json")));
 }

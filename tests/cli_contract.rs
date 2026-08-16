@@ -33,6 +33,25 @@ fn cache_stats_subcommand_exposes_inventory_outputs() {
 }
 
 #[test]
+fn cache_gc_subcommand_exposes_retention_controls() {
+    let output = run_cli(&["cache", "gc", "--help"]);
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    for flag in [
+        "--cache",
+        "--dry-run",
+        "--grace-hours",
+        "--include-rebuildable",
+        "--json",
+    ] {
+        assert!(
+            stdout.contains(flag),
+            "cache gc --help should mention {flag}"
+        );
+    }
+}
+
+#[test]
 fn script_runner_reports_success_failure_and_writes_transcripts() {
     let directory = std::env::temp_dir().join(format!("bevyout-script-cli-{}", std::process::id()));
     std::fs::create_dir_all(&directory).unwrap();
