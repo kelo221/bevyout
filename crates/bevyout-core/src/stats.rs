@@ -58,7 +58,7 @@ pub const TAG_SKILL_BONUS: u8 = 15;
 /// Luck contributes `ceil(luck / 2)` to every skill base.
 #[must_use]
 pub fn luck_skill_bonus(luck: u8) -> u8 {
-    (luck.clamp(SPECIAL_MIN, SPECIAL_MAX) + 1) / 2
+    luck.clamp(SPECIAL_MIN, SPECIAL_MAX).div_ceil(2)
 }
 
 /// A decoded `GMST` record value. The variant follows the setting's
@@ -183,10 +183,10 @@ impl GmstSettings {
                 if let Some(v) = value.as_i32() {
                     settings.level_up_skill_points = v.clamp(0, 100) as u8;
                 }
-            } else if matches(GMST_XP_BASE) {
-                if let Some(v) = value.as_i32() {
-                    settings.xp_base = v.clamp(1, 1_000_000) as u32;
-                }
+            } else if matches(GMST_XP_BASE)
+                && let Some(v) = value.as_i32()
+            {
+                settings.xp_base = v.clamp(1, 1_000_000) as u32;
             }
         }
         settings
@@ -370,7 +370,7 @@ impl CharacterSheet {
     }
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq)]
 pub struct DerivedAttributes {
     pub max_health: f32,
     pub max_action_points: f32,

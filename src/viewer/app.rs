@@ -75,6 +75,10 @@ pub(crate) fn run_view(manifest_path: PathBuf, options: RunViewOptions) -> Resul
     let actor_animation_catalog =
         actor_animation::load_catalog_for_manifest(&manifest, &asset_root)?;
     let screen_fx_catalog = screen_fx::load_catalog_for_manifest(&manifest, &asset_root)?;
+    // M9 wave 1 (#310): GMST settings for the stat kernels; unlike the
+    // catalogs above, a missing or stale gmst catalog falls back to GOTY
+    // defaults instead of failing startup.
+    let stats_settings = stats::load_settings_for_manifest(&manifest, &asset_root);
     // Issue #60 (F60.3): load and compatibility-check the save slot before
     // any window exists, so a mismatched save fails fast with a plain error.
     let loaded_save = save_slot
@@ -164,6 +168,7 @@ pub(crate) fn run_view(manifest_path: PathBuf, options: RunViewOptions) -> Resul
     }
     app.insert_resource(actor_animation_catalogs);
     app.insert_resource(screen_fx_catalog);
+    app.insert_resource(stats_settings);
     // F51.4: `[world] resident_cell_limit` in `.bevyout/config.toml` (or the
     // user config) remains the conservative interior graph-preload budget.
     // `[world]` limits are intentionally separate: interior preloading keeps

@@ -18160,7 +18160,7 @@ async fn then_rpg_clamped_resistance(world: &mut BevyoutWorld, expected: String)
 
 #[then(regex = r"^the base poison resistance from endurance (\d+) is (\d+) basis points$")]
 async fn then_rpg_base_poison_resistance(
-    world: &mut BevyoutWorld,
+    _world: &mut BevyoutWorld,
     endurance: String,
     expected: String,
 ) {
