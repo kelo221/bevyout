@@ -101,4 +101,52 @@ dependency order #309 → #308 → #310.
 
 ## Shipped amendments
 
-(none yet)
+### A1 — real-data GMST corrections (#308, #309)
+
+Real-data acceptance against the installed GOTY `Fallout3.esm` corrected
+the roadmap's assumed setting names, defaults, and two formula shapes:
+
+- Setting names: `fAVDActionPointsBase`/`fAVDActionPointsMult`,
+  `fAVDCarryWeightsBase`/`fAVDCarryWeightMult` (plural "Weights" on the
+  base), `iLevelUpSkillPointsBase`/`iLevelUpSkillPointsInterval`,
+  `iXPBumpBase`. There is no `iAVDHealthBase`: the HP base is the engine's
+  composed 90+10 constant, kept as a fixed kernel `health_base = 100`.
+- XP curve is not `(N-1)N/2 × iXPBase`: the step requirement grows by
+  `iXPBumpBase` (150) each level — cumulative
+  `(N-1)×iXPBase + (N-1)(N-2)/2×iXPBumpBase` with `iXPBase=200`
+  (200 / 550 / 1050 / … / 66 700 at level 30).
+- Max HP's level term is `(level-1) × fAVDHealthLevelMult` (ESM value 10.0).
+- Skill points per level is GMST-driven
+  `iLevelUpSkillPointsBase + (INT-1) × iLevelUpSkillPointsInterval`
+  (defaults 11 and 1 — identical to the planned `10 + INT`).
+- The `GECK-Notes` "All Gamesettings" dump turned out to carry New Vegas
+  values (`fAVDHealthLevelMult=5`, `fAVDActionPointsMult=3`); the actual
+  ESM says 10 and 2. Kernels now consume the catalog, so content wins.
+- `iMaxPlayerLevel` is a Broken Steel setting absent from the base ESM;
+  the fallback default stays at the GOTY cap 30 (prepare consumes 9 of the
+  11 known names on this content set).
+
+### A2 — `experience_award_listener` folded into the award path (#310)
+
+The planned listener system would have had no producer in wave 1 (the
+console is the only XP source, and it must return the outcome
+synchronously), so awarding lives in `stats_commands::apply_award` through
+the canonical kernel and the `Experience` projection. Revisit when scripted
+or quest XP (M7+) needs a second producer.
+
+### A3 — console scenarios live in viewer console tests (#310)
+
+The cucumber `World` is a pure-kernel harness; driving Bevy console
+commands from it would need the full app. `features/rpg_stats.feature`
+therefore covers the kernels (9 scenarios), and the console behavior
+(including clamps, cap errors, and synchronous derived reads) is covered by
+five tests in `src/viewer/console/tests.rs` against the real provider
+registration.
+
+### A4 — clippy 1.98 drift fixes ride this branch
+
+rustc 1.98.0 (2026-08-18) shipped new lints (`chunks_exact_to_as_chunks`,
+stricter `manual_div_ceil`/`collapsible_if`, unused imports in test files)
+that made the gate fail on untouched files; an isolated commit on the wave
+branch fixes them mechanically so `cargo clippy --all-targets -- -D
+warnings` passes again.
