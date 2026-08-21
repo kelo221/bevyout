@@ -49,6 +49,13 @@ mod item_transaction {
 mod actor_state {
     pub use bevyout_core::actor_state::*;
 }
+
+// M9/#309 pure SPECIAL, skill, derived-stat, and leveling kernels live in
+// the same engine-independent core boundary.
+#[allow(dead_code, unused_imports)]
+mod stats {
+    pub use bevyout_core::stats::*;
+}
 // M6 wave 3's actor-residency policy is pure and dependency-light. Include
 // the production seam verbatim so the executable feature coverage exercises
 // the same canonical identity and handoff decisions as the viewer.
@@ -1263,6 +1270,12 @@ struct BevyoutWorld {
     w3c_live: Vec<exterior_actor_plan::PlannedLiveActor>,
     w3c_plan: Vec<exterior_actor_plan::PlannedRequest>,
     w3c_max_owners: usize,
+
+    // -- rpg_stats.feature (M9 W1 #309 pure stat kernels) --
+    rpg_sheet: stats::CharacterSheet,
+    rpg_settings: stats::GmstSettings,
+    rpg_last_award: Option<stats::AwardXpOutcome>,
+    rpg_clamped_resistance_bps: u32,
 }
 
 fn synthetic_dialogue_source() -> dialogue::DialogueSource {
@@ -17945,4 +17958,214 @@ async fn then_w3c_single_owner(world: &mut BevyoutWorld, actor: String) {
         "no duplicate projection may ever be observed"
     );
     assert!(world.w3c_max_owners <= 1);
+}
+
+// ---------------------------------------------------------------------
+// rpg_stats.feature -- M9 W1 pure SPECIAL/skill/derived/leveling kernels.
+// ---------------------------------------------------------------------
+
+/// Maps a Gherkin skill label like "small guns" onto the core enum.
+fn rpg_skill(label: &str) -> actor_state::ActorSkill {
+    match actor_state::ActorValue::parse(&label.replace(' ', "_")) {
+        Some(actor_state::ActorValue::Skill(skill)) => skill,
+        other => panic!("unknown skill label {label:?} (parsed {other:?})"),
+    }
+}
+
+/// Maps a Gherkin attribute label like "strength" onto the core enum.
+fn rpg_special(label: &str) -> actor_state::SpecialAttribute {
+    match actor_state::ActorValue::parse(label) {
+        Some(actor_state::ActorValue::Special(attribute)) => attribute,
+        other => panic!("unknown SPECIAL label {label:?} (parsed {other:?})"),
+    }
+}
+
+#[given(regex = r"^a player sheet with all SPECIAL at 5 and luck at (\d+)$")]
+async fn given_rpg_player_sheet(world: &mut BevyoutWorld, luck: String) {
+    world.rpg_sheet = stats::CharacterSheet::default();
+    world.rpg_settings = stats::GmstSettings::default();
+    world.rpg_last_award = None;
+    world.rpg_sheet.set_special(
+        actor_state::SpecialAttribute::Luck,
+        luck.parse::<u8>().unwrap(),
+    );
+}
+
+#[when(regex = r"^the player tags the ([a-z ]+?) skill$")]
+async fn when_rpg_tag_skill(world: &mut BevyoutWorld, label: String) {
+    world.rpg_sheet.tagged_skills.insert(rpg_skill(&label));
+}
+
+#[when(regex = r"^the player reaches level (\d+) with endurance (\d+) and strength (\d+)$")]
+async fn when_rpg_reaches_level(
+    world: &mut BevyoutWorld,
+    level: String,
+    endurance: String,
+    strength: String,
+) {
+    world.rpg_sheet.level = level.parse::<u8>().unwrap();
+    world.rpg_sheet.set_special(
+        actor_state::SpecialAttribute::Endurance,
+        endurance.parse::<u8>().unwrap(),
+    );
+    world.rpg_sheet.set_special(
+        actor_state::SpecialAttribute::Strength,
+        strength.parse::<u8>().unwrap(),
+    );
+}
+
+#[when(regex = r"^the player is awarded (\d+) XP$")]
+async fn when_rpg_award_xp(world: &mut BevyoutWorld, amount: String) {
+    let outcome = stats::award_xp(
+        &mut world.rpg_sheet,
+        amount.parse::<u32>().unwrap(),
+        &world.rpg_settings,
+    );
+    world.rpg_last_award = Some(outcome);
+}
+
+#[when(regex = r"^the player strength is raised by (\d+) and reduced by (\d+)$")]
+async fn when_rpg_strength_raised_and_reduced(
+    world: &mut BevyoutWorld,
+    raised: String,
+    reduced: String,
+) {
+    world.rpg_sheet.mod_special(
+        actor_state::SpecialAttribute::Strength,
+        raised.parse::<i16>().unwrap(),
+    );
+    world.rpg_sheet.mod_special(
+        actor_state::SpecialAttribute::Strength,
+        -reduced.parse::<i16>().unwrap(),
+    );
+}
+
+#[when(regex = r"^the player spends (\d+) skill points on the ([a-z ]+?) skill$")]
+async fn when_rpg_spend_skill_points(world: &mut BevyoutWorld, points: String, label: String) {
+    world
+        .rpg_sheet
+        .add_skill_points(rpg_skill(&label), points.parse::<i16>().unwrap());
+}
+
+#[when(regex = r"^damage resistance (\d+) basis points is clamped$")]
+async fn when_rpg_clamp_resistance(world: &mut BevyoutWorld, total: String) {
+    world.rpg_clamped_resistance_bps = stats::clamp_resistance_bps(total.parse::<u32>().unwrap());
+}
+
+#[then(regex = r"^the ([a-z ]+?) skill base is (\d+)$")]
+async fn then_rpg_skill_base(world: &mut BevyoutWorld, label: String, expected: String) {
+    assert_eq!(
+        world.rpg_sheet.skill_base(rpg_skill(&label)),
+        expected.parse::<u8>().unwrap(),
+        "{label} base"
+    );
+}
+
+#[then(regex = r"^the ([a-z ]+?) skill value is (\d+)$")]
+async fn then_rpg_skill_value(world: &mut BevyoutWorld, label: String, expected: String) {
+    assert_eq!(
+        world.rpg_sheet.skill_value(rpg_skill(&label)),
+        expected.parse::<u8>().unwrap(),
+        "{label} value"
+    );
+}
+
+#[then(regex = r"^the derived max health is (\d+)$")]
+async fn then_rpg_max_health(world: &mut BevyoutWorld, expected: String) {
+    assert_eq!(
+        world.rpg_sheet.derived(&world.rpg_settings).max_health,
+        expected.parse::<f32>().unwrap()
+    );
+}
+
+#[then(regex = r"^the derived max action points is (\d+)$")]
+async fn then_rpg_max_action_points(world: &mut BevyoutWorld, expected: String) {
+    assert_eq!(
+        world
+            .rpg_sheet
+            .derived(&world.rpg_settings)
+            .max_action_points,
+        expected.parse::<f32>().unwrap()
+    );
+}
+
+#[then(regex = r"^the derived carry weight is (\d+)$")]
+async fn then_rpg_carry_weight(world: &mut BevyoutWorld, expected: String) {
+    assert_eq!(
+        world.rpg_sheet.derived(&world.rpg_settings).carry_weight,
+        expected.parse::<f32>().unwrap()
+    );
+}
+
+#[then(regex = r"^the derived critical chance is (\d+) basis points$")]
+async fn then_rpg_critical_chance(world: &mut BevyoutWorld, expected: String) {
+    assert_eq!(
+        world
+            .rpg_sheet
+            .derived(&world.rpg_settings)
+            .critical_chance_bps,
+        expected.parse::<u32>().unwrap()
+    );
+}
+
+#[then(regex = r"^the player is level (\d+) with (\d+) XP$")]
+async fn then_rpg_level_with_xp(world: &mut BevyoutWorld, level: String, into_level: String) {
+    assert_eq!(
+        u32::from(world.rpg_sheet.level),
+        level.parse::<u32>().unwrap()
+    );
+    assert_eq!(
+        world.rpg_sheet.xp_into_level(&world.rpg_settings),
+        into_level.parse::<u32>().unwrap()
+    );
+}
+
+#[then(regex = r"^the level-up granted (\d+) skill points$")]
+async fn then_rpg_skill_points_granted(world: &mut BevyoutWorld, expected: String) {
+    let award = world
+        .rpg_last_award
+        .expect("an XP award must have happened");
+    assert_eq!(award.skill_points_gained, expected.parse::<u16>().unwrap());
+}
+
+#[then(regex = r"^the player is level (\d+)$")]
+async fn then_rpg_level(world: &mut BevyoutWorld, level: String) {
+    assert_eq!(
+        u32::from(world.rpg_sheet.level),
+        level.parse::<u32>().unwrap()
+    );
+}
+
+#[then(regex = r"^the player XP never exceeds the level (\d+) threshold$")]
+async fn then_rpg_xp_below_threshold(world: &mut BevyoutWorld, level: String) {
+    let threshold = stats::xp_threshold(level.parse::<u8>().unwrap(), &world.rpg_settings);
+    assert!(world.rpg_sheet.xp <= threshold);
+}
+
+#[then(regex = r"^the effective ([a-z]+) is (\d+)$")]
+async fn then_rpg_effective_special(world: &mut BevyoutWorld, label: String, expected: String) {
+    assert_eq!(
+        world.rpg_sheet.effective_special(rpg_special(&label)),
+        expected.parse::<u8>().unwrap()
+    );
+}
+
+#[then(regex = r"^the clamped damage resistance is (\d+) basis points$")]
+async fn then_rpg_clamped_resistance(world: &mut BevyoutWorld, expected: String) {
+    assert_eq!(
+        world.rpg_clamped_resistance_bps,
+        expected.parse::<u32>().unwrap()
+    );
+}
+
+#[then(regex = r"^the base poison resistance from endurance (\d+) is (\d+) basis points$")]
+async fn then_rpg_base_poison_resistance(
+    world: &mut BevyoutWorld,
+    endurance: String,
+    expected: String,
+) {
+    assert_eq!(
+        stats::base_poison_rad_resistance_bps(endurance.parse::<u8>().unwrap()),
+        expected.parse::<u32>().unwrap()
+    );
 }
