@@ -2,7 +2,6 @@
 //! task A). Synthetic fixtures only, built byte-by-byte with the shared
 //! `tests/mod.rs` builders -- no real game data.
 
-use super::super::*;
 use super::*;
 
 fn form_id_bytes(id: u32) -> Vec<u8> {

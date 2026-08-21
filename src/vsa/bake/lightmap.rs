@@ -886,7 +886,7 @@ fn collect_solari_tile(
     let mut texels = Vec::new();
     let mut pixel_samples = vec![Vec::new(); tile_width * tile_height];
     let mut chart_owners = vec![None; tile_width * tile_height];
-    for indices in primitive.indices.chunks_exact(3) {
+    for indices in primitive.indices.as_chunks::<3>().0 {
         let [a, b, c] = [
             indices[0] as usize,
             indices[1] as usize,
@@ -1023,7 +1023,7 @@ fn collect_solari_page(
         .context("Solari lightmap page dimensions overflowed")?;
     let mut pixel_samples = vec![Vec::new(); pixel_count];
     let mut chart_owners = vec![None; pixel_count];
-    for indices in primitive.indices.chunks_exact(3) {
+    for indices in primitive.indices.as_chunks::<3>().0 {
         let [a, b, c] = [
             indices[0] as usize,
             indices[1] as usize,
@@ -1440,7 +1440,7 @@ fn rasterize_primitive(
             }
             let mut tile_sampling_summary = LightmapSamplingSummary::default();
 
-            for indices in primitive.indices.chunks_exact(3) {
+            for indices in primitive.indices.as_chunks::<3>().0 {
                 let [a, b, c] = [
                     indices[0] as usize,
                     indices[1] as usize,

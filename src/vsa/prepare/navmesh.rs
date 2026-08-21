@@ -435,7 +435,7 @@ fn append_shape_world_triangles(
             append_box_faces(&corners, out);
         }
         PreparedPhysicsShape::TriangleMesh { vertices, indices } => {
-            for triangle in indices.chunks_exact(3) {
+            for triangle in indices.as_chunks::<3>().0 {
                 let (Some(&a), Some(&b), Some(&c)) = (
                     vertices.get(triangle[0] as usize),
                     vertices.get(triangle[1] as usize),

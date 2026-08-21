@@ -892,21 +892,19 @@ pub(crate) fn parse_land(
         }
     }
     if let Some(data) = sub(subs, "VNML") {
-        for sample in data.chunks_exact(3).take(count) {
+        for sample in data.as_chunks::<3>().0.iter().take(count) {
             land.normals
                 .push([sample[0] as i8, sample[1] as i8, sample[2] as i8]);
         }
     }
     if let Some(data) = sub(subs, "VCLR") {
-        for sample in data.chunks_exact(3).take(count) {
+        for sample in data.as_chunks::<3>().0.iter().take(count) {
             land.colors.push([sample[0], sample[1], sample[2]]);
         }
     }
     for texture in subs.iter().filter(|texture| texture.signature == "VTEX") {
-        for raw_form_id in texture.data.chunks_exact(4) {
-            let form_id = resolver.adjust(u32::from_le_bytes(
-                raw_form_id.try_into().unwrap_or_default(),
-            ));
+        for raw_form_id in texture.data.as_chunks::<4>().0 {
+            let form_id = resolver.adjust(u32::from_le_bytes(*raw_form_id));
             if form_id != 0 && !land.texture_layers.contains(&form_id) {
                 land.texture_layers.push(form_id);
             }
@@ -940,7 +938,7 @@ pub(crate) fn parse_land(
         } else if texture.signature == "VTXT"
             && let Some(assignment_index) = active_assignment
         {
-            for entry in texture.data.chunks_exact(8) {
+            for entry in texture.data.as_chunks::<8>().0 {
                 let Some(position) = u16_at(entry, 0) else {
                     continue;
                 };
@@ -1386,7 +1384,7 @@ fn append_imad_time_curve(
         return;
     }
     let mut keyframes = Vec::new();
-    for chunk in data.chunks_exact(8) {
+    for chunk in data.as_chunks::<8>().0 {
         let (Some(time), Some(value)) = (f32_at_option(chunk, 0), f32_at_option(chunk, 4)) else {
             continue;
         };
@@ -1439,7 +1437,7 @@ fn append_imad_color_curve(
         ));
         return;
     }
-    for chunk in data.chunks_exact(20) {
+    for chunk in data.as_chunks::<20>().0 {
         let Some(time) = f32_at_option(chunk, 0) else {
             continue;
         };
@@ -1566,7 +1564,7 @@ pub(crate) fn parse_climate(
         .iter()
         .filter(|subrecord| subrecord.signature == "WLST")
         .filter(|subrecord| subrecord.data.len() % 12 == 0)
-        .flat_map(|subrecord| subrecord.data.chunks_exact(12))
+        .flat_map(|subrecord| subrecord.data.as_chunks::<12>().0)
         .filter_map(|entry| {
             Some(ClimateWeatherEntry {
                 weather_form_id: resolver.adjust(u32_at(entry, 0)?),

@@ -380,7 +380,7 @@ fn reflection_cubemap_direction(face: usize, u: f32, v: f32) -> Vec3 {
 pub(crate) fn collect_triangles(scene: &RustBakeScene) -> Result<Vec<IrradianceTriangle>> {
     let mut triangles = Vec::new();
     for primitive in &scene.primitives {
-        for indices in primitive.indices.chunks_exact(3) {
+        for indices in primitive.indices.as_chunks::<3>().0 {
             let [a, b, c] = [
                 indices[0] as usize,
                 indices[1] as usize,

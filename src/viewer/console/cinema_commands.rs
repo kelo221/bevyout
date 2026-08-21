@@ -289,7 +289,7 @@ fn cam_path(world: &mut World, args: &[String]) -> Result<ConsoleCommandResult, 
         ));
     }
     let mut waypoints = Vec::with_capacity(coordinate_args.len() / 3);
-    for point in coordinate_args.chunks_exact(3) {
+    for point in coordinate_args.as_chunks::<3>().0 {
         waypoints.push(Vec3::new(
             finite(&point[0], "x")?,
             finite(&point[1], "y")?,

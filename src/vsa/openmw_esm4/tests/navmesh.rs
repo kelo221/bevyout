@@ -8,7 +8,6 @@
 //! malformed `DATA`/`NVGD`/`NVMI` sizes, and the unsupported-subrecord
 //! diagnostic for `NVCI`.
 
-use super::super::*;
 use super::*;
 
 fn master_resolver() -> FormIdResolver {

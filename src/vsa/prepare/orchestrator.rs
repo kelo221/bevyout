@@ -3083,7 +3083,7 @@ fn build_gmst_catalog_inputs(parsed: &ParsedPlugin) -> GmstCatalogInputs {
             description: record.description.clone(),
         })
         .collect::<Vec<_>>();
-    actor_values.sort_by(|a, b| a.form_id.cmp(&b.form_id));
+    actor_values.sort_by_key(|entry| entry.form_id);
     GmstCatalogInputs {
         settings_pairs,
         actor_values,

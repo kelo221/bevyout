@@ -1791,7 +1791,7 @@ pub(crate) fn create_prepared_shape(
                     return None;
                 }
                 let mut two_sided_indices = Vec::with_capacity(indices.len() * 2);
-                for triangle in indices.chunks_exact(3) {
+                for triangle in indices.as_chunks::<3>().0 {
                     two_sided_indices.extend_from_slice(triangle);
                     if !dynamic {
                         two_sided_indices.extend_from_slice(&[
