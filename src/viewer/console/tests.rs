@@ -2577,3 +2577,229 @@ fn advlevel_advances_one_level_and_respects_the_cap() {
     assert!(!beyond.ok);
     assert_eq!(error_code(&beyond), "at_level_cap");
 }
+
+// ---------------------------------------------------------------------
+// M9 wave 2 (#314): player perk console surface.
+// ---------------------------------------------------------------------
+
+/// Synthetic catalog with Swift Learner (00031DD3) and Educated
+/// (00031DD8) exactly as decoded from the real Fallout3.esm, plus one
+/// non-playable perk that `showperks --eligible` must exclude.
+fn perk_test_catalog() -> super::super::stats::PerkCatalog {
+    use bevyout_core::actor_state::{ActorValue, SpecialAttribute};
+    use bevyout_core::perks::{
+        ENTRY_CODE_BONUS_SKILL_POINTS, ENTRY_CODE_XP_AWARD_MULTIPLIER, EntryPointPayload,
+        PerkDefinition, PerkEntry,
+    };
+    use std::collections::BTreeMap;
+    let swift = PerkDefinition {
+        form_id: 0x0003_1dd3,
+        editor_id: "SwiftLearner".into(),
+        min_level: 2,
+        ranks: 3,
+        playable: true,
+        conditions: vec![bevyout_core::perks::PerkCondition {
+            actor_value: ActorValue::Special(SpecialAttribute::Intelligence),
+            threshold: 4,
+        }],
+        entries: [1.1_f32, 1.2, 1.3]
+            .into_iter()
+            .enumerate()
+            .map(|(rank, value)| PerkEntry::EntryPoint {
+                rank: rank as u8,
+                code: ENTRY_CODE_XP_AWARD_MULTIPLIER,
+                param_count: 3,
+                priority: 0,
+                payload: EntryPointPayload::Value(value),
+            })
+            .collect(),
+        ..PerkDefinition::default()
+    };
+    let educated = PerkDefinition {
+        form_id: 0x0003_1dd8,
+        editor_id: "Educated".into(),
+        min_level: 4,
+        ranks: 1,
+        playable: true,
+        conditions: vec![bevyout_core::perks::PerkCondition {
+            actor_value: ActorValue::Special(SpecialAttribute::Intelligence),
+            threshold: 4,
+        }],
+        entries: vec![PerkEntry::EntryPoint {
+            rank: 0,
+            code: ENTRY_CODE_BONUS_SKILL_POINTS,
+            param_count: 2,
+            priority: 0,
+            payload: EntryPointPayload::Value(3.0),
+        }],
+        ..PerkDefinition::default()
+    };
+    let quest_only = PerkDefinition {
+        form_id: 0x0006_1857,
+        editor_id: "WellRestedPerk".into(),
+        min_level: 1,
+        ranks: 1,
+        playable: false,
+        ..PerkDefinition::default()
+    };
+    super::super::stats::PerkCatalog(
+        [swift, educated, quest_only]
+            .into_iter()
+            .map(|perk| (perk.form_id, perk))
+            .collect::<BTreeMap<_, _>>(),
+    )
+}
+
+#[test]
+fn addperk_enforces_eligibility_and_grants_ranks() {
+    let mut app = test_app();
+    app.insert_resource(perk_test_catalog());
+    // Level 1 player vs the level-2 gate: blocked with the reason.
+    let blocked = exec(&mut app, "player.addperk 00031dd3");
+    assert!(!blocked.ok);
+    assert_eq!(error_code(&blocked), "perk_ineligible");
+    let message = blocked
+        .error
+        .as_ref()
+        .map(|error| error.message.as_str())
+        .unwrap_or_default();
+    assert!(
+        message.contains("level"),
+        "error text should name the gate: {message}"
+    );
+    // Level up to 2 (INT 5 passes the INT 4 condition) and grant rank 1.
+    assert!(exec(&mut app, "player.advlevel").ok);
+    let granted = exec(&mut app, "player.addperk 00031dd3");
+    assert!(granted.ok, "addperk failed: {:?}", granted.error);
+    assert_eq!(granted.value["rank"].as_i64(), Some(1));
+    assert_eq!(granted.value["ranks"].as_i64(), Some(3));
+    assert_eq!(
+        granted.value["modifiers"]["xp_award_multiplier_bps"].as_i64(),
+        Some(11_000)
+    );
+    // The owned rank's XP multiplier reaches the rewardxp path: 1000 XP
+    // awards 1100.
+    let award = exec(&mut app, "player.rewardxp 1000");
+    assert!(award.ok);
+    assert_eq!(award.value["xp_multiplier_bps"].as_i64(), Some(11_000));
+    assert_eq!(award.value["xp"].as_i64(), Some(1_300));
+    // The second rank upgrades 1 -> 2 and the multiplier follows.
+    let second = exec(&mut app, "player.addperk 31dd3");
+    assert!(second.ok, "short-hex addperk failed: {:?}", second.error);
+    assert_eq!(second.value["rank"].as_i64(), Some(2));
+    assert_eq!(
+        second.value["modifiers"]["xp_award_multiplier_bps"].as_i64(),
+        Some(12_000)
+    );
+    // Unknown perks and malformed form ids are rejected.
+    assert_eq!(
+        error_code(&exec(&mut app, "player.addperk deadbeef")),
+        "unknown_perk"
+    );
+    assert_eq!(
+        error_code(&exec(&mut app, "player.addperk nothex")),
+        "bad_form_id"
+    );
+    assert_eq!(error_code(&exec(&mut app, "player.addperk")), "bad_arity");
+}
+
+#[test]
+fn removeperk_and_hasperk_track_owned_ranks() {
+    let mut app = test_app();
+    app.insert_resource(perk_test_catalog());
+    assert_eq!(
+        error_code(&exec(&mut app, "player.removeperk 00031dd3")),
+        "perk_not_owned"
+    );
+    assert!(exec(&mut app, "player.advlevel").ok);
+    assert!(exec(&mut app, "player.addperk 00031dd3").ok);
+    assert!(exec(&mut app, "player.addperk 00031dd3").ok);
+    let owned = exec(&mut app, "player.hasperk 00031dd3");
+    assert!(owned.ok);
+    assert_eq!(owned.value["rank"].as_i64(), Some(2));
+    assert_eq!(owned.value["ranks"].as_i64(), Some(3));
+    let removed = exec(&mut app, "player.removeperk 00031dd3");
+    assert!(removed.ok, "removeperk failed: {:?}", removed.error);
+    assert_eq!(removed.value["rank"].as_i64(), Some(1));
+    assert_eq!(
+        removed.value["modifiers"]["xp_award_multiplier_bps"].as_i64(),
+        Some(11_000)
+    );
+    let cleared = exec(&mut app, "player.removeperk 00031dd3");
+    assert!(cleared.ok);
+    assert_eq!(cleared.value["rank"].as_i64(), Some(0));
+    assert_eq!(
+        cleared.value["modifiers"]["xp_award_multiplier_bps"].as_i64(),
+        Some(10_000),
+        "the multiplier reverts to neutral"
+    );
+    assert_eq!(
+        error_code(&exec(&mut app, "player.removeperk 00031dd3")),
+        "perk_not_owned"
+    );
+    let none = exec(&mut app, "player.hasperk 00031dd3");
+    assert!(none.ok);
+    assert_eq!(none.value["rank"].as_i64(), Some(0));
+}
+
+#[test]
+fn educated_grants_bonus_skill_points_on_level_up() {
+    let mut app = test_app();
+    app.insert_resource(perk_test_catalog());
+    // Educated needs level 4; three level-ups reach it.
+    for _ in 0..3 {
+        assert!(exec(&mut app, "player.advlevel").ok);
+    }
+    let granted = exec(&mut app, "player.addperk 00031dd8");
+    assert!(granted.ok, "addperk failed: {:?}", granted.error);
+    assert_eq!(granted.value["rank"].as_i64(), Some(1));
+    assert_eq!(
+        granted.value["modifiers"]["bonus_skill_points"].as_i64(),
+        Some(3)
+    );
+    // The next level-up grants 15 sheet points + 3 perk points.
+    let level = exec(&mut app, "player.advlevel");
+    assert!(level.ok);
+    assert_eq!(level.value["skill_points_gained"].as_i64(), Some(18));
+    assert_eq!(
+        level.value["bonus_skill_points_per_level"].as_i64(),
+        Some(3)
+    );
+}
+
+#[test]
+fn showperks_lists_owned_and_eligible_with_blocked_reasons() {
+    let mut app = test_app();
+    app.insert_resource(perk_test_catalog());
+    assert!(exec(&mut app, "player.advlevel").ok);
+    assert!(exec(&mut app, "player.addperk 00031dd3").ok);
+    let owned = exec(&mut app, "showperks");
+    assert!(owned.ok);
+    assert_eq!(owned.value["count"].as_i64(), Some(1));
+    assert_eq!(owned.value["perks"][0]["perk"], "SwiftLearner");
+    assert_eq!(owned.value["perks"][0]["rank"].as_i64(), Some(1));
+    assert_eq!(owned.value["perks"][0]["ranks"].as_i64(), Some(3));
+    assert_eq!(
+        owned.value["modifiers"]["xp_award_multiplier_bps"].as_i64(),
+        Some(11_000)
+    );
+    // The eligible view covers every playable perk; the non-playable
+    // quest perk stays out and blocked perks carry their reasons.
+    let eligible = exec(&mut app, "showperks --eligible");
+    assert!(eligible.ok);
+    assert_eq!(eligible.value["count"].as_i64(), Some(2));
+    let entries = eligible.value["eligible"].as_array().unwrap();
+    let by_perk = |name: &str| {
+        entries
+            .iter()
+            .find(|entry| entry["perk"] == name)
+            .unwrap_or_else(|| panic!("expected {name} in the eligible list"))
+    };
+    let swift = by_perk("SwiftLearner");
+    assert_eq!(swift["eligible"], true);
+    assert_eq!(swift["reasons"].as_array().map(Vec::len), Some(0));
+    let educated = by_perk("Educated");
+    assert_eq!(educated["eligible"], false);
+    assert_eq!(educated["reasons"][0]["kind"], "min_level");
+    assert_eq!(educated["reasons"][0]["required"].as_i64(), Some(4));
+}

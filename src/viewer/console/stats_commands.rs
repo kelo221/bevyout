@@ -65,7 +65,7 @@ impl ConsoleCommandProvider for StatsCommandProvider {
 
 /// Resolves the stats-carrying player entity: the resolved reference when it
 /// carries `ActorStats`, otherwise the single spawned FPS player.
-fn player_stats_entity(
+pub(super) fn player_stats_entity(
     world: &mut World,
     invocation: &ConsoleInvocation,
 ) -> Result<Entity, ConsoleError> {
@@ -296,7 +296,9 @@ pub(super) fn reward_xp(
 
 /// Applies the award through the kernel and folds the granted skill points
 /// into the `Experience` projection (the recalc system owns the other
-/// fields and never touches these two).
+/// fields and never touches these two). M9 wave 2 (#314): the player's
+/// active perk modifiers scale the awarded XP (Swift Learner) and add
+/// bonus skill points per level gained (Educated).
 fn apply_award(
     world: &mut World,
     entity: Entity,
@@ -304,6 +306,7 @@ fn apply_award(
     command: &str,
 ) -> Result<ConsoleCommandResult, ConsoleError> {
     let settings = world.resource::<StatsSettings>().0;
+    let modifiers = player_perk_modifiers(world, entity);
     let outcome = {
         let mut entity_mut = world.get_entity_mut(entity).map_err(|_| {
             ConsoleError::new("player_unavailable", "the FPS player does not exist")
@@ -311,14 +314,25 @@ fn apply_award(
         let mut stats = entity_mut
             .get_mut::<ActorStats>()
             .expect("player_stats_entity verified the sheet");
-        core_stats::award_xp(&mut stats.0, amount, &settings)
+        core_stats::award_xp(
+            &mut stats.0,
+            amount,
+            modifiers.xp_award_multiplier_bps,
+            &settings,
+        )
     };
-    if outcome.skill_points_gained > 0
+    // The kernel's per-level points exclude the perk bonus by design
+    // (#313 keeps exactly one parameter per kernel), so the adapter adds
+    // `bonus_skill_points` for every level the award crossed.
+    let bonus_points =
+        u16::from(outcome.levels_gained).saturating_mul(modifiers.bonus_skill_points);
+    let skill_points_gained = outcome.skill_points_gained.saturating_add(bonus_points);
+    if skill_points_gained > 0
         && let Ok(mut entity) = world.get_entity_mut(entity)
         && let Some(mut experience) = entity.get_mut::<Experience>()
     {
-        experience.unspent_skill_points += outcome.skill_points_gained;
-        experience.total_skill_points += outcome.skill_points_gained;
+        experience.unspent_skill_points += skill_points_gained;
+        experience.total_skill_points += skill_points_gained;
     }
     Ok(ConsoleCommandResult::new(
         json!({
@@ -326,11 +340,29 @@ fn apply_award(
             "xp": outcome.xp,
             "level": outcome.level,
             "levels_gained": outcome.levels_gained,
-            "skill_points_gained": outcome.skill_points_gained,
+            "skill_points_gained": skill_points_gained,
+            "xp_multiplier_bps": modifiers.xp_award_multiplier_bps,
+            "bonus_skill_points_per_level": modifiers.bonus_skill_points,
         }),
         vec![format!(
             "{command}: level {} ({} XP, +{} skill points)",
-            outcome.level, outcome.xp, outcome.skill_points_gained
+            outcome.level, outcome.xp, skill_points_gained
         )],
     ))
+}
+
+/// Projects the player's owned perks onto the active leveling modifiers;
+/// players without the perk component (or an empty catalog) stay neutral.
+pub(super) fn player_perk_modifiers(
+    world: &World,
+    entity: Entity,
+) -> bevyout_core::perks::PerkModifiers {
+    let catalog = world
+        .get_resource::<super::stats::PerkCatalog>()
+        .map(|catalog| catalog.0.clone())
+        .unwrap_or_default();
+    let Some(perks) = world.get::<super::stats::ActorPerks>(entity) else {
+        return bevyout_core::perks::PerkModifiers::default();
+    };
+    bevyout_core::perks::active_perk_modifiers(&perks.0, &catalog)
 }

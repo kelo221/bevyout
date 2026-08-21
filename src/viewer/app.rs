@@ -79,6 +79,9 @@ pub(crate) fn run_view(manifest_path: PathBuf, options: RunViewOptions) -> Resul
     // catalogs above, a missing or stale gmst catalog falls back to GOTY
     // defaults instead of failing startup.
     let stats_settings = stats::load_settings_for_manifest(&manifest, &asset_root);
+    // M9 wave 2 (#314): perk definitions for the perk console commands;
+    // also degrades to an empty catalog instead of failing startup.
+    let perk_catalog = stats::load_perk_catalog_for_manifest(&manifest, &asset_root);
     // Issue #60 (F60.3): load and compatibility-check the save slot before
     // any window exists, so a mismatched save fails fast with a plain error.
     let loaded_save = save_slot
@@ -169,6 +172,7 @@ pub(crate) fn run_view(manifest_path: PathBuf, options: RunViewOptions) -> Resul
     app.insert_resource(actor_animation_catalogs);
     app.insert_resource(screen_fx_catalog);
     app.insert_resource(stats_settings);
+    app.insert_resource(perk_catalog);
     // F51.4: `[world] resident_cell_limit` in `.bevyout/config.toml` (or the
     // user config) remains the conservative interior graph-preload budget.
     // `[world]` limits are intentionally separate: interior preloading keeps
