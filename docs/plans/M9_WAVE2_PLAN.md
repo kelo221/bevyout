@@ -124,4 +124,36 @@ points per level. Store unknown codes raw; do not guess semantics.
 
 ## Shipped amendments
 
-(none yet)
+### A1 — AV condition indices are an engine enum, not AVIF FormIDs
+
+The plan's suggested mapping (`AVIF form_id == condition index`) is false on
+real data — `AVStrength` is FormID 1000, not 5. The executor probed all 87
+PERK records and derived the engine's condition-index enum empirically by
+pairing every CTDA with its published requirement: SPECIAL at indices 5–11
+(STR 5, PER 6, END 7, CHA 8, INT 9, AGI 10, LUK 11; verified by Strong Back
+gating on 5+7, Swift Learner/Educated on 9, Thief on 6+10, Better
+Criticals on 6+11) and skills at 32–45 (verified by Master Trader 32,
+Ninja 38/42, Computer Whiz 40, Paralyzing Palm 45). The mapping lives in
+`bevyout_core::perks::actor_value_from_condition_index` with the evidence
+documented; unmapped indices block eligibility as `unknown_conditions`.
+
+### A2 — catalog counters describe reality, not the plan's guesses
+
+The base `Fallout3.esm` carries **87 perks** (58 playable, 3 hidden), not
+the plan's ~120 estimate (no DLC plugins in this content set). The "0
+unsupported subrecords" gate materialized as **48 perks with non-
+GetActorValue CTDA functions** (GetIsSex, HasPerk, …) — counted per-perk,
+surfaced as `unknown_conditions` eligibility blockers and in
+`showperks --eligible` reasons. Zero unknown subrecord signatures.
+
+### A3 — one kernel parameter, not two
+
+`stats::award_xp` gained the XP-multiplier parameter (bps); the per-level
+skill-point bonus is applied by the console/runtime adapter at the
+`skill_points_per_level` call site rather than threading a second
+parameter through the kernel — same observable behavior, smaller seam.
+
+### A4 — `addperk` is single-rank per invocation
+
+`addperk <FormID>` grants exactly one rank per call (repeat calls take the
+next rank, as in the engine); no `[ranks]`/force arguments shipped.
