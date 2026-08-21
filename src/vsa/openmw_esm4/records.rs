@@ -1,5 +1,7 @@
 //! ESM4 record-specific decoding.
 
+use bevyout_core::stats::GmstValue;
+
 use super::*;
 
 /// `LVLI`/`LVLN`/`LVLC` leveled-list body (issue #74): `LVLD` (chance-none
@@ -589,6 +591,44 @@ pub(crate) fn parse_sound(subs: &[Subrecord], form_id: u32, record_flags: u32) -
                 "REPT",
             ],
         ),
+    }
+}
+
+/// Decoded `GMST` game setting (M9 wave 1 #308). OpenMW's
+/// `components/esm4/loadgmst.cpp` reads `EDID` (the setting name) plus one
+/// `DATA` value whose wire type follows the EditorID prefix: `f` f32, `i`
+/// i32, `b` u32 boolean, `s` null-terminated string.
+pub(crate) fn parse_gmst(subs: &[Subrecord], form_id: u32, record_flags: u32) -> GmstRecord {
+    let editor_id = sub(subs, "EDID").map(cstring);
+    let value = sub(subs, "DATA").and_then(|data| {
+        let prefix = editor_id.as_deref().and_then(|id| id.chars().next());
+        match prefix {
+            Some('f') => f32_at(data, 0).ok().map(GmstValue::Float),
+            Some('i') => i32_at(data, 0).map(GmstValue::Int),
+            Some('b') => Some(GmstValue::Bool(u32_at(data, 0).unwrap_or(0) != 0)),
+            Some('s') => Some(GmstValue::Str(cstring(data))),
+            _ => None,
+        }
+    });
+    GmstRecord {
+        form_id,
+        record_flags,
+        editor_id,
+        value,
+        ignored_subrecords: ignored_signatures(subs, &["EDID", "DATA"]),
+    }
+}
+
+/// Decoded `AVIF` actor-value metadata (M9 wave 1 #308): `EDID` EditorID,
+/// `FULL` display name, `DESC` description.
+pub(crate) fn parse_avif(subs: &[Subrecord], form_id: u32, record_flags: u32) -> AvifRecord {
+    AvifRecord {
+        form_id,
+        record_flags,
+        editor_id: sub(subs, "EDID").map(cstring),
+        name: sub(subs, "FULL").map(cstring),
+        description: sub(subs, "DESC").map(cstring),
+        ignored_subrecords: ignored_signatures(subs, &["EDID", "FULL", "DESC"]),
     }
 }
 

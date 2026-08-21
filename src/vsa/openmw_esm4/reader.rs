@@ -247,6 +247,26 @@ pub(crate) fn walk_container(
                         .insert(form_id, parse_music(&subs, form_id, flags));
                 }
             }
+            // M9 wave 1 (#308): GMST/AVIF are content-set-wide like MUSC;
+            // last-loader-wins by FormID so patch plugins override settings.
+            "GMST" => {
+                if flags & RECORD_DELETED != 0 {
+                    state.gmsts.remove(&form_id);
+                } else {
+                    state
+                        .gmsts
+                        .insert(form_id, parse_gmst(&subs, form_id, flags));
+                }
+            }
+            "AVIF" => {
+                if flags & RECORD_DELETED != 0 {
+                    state.actor_values.remove(&form_id);
+                } else {
+                    state
+                        .actor_values
+                        .insert(form_id, parse_avif(&subs, form_id, flags));
+                }
+            }
             "LGTM" => {
                 if flags & RECORD_DELETED != 0 {
                     state.lighting_templates.remove(&form_id);

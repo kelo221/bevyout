@@ -2090,3 +2090,88 @@ mod image_space;
 mod idle;
 
 mod navmesh;
+
+#[test]
+fn gmst_decodes_typed_values_by_editor_id_prefix() {
+    let float = parse_gmst(
+        &[
+            direct_subrecord("EDID", b"fAVDHealthEnduranceMult\0".to_vec()),
+            direct_subrecord("DATA", 20.0_f32.to_le_bytes().to_vec()),
+        ],
+        0x15,
+        0,
+    );
+    assert_eq!(float.editor_id.as_deref(), Some("fAVDHealthEnduranceMult"));
+    assert_eq!(
+        float.value,
+        Some(bevyout_core::stats::GmstValue::Float(20.0))
+    );
+
+    let int = parse_gmst(
+        &[
+            direct_subrecord("EDID", b"iMaxPlayerLevel\0".to_vec()),
+            direct_subrecord("DATA", 30_i32.to_le_bytes().to_vec()),
+        ],
+        0x2a,
+        0,
+    );
+    assert_eq!(int.value, Some(bevyout_core::stats::GmstValue::Int(30)));
+
+    let boolean = parse_gmst(
+        &[
+            direct_subrecord("EDID", b"bActorWithdrawn\0".to_vec()),
+            direct_subrecord("DATA", 1_u32.to_le_bytes().to_vec()),
+        ],
+        0x2b,
+        0,
+    );
+    assert_eq!(
+        boolean.value,
+        Some(bevyout_core::stats::GmstValue::Bool(true))
+    );
+
+    let text = parse_gmst(
+        &[
+            direct_subrecord("EDID", b"sDefaultPlayerName\0".to_vec()),
+            direct_subrecord("DATA", b"The Lone Wanderer\0".to_vec()),
+        ],
+        0x2c,
+        0,
+    );
+    assert_eq!(
+        text.value,
+        Some(bevyout_core::stats::GmstValue::Str(
+            "The Lone Wanderer".into()
+        ))
+    );
+
+    // An unrecognized prefix leaves the value undecoded rather than guessed.
+    let unknown = parse_gmst(
+        &[
+            direct_subrecord("EDID", b"xNotASetting\0".to_vec()),
+            direct_subrecord("DATA", 1_u32.to_le_bytes().to_vec()),
+        ],
+        0x2d,
+        0,
+    );
+    assert_eq!(unknown.value, None);
+}
+
+#[test]
+fn avif_decodes_actor_value_metadata() {
+    let avif = parse_avif(
+        &[
+            direct_subrecord("EDID", b"Lockpick\0".to_vec()),
+            direct_subrecord("FULL", b"Lockpick\0".to_vec()),
+            direct_subrecord("DESC", b"The art of bypassing locks.\0".to_vec()),
+        ],
+        0x2e,
+        0,
+    );
+    assert_eq!(avif.editor_id.as_deref(), Some("Lockpick"));
+    assert_eq!(avif.name.as_deref(), Some("Lockpick"));
+    assert_eq!(
+        avif.description.as_deref(),
+        Some("The art of bypassing locks.")
+    );
+}
