@@ -2515,7 +2515,7 @@ fn getav_reads_derived_health_and_sheet_values_with_and_without_prefix() {
     let mut app = test_app();
     let output = exec(&mut app, "player.getav health");
     assert!(output.ok, "player.getav health failed: {:?}", output.error);
-    assert_eq!(output.value["result"].as_f64(), Some(210.0));
+    assert_eq!(output.value["result"].as_f64(), Some(200.0));
     let bare = exec(&mut app, "getav strength");
     assert!(bare.ok, "bare getav failed: {:?}", bare.error);
     assert_eq!(bare.value["result"].as_f64(), Some(5.0));
@@ -2552,14 +2552,14 @@ fn modav_and_setav_clamp_special_into_one_to_ten() {
 #[test]
 fn rewardxp_crosses_the_level_threshold_and_updates_derived_health() {
     let mut app = test_app();
-    let output = exec(&mut app, "player.rewardxp 150");
+    let output = exec(&mut app, "player.rewardxp 200");
     assert!(output.ok, "rewardxp failed: {:?}", output.error);
     assert_eq!(output.value["level"], 2);
     assert_eq!(output.value["levels_gained"], 1);
     assert_eq!(output.value["skill_points_gained"], 15);
-    // Derived max health is computed synchronously: 100 + 5*20 + 2*10.
+    // Derived max health is computed synchronously: 100 + 5*20 + 1*10.
     let health = exec(&mut app, "player.getav health");
-    assert_eq!(health.value["result"], 220.0);
+    assert_eq!(health.value["result"].as_f64(), Some(210.0));
 }
 
 #[test]

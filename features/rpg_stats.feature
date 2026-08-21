@@ -17,27 +17,27 @@ Feature: Pure SPECIAL, skill, derived-stat, and leveling kernels
 
   Scenario: Derived attributes follow the GMST multiplier formula
     Given a player sheet with all SPECIAL at 5 and luck at 5
-    Then the derived max health is 210
-    And the derived max action points is 80
+    Then the derived max health is 200
+    And the derived max action points is 75
     And the derived carry weight is 200
     And the derived critical chance is 500 basis points
 
   Scenario: Derived attributes grow with level and SPECIAL
     Given a player sheet with all SPECIAL at 5 and luck at 5
     When the player reaches level 4 with endurance 8 and strength 7
-    Then the derived max health is 300
+    Then the derived max health is 290
     And the derived carry weight is 220
 
   Scenario: Awarding threshold XP levels up once and grants skill points
     Given a player sheet with all SPECIAL at 5 and luck at 5
-    When the player is awarded 150 XP
+    When the player is awarded 200 XP
     Then the player is level 2 with 0 XP
     And the level-up granted 15 skill points
 
   Scenario: A single award can cross several level thresholds
     Given a player sheet with all SPECIAL at 5 and luck at 5
-    When the player is awarded 500 XP
-    Then the player is level 3 with 50 XP
+    When the player is awarded 700 XP
+    Then the player is level 3 with 150 XP
     And the level-up granted 30 skill points
 
   Scenario: XP stops accumulating at the level cap

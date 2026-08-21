@@ -91,21 +91,27 @@ impl GmstValue {
     }
 }
 
-// Canonical GMST setting names consumed by the kernels. The defaults below
-// match Fallout 3 GOTY; prepared catalogs override them per content set.
-pub const GMST_HEALTH_BASE: &str = "iAVDHealthBase";
+// Canonical GMST setting names consumed by the kernels, verified against the
+// base-game `Fallout3.esm` dump (`GECK-Notes`' "All Gamesettings") and
+// geckwiki.com. Prepared catalogs override the defaults per content set.
+// `iMaxPlayerLevel` exists only once Broken Steel is loaded, so the fallback
+// default stays at the GOTY cap 30.
 pub const GMST_HEALTH_ENDURANCE_MULT: &str = "fAVDHealthEnduranceMult";
-pub const GMST_HEALTH_LEVEL_MULT: &str = "iAVDHealthLevelMult";
-pub const GMST_ACTION_POINTS_BASE: &str = "iBaseActionPoints";
-pub const GMST_ACTION_POINTS_AGILITY_MULT: &str = "fAVDActionPointsAgilityMult";
-pub const GMST_CARRY_WEIGHT_BASE: &str = "iAVDCarryWeightBase";
-pub const GMST_CARRY_WEIGHT_STRENGTH_MULT: &str = "fAVDCarryWeightStrengthMult";
+pub const GMST_HEALTH_LEVEL_MULT: &str = "fAVDHealthLevelMult";
+pub const GMST_ACTION_POINTS_BASE: &str = "fAVDActionPointsBase";
+pub const GMST_ACTION_POINTS_MULT: &str = "fAVDActionPointsMult";
+pub const GMST_CARRY_WEIGHT_BASE: &str = "fAVDCarryWeightsBase";
+pub const GMST_CARRY_WEIGHT_MULT: &str = "fAVDCarryWeightMult";
 pub const GMST_MAX_PLAYER_LEVEL: &str = "iMaxPlayerLevel";
-pub const GMST_LEVEL_UP_SKILL_POINTS: &str = "iLevelUpSkillPoints";
+pub const GMST_LEVEL_UP_SKILL_POINTS_BASE: &str = "iLevelUpSkillPointsBase";
+pub const GMST_LEVEL_UP_SKILL_POINTS_INTERVAL: &str = "iLevelUpSkillPointsInterval";
 pub const GMST_XP_BASE: &str = "iXPBase";
+pub const GMST_XP_BUMP_BASE: &str = "iXPBumpBase";
 
 /// Named GMST view used by every kernel. Values are copied from a prepared
-/// catalog or left at the Fallout 3 GOTY defaults.
+/// catalog or left at the Fallout 3 GOTY defaults. `health_base` has no GMST
+/// in the base game (the engine composes 90 base + 10 level-one baseline);
+/// it stays a fixed kernel constant of 100.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct GmstSettings {
@@ -113,12 +119,14 @@ pub struct GmstSettings {
     pub health_endurance_mult: f32,
     pub health_level_mult: f32,
     pub action_points_base: f32,
-    pub action_points_agility_mult: f32,
+    pub action_points_mult: f32,
     pub carry_weight_base: f32,
-    pub carry_weight_strength_mult: f32,
+    pub carry_weight_mult: f32,
     pub max_player_level: u8,
-    pub level_up_skill_points: u8,
+    pub level_up_skill_points_base: u8,
+    pub level_up_skill_points_interval: u8,
     pub xp_base: u32,
+    pub xp_bump_base: u32,
 }
 
 impl Default for GmstSettings {
@@ -128,12 +136,14 @@ impl Default for GmstSettings {
             health_endurance_mult: 20.0,
             health_level_mult: 10.0,
             action_points_base: 65.0,
-            action_points_agility_mult: 3.0,
+            action_points_mult: 2.0,
             carry_weight_base: 150.0,
-            carry_weight_strength_mult: 10.0,
+            carry_weight_mult: 10.0,
             max_player_level: 30,
-            level_up_skill_points: 10,
-            xp_base: 150,
+            level_up_skill_points_base: 11,
+            level_up_skill_points_interval: 1,
+            xp_base: 200,
+            xp_bump_base: 150,
         }
     }
 }
@@ -147,11 +157,7 @@ impl GmstSettings {
         let mut settings = Self::default();
         for (name, value) in pairs {
             let matches = |expected: &str| name.eq_ignore_ascii_case(expected);
-            if matches(GMST_HEALTH_BASE) {
-                if let Some(v) = finite(value.as_f32()) {
-                    settings.health_base = v;
-                }
-            } else if matches(GMST_HEALTH_ENDURANCE_MULT) {
+            if matches(GMST_HEALTH_ENDURANCE_MULT) {
                 if let Some(v) = finite(value.as_f32()) {
                     settings.health_endurance_mult = v;
                 }
@@ -163,30 +169,38 @@ impl GmstSettings {
                 if let Some(v) = finite(value.as_f32()) {
                     settings.action_points_base = v;
                 }
-            } else if matches(GMST_ACTION_POINTS_AGILITY_MULT) {
+            } else if matches(GMST_ACTION_POINTS_MULT) {
                 if let Some(v) = finite(value.as_f32()) {
-                    settings.action_points_agility_mult = v;
+                    settings.action_points_mult = v;
                 }
             } else if matches(GMST_CARRY_WEIGHT_BASE) {
                 if let Some(v) = finite(value.as_f32()) {
                     settings.carry_weight_base = v;
                 }
-            } else if matches(GMST_CARRY_WEIGHT_STRENGTH_MULT) {
+            } else if matches(GMST_CARRY_WEIGHT_MULT) {
                 if let Some(v) = finite(value.as_f32()) {
-                    settings.carry_weight_strength_mult = v;
+                    settings.carry_weight_mult = v;
                 }
             } else if matches(GMST_MAX_PLAYER_LEVEL) {
                 if let Some(v) = value.as_i32() {
                     settings.max_player_level = v.clamp(1, 99) as u8;
                 }
-            } else if matches(GMST_LEVEL_UP_SKILL_POINTS) {
+            } else if matches(GMST_LEVEL_UP_SKILL_POINTS_BASE) {
                 if let Some(v) = value.as_i32() {
-                    settings.level_up_skill_points = v.clamp(0, 100) as u8;
+                    settings.level_up_skill_points_base = v.clamp(0, 100) as u8;
                 }
-            } else if matches(GMST_XP_BASE)
+            } else if matches(GMST_LEVEL_UP_SKILL_POINTS_INTERVAL) {
+                if let Some(v) = value.as_i32() {
+                    settings.level_up_skill_points_interval = v.clamp(0, 100) as u8;
+                }
+            } else if matches(GMST_XP_BASE) {
+                if let Some(v) = value.as_i32() {
+                    settings.xp_base = v.clamp(1, 1_000_000) as u32;
+                }
+            } else if matches(GMST_XP_BUMP_BASE)
                 && let Some(v) = value.as_i32()
             {
-                settings.xp_base = v.clamp(1, 1_000_000) as u32;
+                settings.xp_bump_base = v.clamp(0, 1_000_000) as u32;
             }
         }
         settings
@@ -200,15 +214,9 @@ impl GmstSettings {
             ("health_endurance_mult", self.health_endurance_mult),
             ("health_level_mult", self.health_level_mult),
             ("action_points_base", self.action_points_base),
-            (
-                "action_points_agility_mult",
-                self.action_points_agility_mult,
-            ),
+            ("action_points_mult", self.action_points_mult),
             ("carry_weight_base", self.carry_weight_base),
-            (
-                "carry_weight_strength_mult",
-                self.carry_weight_strength_mult,
-            ),
+            ("carry_weight_mult", self.carry_weight_mult),
         ];
         for (name, value) in finite {
             if !value.is_finite() {
@@ -344,7 +352,9 @@ impl CharacterSheet {
         *current
     }
 
-    /// Derived attributes recomputed from the sheet.
+    /// Derived attributes recomputed from the sheet. Max health follows the
+    /// engine's actor-value derivation: base + Endurance term + a
+    /// `(level - 1)` level term.
     #[must_use]
     pub fn derived(&self, settings: &GmstSettings) -> DerivedAttributes {
         let endurance = f32::from(self.effective_special(SpecialAttribute::Endurance));
@@ -354,11 +364,9 @@ impl CharacterSheet {
         DerivedAttributes {
             max_health: settings.health_base
                 + endurance * settings.health_endurance_mult
-                + f32::from(self.level) * settings.health_level_mult,
-            max_action_points: settings.action_points_base
-                + agility * settings.action_points_agility_mult,
-            carry_weight: settings.carry_weight_base
-                + strength * settings.carry_weight_strength_mult,
+                + f32::from(self.level.saturating_sub(1)) * settings.health_level_mult,
+            max_action_points: settings.action_points_base + agility * settings.action_points_mult,
+            carry_weight: settings.carry_weight_base + strength * settings.carry_weight_mult,
             critical_chance_bps: critical_chance_bps(luck, 0),
         }
     }
@@ -398,21 +406,28 @@ pub fn base_poison_rad_resistance_bps(endurance: u8) -> u32 {
     (u32::from(endurance.clamp(SPECIAL_MIN, SPECIAL_MAX)).saturating_sub(1)) * 500
 }
 
-/// Cumulative XP required to reach `level`: `(level - 1) * level / 2 * xp_base`.
+/// Cumulative XP required to reach `level`: the level steps grow linearly,
+/// `(level - 1) * iXPBase + (level - 1) * (level - 2) / 2 * iXPBumpBase`
+/// (vanilla: 200, 550, 1050, 1700, ... 66 700 at level 30).
 #[must_use]
 pub fn xp_threshold(level: u8, settings: &GmstSettings) -> u32 {
     if level <= 1 {
         return 0;
     }
     let level = u32::from(level);
-    ((level - 1) * level / 2).saturating_mul(settings.xp_base)
+    let steps = level - 1;
+    steps.saturating_mul(settings.xp_base)
+        + (steps * (level - 2) / 2).saturating_mul(settings.xp_bump_base)
 }
 
-/// Skill points granted by one level-up: base + effective Intelligence.
+/// Skill points granted by one level-up:
+/// `iLevelUpSkillPointsBase + (Intelligence - 1) * iLevelUpSkillPointsInterval`
+/// (vanilla defaults 11 and 1 -- equivalently `10 + INT`).
 #[must_use]
 pub fn skill_points_per_level(sheet: &CharacterSheet, settings: &GmstSettings) -> u16 {
-    u16::from(settings.level_up_skill_points)
-        + u16::from(sheet.effective_special(SpecialAttribute::Intelligence))
+    let intelligence = u16::from(sheet.effective_special(SpecialAttribute::Intelligence)).max(1);
+    u16::from(settings.level_up_skill_points_base)
+        + (intelligence - 1) * u16::from(settings.level_up_skill_points_interval)
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]

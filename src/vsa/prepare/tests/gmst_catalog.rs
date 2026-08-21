@@ -32,7 +32,7 @@ fn builds_settings_from_pairs_with_defaults_and_counters() {
     assert_eq!(catalog.settings.health_endurance_mult, 25.0);
     assert_eq!(catalog.settings.max_player_level, 20);
     assert_eq!(catalog.settings.health_base, 100.0);
-    assert_eq!(catalog.settings.xp_base, 150);
+    assert_eq!(catalog.settings.xp_base, 200);
     // Unknown settings are kept in the input but not consumed.
     assert_eq!(catalog.counters.total, 5);
     assert_eq!(catalog.counters.consumed, 2);
@@ -52,7 +52,7 @@ fn empty_inputs_keep_full_defaults() {
 fn catalog_round_trips_through_ron() {
     let inputs = GmstCatalogInputs {
         settings_pairs: vec![
-            setting("iBaseActionPoints", GmstValue::Int(70)),
+            setting("fAVDActionPointsBase", GmstValue::Int(70)),
             setting("bSomeFlag", GmstValue::Bool(true)),
             setting("sSomeText", GmstValue::Str("hello".into())),
         ],

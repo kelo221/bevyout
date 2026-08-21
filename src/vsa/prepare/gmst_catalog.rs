@@ -25,17 +25,18 @@ pub(crate) const GMST_CATALOG_REVISION: &str = "openmw-gmst-v1";
 
 /// The GMST setting names the stat kernels consume (`bevyout_core::stats`
 /// constants). Used only for the "consumed" counter below.
-const KNOWN_SETTING_NAMES: [&str; 10] = [
-    bevyout_core::stats::GMST_HEALTH_BASE,
+const KNOWN_SETTING_NAMES: [&str; 11] = [
     bevyout_core::stats::GMST_HEALTH_ENDURANCE_MULT,
     bevyout_core::stats::GMST_HEALTH_LEVEL_MULT,
     bevyout_core::stats::GMST_ACTION_POINTS_BASE,
-    bevyout_core::stats::GMST_ACTION_POINTS_AGILITY_MULT,
+    bevyout_core::stats::GMST_ACTION_POINTS_MULT,
     bevyout_core::stats::GMST_CARRY_WEIGHT_BASE,
-    bevyout_core::stats::GMST_CARRY_WEIGHT_STRENGTH_MULT,
+    bevyout_core::stats::GMST_CARRY_WEIGHT_MULT,
     bevyout_core::stats::GMST_MAX_PLAYER_LEVEL,
-    bevyout_core::stats::GMST_LEVEL_UP_SKILL_POINTS,
+    bevyout_core::stats::GMST_LEVEL_UP_SKILL_POINTS_BASE,
+    bevyout_core::stats::GMST_LEVEL_UP_SKILL_POINTS_INTERVAL,
     bevyout_core::stats::GMST_XP_BASE,
+    bevyout_core::stats::GMST_XP_BUMP_BASE,
 ];
 
 /// Prepared `AVIF` actor-value metadata: FormID, EditorID, display name,
