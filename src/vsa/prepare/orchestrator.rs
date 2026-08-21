@@ -13,6 +13,10 @@ use bevyout_core::actor_state::{ActorSkill, ActorValue};
 use bevyout_core::facegen::{FaceGenAssetKind, FaceGenDiagnostic, FaceGenRaw};
 use bevyout_core::image_space::IMAGE_SPACE_MODIFIER_CATALOG_REVISION;
 use bevyout_core::manifest::CellInfo;
+use bevyout_core::perks::{
+    CONDITION_FUNCTION_GET_ACTOR_VALUE, CONDITION_OPER_GREATER_OR_EQUAL, EntryPointPayload,
+    PerkCondition, PerkDefinition, PerkEntry, actor_value_from_condition_index,
+};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// Dispatches `prepare`: a single legacy selector goes straight through
@@ -1707,6 +1711,28 @@ fn prepare_cell(
         message: gmst_catalog_summary.clone(),
     });
     output.push(gmst_catalog_summary);
+    // M9 wave 2 (#312): content-set-wide perk catalog, same
+    // fingerprint-keyed deterministic-path contract as gmst.ron above.
+    let perk_catalog_inputs = build_perk_catalog_inputs(&parsed);
+    let perk_catalog = build_perk_catalog(&perk_catalog_inputs, &source_fingerprint);
+    let (perk_catalog_path_relative, _perk_catalog_hash) =
+        write_perk_catalog(&cache_dir, &perk_catalog)?;
+    let perk_catalog_summary = format!(
+        "perk catalog: {} perks, {} playable, {} hidden, {} quest, {} ability, {} entry-point entries, {} unknown conditions -> {}",
+        perk_catalog.counters.total,
+        perk_catalog.counters.playable,
+        perk_catalog.counters.hidden,
+        perk_catalog.counters.quest_entries,
+        perk_catalog.counters.ability_entries,
+        perk_catalog.counters.entry_point_entries,
+        perk_catalog.counters.unknown_conditions,
+        perk_catalog_path_relative
+    );
+    diagnostics.push(Diagnostic {
+        severity: "info".into(),
+        message: perk_catalog_summary.clone(),
+    });
+    output.push(perk_catalog_summary);
     // Per-cell artifact next to `scene.ron` -- the actor catalog embeds this
     // cell's ACHR/ACRE placements, so unlike the content-set-wide item/
     // recipe catalogs it must not share one fingerprint-keyed file across
@@ -3089,6 +3115,108 @@ fn build_gmst_catalog_inputs(parsed: &ParsedPlugin) -> GmstCatalogInputs {
         actor_values,
         undecoded,
     }
+}
+
+/// Boundary conversion for the content-set-wide perk catalog (M9 wave 2
+/// #312): wire-level `PERK` records become core `PerkDefinition`s. Only
+/// `GetActorValue` (`0x1EF`) conditions with the greater-or-equal oper
+/// (`0x60`) and a mapped AV index resolve into `PerkCondition`s; every
+/// other condition word counts as `unknown_conditions` so the eligibility
+/// evaluator (#313) blocks on it instead of guessing.
+fn build_perk_catalog_inputs(parsed: &ParsedPlugin) -> PerkCatalogInputs {
+    let perks = parsed
+        .perks
+        .values()
+        .map(|record| PerkDefinition {
+            form_id: record.form_id,
+            editor_id: record.editor_id.clone().unwrap_or_default(),
+            name: record.name.clone(),
+            description: record.description.clone(),
+            min_level: record.min_level,
+            ranks: record.ranks,
+            playable: record.playable,
+            hidden: record.hidden,
+            conditions: record
+                .conditions
+                .iter()
+                .filter(|condition| perk_condition_resolvable(condition))
+                .map(|condition| PerkCondition {
+                    actor_value: actor_value_from_condition_index(condition.param1)
+                        .expect("perk_condition_resolvable verified the mapping"),
+                    threshold: perk_condition_threshold(condition.comparison_value)
+                        .expect("perk_condition_resolvable verified the threshold"),
+                })
+                .collect(),
+            unknown_conditions: record
+                .conditions
+                .iter()
+                .filter(|condition| !perk_condition_resolvable(condition))
+                .count() as u32,
+            entries: record
+                .entries
+                .iter()
+                .map(|entry| match entry {
+                    PerkEntryWire::Quest {
+                        rank,
+                        quest_form_id,
+                        unknown,
+                        ..
+                    } => PerkEntry::Quest {
+                        rank: *rank,
+                        quest_form_id: *quest_form_id,
+                        unknown: *unknown,
+                    },
+                    PerkEntryWire::Ability {
+                        rank,
+                        spell_form_id,
+                        ..
+                    } => PerkEntry::Ability {
+                        rank: *rank,
+                        spell_form_id: *spell_form_id,
+                    },
+                    PerkEntryWire::EntryPoint {
+                        rank,
+                        code,
+                        param_count,
+                        entry_priority,
+                        function,
+                        data,
+                        ..
+                    } => PerkEntry::EntryPoint {
+                        rank: *rank,
+                        code: *code,
+                        param_count: *param_count,
+                        priority: *entry_priority,
+                        // EPFT 1 marks a float parameter; any other shape
+                        // keeps the raw word uninterpreted.
+                        payload: match (function, data) {
+                            (Some(1), Some(bits)) => {
+                                EntryPointPayload::Value(f32::from_bits(*bits))
+                            }
+                            (_, Some(bits)) => EntryPointPayload::Raw(*bits),
+                            (_, None) => EntryPointPayload::None,
+                        },
+                    },
+                })
+                .collect(),
+        })
+        .collect();
+    PerkCatalogInputs { perks }
+}
+
+/// A perk condition resolves only as a `GetActorValue` greater-or-equal
+/// gate with a mapped actor value and a whole-unit threshold in range.
+fn perk_condition_resolvable(condition: &PerkConditionWire) -> bool {
+    condition.function == CONDITION_FUNCTION_GET_ACTOR_VALUE
+        && condition.oper == CONDITION_OPER_GREATER_OR_EQUAL
+        && actor_value_from_condition_index(condition.param1).is_some()
+        && perk_condition_threshold(condition.comparison_value).is_some()
+}
+
+/// Thresholds are whole units in `0..=100` (every observed gate is
+/// integral; anything else stays unknown rather than rounded).
+fn perk_condition_threshold(value: f32) -> Option<u8> {
+    (value.fract() == 0.0 && (0.0..=100.0).contains(&value)).then_some(value as u8)
 }
 
 /// decoded `PACK` record (content-set-wide, like `parsed.recipes`/

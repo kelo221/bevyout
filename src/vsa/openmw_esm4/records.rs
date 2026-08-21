@@ -632,6 +632,177 @@ pub(crate) fn parse_avif(subs: &[Subrecord], form_id: u32, record_flags: u32) ->
     }
 }
 
+/// Subrecords the `PERK` decoder consumes (M9 wave 2 #312); everything else
+/// lands in `ignored_subrecords`.
+const PERK_SUPPORTED_SUBRECORDS: [&str; 10] = [
+    "EDID", "FULL", "DESC", "ICON", "CTDA", "DATA", "PRKE", "PRKF", "EPFT", "EPFD",
+];
+
+/// `PERK.DATA` gate fields after the leading unknown byte.
+#[derive(Debug, Clone, Copy, Default)]
+struct PerkDataGates {
+    min_level: u8,
+    ranks: u8,
+    playable: bool,
+    hidden: bool,
+}
+
+/// One `PRKE`..`PRKF` entry under construction.
+#[derive(Debug, Clone, Default)]
+struct PerkEntryDraft {
+    entry_type: Option<u8>,
+    rank: u8,
+    priority: u8,
+    data: Option<Vec<u8>>,
+    epft: Option<u8>,
+    epfd: Option<Vec<u8>>,
+}
+
+/// Decoded `PERK` record (M9 wave 2 #312). The layout was probed against
+/// the real GOTY `Fallout3.esm` with known perks as ground truth (see
+/// `docs/plans/M9_WAVE2_PLAN.md`): `DATA` is five bytes of gate fields,
+/// `CTDA` conditions keep their raw words, and entries are delimited by
+/// `PRKE`/`PRKF` with a type-specific inner `DATA`.
+pub(crate) fn parse_perk(subs: &[Subrecord], form_id: u32, record_flags: u32) -> PerkRecord {
+    let mut conditions = Vec::new();
+    let mut entries = Vec::new();
+    let mut draft: Option<PerkEntryDraft> = None;
+    for subrecord in subs {
+        let data = &subrecord.data;
+        match subrecord.signature.as_str() {
+            "CTDA" => {
+                // 28 bytes: oper u8, 3 pad, comparison f32, function u32,
+                // param1 u32, 12 more bytes. Short subrecords are skipped
+                // rather than guessed into a condition.
+                if data.len() >= 16
+                    && let (Some(value), Some(function), Some(param1)) =
+                        (f32_at_option(data, 4), u32_at(data, 8), u32_at(data, 12))
+                {
+                    conditions.push(PerkConditionWire {
+                        oper: data[0],
+                        comparison_value: value,
+                        function,
+                        param1,
+                    });
+                }
+            }
+            "DATA" if draft.is_none() => {
+                // The top-level gates `DATA` always precedes the first
+                // `PRKE`; re-read below via `sub`, which returns it.
+            }
+            "DATA" => {
+                if let Some(draft) = draft.as_mut() {
+                    draft.data = Some(data.clone());
+                }
+            }
+            "EPFT" => {
+                if let Some(draft) = draft.as_mut() {
+                    draft.epft = data.first().copied();
+                }
+            }
+            "EPFD" => {
+                if let Some(draft) = draft.as_mut() {
+                    draft.epfd = Some(data.clone());
+                }
+            }
+            "PRKE" => {
+                // Start a fresh entry; a missing `PRKF` before the next
+                // `PRKE` is malformed input, so the previous draft still
+                // finalizes below.
+                finalize_perk_entry(draft.take(), &mut entries);
+                draft = Some(PerkEntryDraft {
+                    entry_type: data.first().copied(),
+                    rank: data.get(1).copied().unwrap_or(0),
+                    priority: data.get(2).copied().unwrap_or(0),
+                    ..PerkEntryDraft::default()
+                });
+            }
+            "PRKF" => finalize_perk_entry(draft.take(), &mut entries),
+            _ => {}
+        }
+    }
+    finalize_perk_entry(draft.take(), &mut entries);
+    let gates = sub(subs, "DATA")
+        .filter(|data| data.len() >= 5)
+        .map(|data| PerkDataGates {
+            min_level: data[1],
+            ranks: data[2],
+            playable: data[3] != 0,
+            hidden: data[4] != 0,
+        })
+        .unwrap_or_default();
+    PerkRecord {
+        form_id,
+        record_flags,
+        editor_id: sub(subs, "EDID").map(cstring),
+        name: sub(subs, "FULL").map(cstring),
+        description: sub(subs, "DESC").map(cstring),
+        min_level: gates.min_level,
+        ranks: gates.ranks,
+        playable: gates.playable,
+        hidden: gates.hidden,
+        conditions,
+        entries,
+        ignored_subrecords: ignored_signatures(subs, &PERK_SUPPORTED_SUBRECORDS),
+    }
+}
+
+/// Converts a finished `PRKE` draft into its typed wire entry; drafts with
+/// no entry type or an unknown type are dropped (the record's
+/// `ignored_subrecords` already counts unknown signatures).
+fn finalize_perk_entry(draft: Option<PerkEntryDraft>, entries: &mut Vec<PerkEntryWire>) {
+    let Some(draft) = draft else { return };
+    let Some(entry_type) = draft.entry_type else {
+        return;
+    };
+    let word = |data: &Option<Vec<u8>>, offset: usize| {
+        data.as_deref()
+            .and_then(|data| u32_at(data, offset))
+            .unwrap_or(0)
+    };
+    let entry = match entry_type {
+        // Quest: 8 bytes, quest FormID plus one undecoded word.
+        0 => PerkEntryWire::Quest {
+            rank: draft.rank,
+            priority: draft.priority,
+            quest_form_id: word(&draft.data, 0),
+            unknown: word(&draft.data, 4),
+        },
+        // Ability: 4-byte SPEL FormID.
+        1 => PerkEntryWire::Ability {
+            rank: draft.rank,
+            priority: draft.priority,
+            spell_form_id: word(&draft.data, 0),
+        },
+        // Entry point: 3-byte inner DATA (code, param count, priority)
+        // plus EPFT/EPFD. The EPFD word stays raw; only the catalog
+        // interprets float payloads.
+        2 => PerkEntryWire::EntryPoint {
+            rank: draft.rank,
+            priority: draft.priority,
+            code: draft
+                .data
+                .as_deref()
+                .and_then(|d| d.first().copied())
+                .unwrap_or(0),
+            param_count: draft
+                .data
+                .as_deref()
+                .and_then(|d| d.get(1).copied())
+                .unwrap_or(0),
+            entry_priority: draft
+                .data
+                .as_deref()
+                .and_then(|d| d.get(2).copied())
+                .unwrap_or(0),
+            function: draft.epft,
+            data: draft.epfd.as_deref().and_then(|d| u32_at(d, 0)),
+        },
+        _ => return,
+    };
+    entries.push(entry);
+}
+
 pub(crate) fn parse_sound_parameters(data: &[u8]) -> Option<SoundParameters> {
     if data.len() < 8 {
         return None;

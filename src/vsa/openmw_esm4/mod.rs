@@ -454,6 +454,72 @@ pub(crate) struct AvifRecord {
     pub(crate) ignored_subrecords: Vec<String>,
 }
 
+/// One raw `PERK` `CTDA` condition (M9 wave 2 #312): the wire words are
+/// kept as-is because only `GetActorValue` (function `0x1EF`) conditions
+/// with the greater-or-equal oper (`0x60`) are resolvable against a
+/// character sheet; the AV index itself is engine-internal (see
+/// `bevyout_core::perks::actor_value_from_condition_index`).
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct PerkConditionWire {
+    pub(crate) oper: u8,
+    pub(crate) comparison_value: f32,
+    pub(crate) function: u32,
+    pub(crate) param1: u32,
+}
+
+/// One raw `PERK` entry between `PRKE`/`PRKF` (M9 wave 2 #312), typed by
+/// the `PRKE` entry kind. Inner payloads stay raw; the perk catalog's
+/// boundary conversion interprets entry-point parameters.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) enum PerkEntryWire {
+    /// `PRKE` type 0: quest FormID plus an undecoded second word.
+    Quest {
+        rank: u8,
+        priority: u8,
+        quest_form_id: u32,
+        unknown: u32,
+    },
+    /// `PRKE` type 1: the ability `SPEL` FormID.
+    Ability {
+        rank: u8,
+        priority: u8,
+        spell_form_id: u32,
+    },
+    /// `PRKE` type 2: entry-point code plus `EPFT`/`EPFD` (the `EPFD`
+    /// bytes are kept as a raw word; only `EPFT == 1` floats are
+    /// interpreted later).
+    EntryPoint {
+        rank: u8,
+        priority: u8,
+        code: u8,
+        param_count: u8,
+        entry_priority: u8,
+        function: Option<u8>,
+        data: Option<u32>,
+    },
+}
+
+/// Decoded `PERK` record (M9 wave 2 #312): `DATA` level/rank gates, raw
+/// `CTDA` conditions, and typed `PRKE`..`PRKF` entries.
+#[allow(dead_code)]
+#[derive(Debug, Clone)]
+pub(crate) struct PerkRecord {
+    pub(crate) form_id: u32,
+    pub(crate) record_flags: u32,
+    pub(crate) editor_id: Option<String>,
+    pub(crate) name: Option<String>,
+    pub(crate) description: Option<String>,
+    pub(crate) min_level: u8,
+    pub(crate) ranks: u8,
+    pub(crate) playable: bool,
+    pub(crate) hidden: bool,
+    pub(crate) conditions: Vec<PerkConditionWire>,
+    pub(crate) entries: Vec<PerkEntryWire>,
+    pub(crate) ignored_subrecords: Vec<String>,
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct SoundParameters {
     pub(crate) byte_len: u32,
@@ -703,6 +769,8 @@ pub(crate) struct ParsedPlugin {
     // other shared catalogs.
     pub(crate) gmsts: SharedCatalog<u32, GmstRecord>,
     pub(crate) actor_values: SharedCatalog<u32, AvifRecord>,
+    // M9 wave 2 (#312): perks feed the content-set-wide perk catalog.
+    pub(crate) perks: SharedCatalog<u32, PerkRecord>,
     pub(crate) lighting_templates: SharedCatalog<u32, LightingTemplateRecord>,
     pub(crate) climates: SharedCatalog<u32, ClimateRecord>,
     pub(crate) weathers: SharedCatalog<u32, WeatherRecord>,
@@ -993,6 +1061,7 @@ impl ParsedContentSet {
             music: state.music.clone(),
             gmsts: state.gmsts.clone(),
             actor_values: state.actor_values.clone(),
+            perks: state.perks.clone(),
             lighting_templates: state.lighting_templates.clone(),
             climates: state.climates.clone(),
             weathers: state.weathers.clone(),
@@ -1043,6 +1112,7 @@ pub(crate) struct ParsedState {
     music: SharedCatalog<u32, MusicRecord>,
     gmsts: SharedCatalog<u32, GmstRecord>,
     actor_values: SharedCatalog<u32, AvifRecord>,
+    perks: SharedCatalog<u32, PerkRecord>,
     lighting_templates: SharedCatalog<u32, LightingTemplateRecord>,
     climates: SharedCatalog<u32, ClimateRecord>,
     weathers: SharedCatalog<u32, WeatherRecord>,

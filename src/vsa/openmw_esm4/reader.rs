@@ -267,6 +267,16 @@ pub(crate) fn walk_container(
                         .insert(form_id, parse_avif(&subs, form_id, flags));
                 }
             }
+            // M9 wave 2 (#312): PERK joins the content-set-wide catalogs.
+            "PERK" => {
+                if flags & RECORD_DELETED != 0 {
+                    state.perks.remove(&form_id);
+                } else {
+                    state
+                        .perks
+                        .insert(form_id, parse_perk(&subs, form_id, flags));
+                }
+            }
             "LGTM" => {
                 if flags & RECORD_DELETED != 0 {
                     state.lighting_templates.remove(&form_id);
