@@ -422,12 +422,18 @@ pub fn xp_threshold(level: u8, settings: &GmstSettings) -> u32 {
 
 /// Skill points granted by one level-up:
 /// `iLevelUpSkillPointsBase + (Intelligence - 1) * iLevelUpSkillPointsInterval`
-/// (vanilla defaults 11 and 1 -- equivalently `10 + INT`).
+/// (vanilla defaults 11 and 1 -- equivalently `10 + INT`) plus any bonus
+/// from owned perks such as Educated (`bonus_points`, 0 = neutral).
 #[must_use]
-pub fn skill_points_per_level(sheet: &CharacterSheet, settings: &GmstSettings) -> u16 {
+pub fn skill_points_per_level(
+    sheet: &CharacterSheet,
+    settings: &GmstSettings,
+    bonus_points: u16,
+) -> u16 {
     let intelligence = u16::from(sheet.effective_special(SpecialAttribute::Intelligence)).max(1);
     u16::from(settings.level_up_skill_points_base)
         + (intelligence - 1) * u16::from(settings.level_up_skill_points_interval)
+        + bonus_points
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -439,12 +445,19 @@ pub struct AwardXpOutcome {
 }
 
 /// Awards XP, advancing levels across every crossed threshold and clamping
-/// at the configured level cap.
+/// at the configured level cap. `xp_multiplier_bps` scales the awarded
+/// amount first (basis points, 10 000 = neutral, e.g. Swift Learner rank 1
+/// = 11 000); the multiplication saturates rather than wraps.
 pub fn award_xp(
     sheet: &mut CharacterSheet,
     amount: u32,
+    xp_multiplier_bps: u32,
     settings: &GmstSettings,
 ) -> AwardXpOutcome {
+    // `u32::MAX * u32::MAX` still fits in u64, so the plain product cannot
+    // overflow; dividing after the multiply keeps the rounding exact
+    // (1000 XP at 11 000 bps = 1100).
+    let amount = ((u64::from(amount) * u64::from(xp_multiplier_bps)) / 10_000) as u32;
     let cap_level = settings.max_player_level.max(1);
     let cap_xp = xp_threshold(cap_level, settings);
     let total = sheet.xp.saturating_add(amount).min(cap_xp);
@@ -453,7 +466,7 @@ pub fn award_xp(
         level += 1;
     }
     let levels_gained = level.saturating_sub(sheet.level.max(1));
-    let skill_points_gained = u16::from(levels_gained) * skill_points_per_level(sheet, settings);
+    let skill_points_gained = u16::from(levels_gained) * skill_points_per_level(sheet, settings, 0);
     sheet.xp = total;
     sheet.level = level;
     AwardXpOutcome {

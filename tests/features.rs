@@ -56,6 +56,12 @@ mod actor_state {
 mod stats {
     pub use bevyout_core::stats::*;
 }
+// M9 wave 2/#313 pure perk eligibility and active-modifier kernels live in
+// the same engine-independent core boundary.
+#[allow(dead_code, unused_imports)]
+mod perks {
+    pub use bevyout_core::perks::*;
+}
 // M6 wave 3's actor-residency policy is pure and dependency-light. Include
 // the production seam verbatim so the executable feature coverage exercises
 // the same canonical identity and handoff decisions as the viewer.
@@ -18019,6 +18025,7 @@ async fn when_rpg_award_xp(world: &mut BevyoutWorld, amount: String) {
     let outcome = stats::award_xp(
         &mut world.rpg_sheet,
         amount.parse::<u32>().unwrap(),
+        perks::NEUTRAL_XP_MULTIPLIER_BPS,
         &world.rpg_settings,
     );
     world.rpg_last_award = Some(outcome);
