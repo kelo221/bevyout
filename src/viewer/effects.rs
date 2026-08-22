@@ -30,13 +30,15 @@ use bevy::prelude::*;
 use bevyout_core::actor_state::{ActorValue, SpecialAttribute};
 use bevyout_core::chems::{RPG_RNG_DEFAULT_SEED, RpgRngState};
 use bevyout_core::effects::{
-    ActiveEffect, ActiveEffectsLedger, EffectSource, IngestibleDefinition, projected_special,
+    ActiveEffect, ActiveEffectsLedger, EffectSource, IngestibleConditionOutcome,
+    IngestibleDefinition, active_rad_resistance_bps, evaluate_ingestible_condition,
+    projected_derived, projected_special,
 };
 use bevyout_core::radiation::{self, RadiationPool};
 
 use super::player::FpsPlayer;
 use super::plugins::ViewerSet;
-use super::stats::ActorStats;
+use super::stats::{ActorPerks, ActorStats, DerivedAttributes};
 use crate::vsa::{EFFECT_CATALOG_REVISION, PreparedEffectCatalog, PreparedSceneManifest};
 
 /// Prepared ingestible definitions keyed by FormID, loaded from
@@ -108,6 +110,14 @@ pub(crate) struct ExpiredChemDose {
     pub(crate) withdrawal_form_id: u32,
 }
 
+#[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum EffectsSet {
+    Attach,
+    Mutate,
+    Project,
+    Clamp,
+}
+
 pub(crate) struct EffectsPlugin;
 
 impl Plugin for EffectsPlugin {
@@ -115,18 +125,37 @@ impl Plugin for EffectsPlugin {
         app.init_resource::<EffectCatalog>()
             .init_resource::<RngResource>()
             .add_message::<ExpiredChemDose>()
+            .configure_sets(
+                Update,
+                (
+                    EffectsSet::Attach,
+                    EffectsSet::Mutate,
+                    EffectsSet::Project,
+                    EffectsSet::Clamp,
+                )
+                    .chain()
+                    .in_set(ViewerSet::WorldSync),
+            )
+            .add_systems(
+                Update,
+                (attach_effects_to_player, seed_player_vitals)
+                    .chain()
+                    .in_set(EffectsSet::Attach),
+            )
             .add_systems(
                 Update,
                 (
-                    attach_effects_to_player,
-                    seed_player_vitals,
-                    recalculate_projected_special,
                     tick_active_effects_and_doses,
                     start_withdrawal_on_chem_expiry,
                 )
                     .chain()
-                    .in_set(ViewerSet::WorldSync),
-            );
+                    .in_set(EffectsSet::Mutate),
+            )
+            .add_systems(
+                Update,
+                recalculate_projected_special.in_set(EffectsSet::Project),
+            )
+            .add_systems(Update, clamp_current_health.in_set(EffectsSet::Clamp));
     }
 }
 
@@ -185,6 +214,28 @@ fn recalculate_projected_special(mut players: ProjectionQuery) {
     }
 }
 
+fn clamp_current_health(
+    mut players: Query<(&DerivedAttributes, &mut PlayerVitals), Changed<DerivedAttributes>>,
+) {
+    for (derived, mut vitals) in &mut players {
+        vitals.current_health = vitals.current_health.min(derived.0.max_health).max(0.0);
+    }
+}
+
+/// Applies an environmental or ingestible radiation dose through active
+/// RadResist modifiers.
+pub(crate) fn apply_player_radiation(
+    radiation: &mut PlayerRadiation,
+    effects: &ActiveEffectsList,
+    dose: u16,
+) -> radiation::RadiationDoseOutcome {
+    radiation::apply_radiation(
+        &mut radiation.0,
+        dose,
+        active_rad_resistance_bps(&effects.ledger),
+    )
+}
+
 /// Advances every timed effect and chem-dose timer by the frame's whole
 /// milliseconds. Timed effects expire out of the ledger; an expiring chem
 /// dose publishes `ExpiredChemDose` for the withdrawal transition below.
@@ -240,7 +291,8 @@ pub(crate) struct AppliedIngestible {
     pub(crate) rads_removed: u16,
     pub(crate) rads_added: i32,
     pub(crate) applied_modifiers: usize,
-    pub(crate) skipped_conditioned: usize,
+    pub(crate) condition_false: usize,
+    pub(crate) condition_unsupported: usize,
     pub(crate) addiction_roll: Option<bool>,
     /// The PRNG draw index after this ingestible's roll (unchanged for a
     /// non-addictive item); acceptance evidence cites it.
@@ -260,11 +312,18 @@ pub(crate) struct PlayerEffectComponents<'a> {
 pub(crate) fn apply_ingestible(
     definition: &IngestibleDefinition,
     stats: &ActorStats,
+    perks: &ActorPerks,
     settings: &super::stats::StatsSettings,
     player: PlayerEffectComponents,
     rng: &mut RpgRngState,
 ) -> AppliedIngestible {
-    let max_health = stats.0.derived(&settings.0).max_health;
+    let max_health = projected_derived(
+        &stats.0,
+        &player.effects.ledger,
+        player.radiation.0.rads,
+        &settings.0,
+    )
+    .max_health;
     let PlayerEffectComponents {
         vitals,
         radiation,
@@ -277,18 +336,24 @@ pub(crate) fn apply_ingestible(
         rads_removed: 0,
         rads_added: 0,
         applied_modifiers: 0,
-        skipped_conditioned: 0,
+        condition_false: 0,
+        condition_unsupported: 0,
         addiction_roll: None,
         rng_draw_index: rng.draw_index,
     };
     for effect in &definition.effects {
-        // Conditioned effect items stay cataloged but are not run — the
-        // wave-2 conservative contract (Stimpak's GetHealthPercentage
-        // "don't overheal" gate lives here; the manual heal clamp below
-        // covers the common case deterministically).
-        if effect.conditioned {
-            outcome.skipped_conditioned += 1;
-            continue;
+        if let Some(condition) = &effect.condition {
+            match evaluate_ingestible_condition(condition, &perks.0) {
+                IngestibleConditionOutcome::True => {}
+                IngestibleConditionOutcome::False => {
+                    outcome.condition_false += 1;
+                    continue;
+                }
+                IngestibleConditionOutcome::Unsupported => {
+                    outcome.condition_unsupported += 1;
+                    continue;
+                }
+            }
         }
         let Some(actor_value) = effect.actor_value else {
             continue;
@@ -323,7 +388,7 @@ pub(crate) fn apply_ingestible(
                     } else {
                         let dose = (-effect.magnitude) as u16;
                         let absorbed =
-                            radiation::apply_radiation(&mut radiation.0, dose, 0).absorbed_rads;
+                            apply_player_radiation(radiation, effects, dose).absorbed_rads;
                         outcome.rads_added = i32::from(absorbed);
                     }
                 } else {
@@ -364,7 +429,12 @@ pub(crate) fn apply_ingestible(
         let buff_ms = definition
             .effects
             .iter()
-            .filter(|effect| !effect.conditioned)
+            .filter(|effect| {
+                effect.condition.as_ref().is_none_or(|condition| {
+                    evaluate_ingestible_condition(condition, &perks.0)
+                        == IngestibleConditionOutcome::True
+                })
+            })
             .map(|effect| effect.duration_ms())
             .max()
             .unwrap_or(0);

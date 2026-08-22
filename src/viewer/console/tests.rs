@@ -2528,14 +2528,14 @@ fn getav_reads_derived_health_and_sheet_values_with_and_without_prefix() {
 }
 
 #[test]
-fn getav_rejects_unknown_and_unsupported_values() {
+fn getav_rejects_unknown_values_and_health_mutation_clamps() {
     let mut app = test_app();
     let output = exec(&mut app, "player.getav nosuchvalue");
     assert!(!output.ok);
     assert_eq!(error_code(&output), "unknown_actor_value");
-    let derived = exec(&mut app, "player.setav health 500");
-    assert!(!derived.ok);
-    assert_eq!(error_code(&derived), "unsupported_actor_value");
+    let health = exec(&mut app, "player.setav health 500");
+    assert!(health.ok);
+    assert_eq!(health.value["result"].as_f64(), Some(200.0));
 }
 
 #[test]
@@ -2560,9 +2560,11 @@ fn rewardxp_crosses_the_level_threshold_and_updates_derived_health() {
     assert_eq!(output.value["level"], 2);
     assert_eq!(output.value["levels_gained"], 1);
     assert_eq!(output.value["skill_points_gained"], 15);
-    // Derived max health is computed synchronously: 100 + 5*20 + 1*10.
+    // Raising the maximum does not grant free healing.
     let health = exec(&mut app, "player.getav health");
-    assert_eq!(health.value["result"].as_f64(), Some(210.0));
+    assert_eq!(health.value["result"].as_f64(), Some(200.0));
+    let set = exec(&mut app, "player.setav health 999");
+    assert_eq!(set.value["result"].as_f64(), Some(210.0));
 }
 
 #[test]
@@ -2820,7 +2822,10 @@ use crate::viewer::effects::EffectCatalog;
 /// real GOTY Fallout3.esm records.
 fn ingestible_test_catalog() -> EffectCatalog {
     use bevyout_core::actor_state::{ActorValue, SpecialAttribute};
-    use bevyout_core::effects::{IngestibleDefinition, IngestibleEffect};
+    use bevyout_core::effects::{
+        CONDITION_FUNCTION_HAS_PERK, CONDITION_OPER_EQUAL, IngestibleCondition,
+        IngestibleDefinition, IngestibleEffect,
+    };
     let instant = |mgef: u32, value: ActorValue, magnitude: f32| IngestibleEffect {
         mgef_form_id: mgef,
         magnitude,
@@ -2835,11 +2840,26 @@ fn ingestible_test_catalog() -> EffectCatalog {
         actor_value: Some(value),
         ..IngestibleEffect::default()
     };
+    let stimpak_condition = |comparison_value| IngestibleCondition {
+        oper: CONDITION_OPER_EQUAL,
+        comparison_value,
+        function: CONDITION_FUNCTION_HAS_PERK,
+        param1: 0x0009_4ebf,
+    };
     let stimpak = IngestibleDefinition {
         form_id: 0x0001_5169,
         editor_id: "Stimpak".into(),
         flags: 0x04,
-        effects: vec![instant(0x48C7B, ActorValue::Health, 30.0)],
+        effects: vec![
+            IngestibleEffect {
+                condition: Some(stimpak_condition(0.0)),
+                ..instant(0x48C7B, ActorValue::Health, 30.0)
+            },
+            IngestibleEffect {
+                condition: Some(stimpak_condition(1.0)),
+                ..instant(0x48C7B, ActorValue::Health, 36.0)
+            },
+        ],
         ..IngestibleDefinition::default()
     };
     let radaway = IngestibleDefinition {
@@ -2877,8 +2897,20 @@ fn ingestible_test_catalog() -> EffectCatalog {
         effects: vec![timed(0x66EB8, ActorValue::ActionPoints, 30.0)],
         ..IngestibleDefinition::default()
     };
+    let rad_x = IngestibleDefinition {
+        form_id: 0x0001_5168,
+        editor_id: "RadX".into(),
+        effects: vec![timed(0x1517B, ActorValue::RadResist, 25.0)],
+        ..IngestibleDefinition::default()
+    };
+    let irradiated_food = IngestibleDefinition {
+        form_id: 0x000f_0001,
+        editor_id: "IrradiatedFood".into(),
+        effects: vec![instant(0x1517A, ActorValue::Rads, -100.0)],
+        ..IngestibleDefinition::default()
+    };
     EffectCatalog {
-        ingestibles: [stimpak, radaway, buffout, jet]
+        ingestibles: [stimpak, radaway, buffout, jet, rad_x, irradiated_food]
             .into_iter()
             .map(|ingestible| (ingestible.form_id, ingestible))
             .collect(),
@@ -2941,8 +2973,76 @@ fn addchem_applies_instant_heal_and_timed_modifiers_without_inventory() {
         list.value["active_effects"].as_array().map(Vec::len),
         Some(2)
     );
-    let sheet = exec(&mut app, "getav strength");
-    assert_eq!(sheet.value["result"].as_f64(), Some(5.0));
+    let strength = exec(&mut app, "getav strength");
+    assert_eq!(strength.value["result"].as_f64(), Some(7.0));
+    let action_points = exec(&mut app, "getav action_points");
+    assert_eq!(action_points.value["result"].as_f64(), Some(75.0));
+}
+
+#[test]
+fn projected_actor_values_and_rad_x_resistance_are_exposed() {
+    let mut app = test_app();
+    app.insert_resource(ingestible_test_catalog());
+    assert_eq!(
+        exec(&mut app, "getav action_points").value["result"].as_f64(),
+        Some(75.0)
+    );
+    exec(&mut app, "addchem 00015164");
+    assert_eq!(
+        exec(&mut app, "getav action_points").value["result"].as_f64(),
+        Some(105.0)
+    );
+    exec(&mut app, "addchem 00015168");
+    assert_eq!(
+        exec(&mut app, "getav rad_resist").value["result"].as_f64(),
+        Some(25.0)
+    );
+    let dosed = exec(&mut app, "addrads 100");
+    assert_eq!(dosed.value["absorbed_rads"].as_i64(), Some(75));
+    let food = exec(&mut app, "addchem 000f0001");
+    assert_eq!(food.value["application"]["rads_added"].as_i64(), Some(75));
+    assert_eq!(exec(&mut app, "rads").value["rads"].as_i64(), Some(150));
+}
+
+#[test]
+fn stimpak_selects_fast_metabolism_branch_and_health_console_clamps() {
+    let mut app = test_app();
+    app.insert_resource(ingestible_test_catalog());
+    assert!(exec(&mut app, "setav health 140").ok);
+    let base = exec(&mut app, "addchem 00015169");
+    assert_eq!(base.value["application"]["healed_to"].as_f64(), Some(170.0));
+    assert_eq!(
+        base.value["application"]["condition_false"].as_i64(),
+        Some(1)
+    );
+    assert_eq!(
+        exec(&mut app, "getav health").value["result"].as_f64(),
+        Some(170.0)
+    );
+
+    {
+        let mut query = app
+            .world_mut()
+            .query::<&mut crate::viewer::stats::ActorPerks>();
+        query
+            .single_mut(app.world_mut())
+            .unwrap()
+            .0
+            .set_rank(0x0009_4ebf, 1);
+    }
+    assert!(exec(&mut app, "setav health 140").ok);
+    let perk = exec(&mut app, "addchem 00015169");
+    assert_eq!(perk.value["application"]["healed_to"].as_f64(), Some(176.0));
+    assert!(exec(&mut app, "setav health 999").ok);
+    assert_eq!(
+        exec(&mut app, "getav health").value["result"].as_f64(),
+        Some(200.0)
+    );
+    assert!(exec(&mut app, "modav health -999").ok);
+    assert_eq!(
+        exec(&mut app, "getav health").value["result"].as_f64(),
+        Some(0.0)
+    );
 }
 
 #[test]
@@ -3037,4 +3137,22 @@ fn useitem_applies_ingestible_effects_through_the_canonical_seam() {
         (healed_to - 170.0).abs() < f64::EPSILON,
         "healed to {healed_to}"
     );
+    assert_eq!(
+        app.world()
+            .resource::<crate::viewer::interaction::PlayerInventory>()
+            .count(0x0001_5169),
+        1
+    );
+    let canonical_count = app
+        .world()
+        .resource::<crate::viewer::interaction::CanonicalItemLedger>()
+        .ledger
+        .holders()
+        .get(&HolderId::Player)
+        .unwrap()
+        .items
+        .iter()
+        .map(|item| item.count)
+        .sum::<u32>();
+    assert_eq!(canonical_count, 1);
 }

@@ -22,6 +22,9 @@ polarity rather than naively adding rads.
 
 ## 0. One-time setup
 
+`openmw-effects-v2` preserves ingestible CTDA details, so re-run prepare even
+if this cell was prepared by the earlier wave build:
+
 ```
 cargo run-dev -- prepare --cell 000151e3
 ```
@@ -75,35 +78,47 @@ Megaton player house. The bridge examples below use `curl` against port
    `remaining_ms`) the effects expire and `effects` reports
    `0 active effect(s)`.
 
-Note: Stimpak (`00015169`) heals via effects authored with vanilla
-conditions (`GetHealthPercentage`). This wave reports but does not apply
-conditioned effects: expect `Stimpak: 2 conditioned effect(s) skipped`.
-That skip line is itself the acceptance evidence for #316's conditioned
-decode.
+9. Verify projected values while Buffout is active: `player.getav strength`
+   reports base +2, and `player.getav health` reports current health rather
+   than maximum health. `player.getav action_points` exposes the projected AP
+   maximum, including Jet's +30 modifier.
+10. Rad-X resistance: `addchem 00015168`, then `addrads 100`.
+    Expected: `+75 rads -> 75`; `player.getav rad_resist` reports `25`.
+11. Stimpak without Fast Metabolism:
+    `player.setav health 140`, `addchem 00015169`, `player.getav health`.
+    Expected: `Stimpak: health 170, 1 conditioned effect(s) false`, then
+    `health = 170`.
+12. Stimpak with Fast Metabolism:
+    `addperk 00094ebf`, `player.setav health 140`, `addchem 00015169`,
+    `player.getav health`. Expected health is **176**. The real Stimpak has
+    two mutually exclusive `HasPerk FastMetabolism` branches: 30 HP without
+    the perk and 36 HP with it. Unsupported CTDA functions remain skipped.
 
 ## C. Jet addiction: deterministic rolls
 
-9. Fresh viewer session (the PRNG seeds at startup; seed 0 default).
+13. Fresh viewer session (the PRNG seeds at startup; seed 0 default).
    `effects` → expect `rng at draw 0`.
-10. Dose Jet repeatedly: `addchem 00015164` eleven times, watching the log.
+14. Dose Jet repeatedly: `addchem 00015164` eleven times, watching the log.
     With the default seed the draw sequence is fixed: draws 0–8 fail,
     **draw 9 (390 bps < 2000 bps chance) addicts**, as does draw 10
     (201 bps). Expect `Jet: 1 timed modifier(s), ADDICTED` on the 10th
     dose, and `effects` shows
     `"addictions":[{"chem":"Jet","phase":"addicted","withdrawal_form_id":"00033067"}]`.
-11. Same-seed reproducibility: restart the viewer, repeat step 10 — the
+15. Same-seed reproducibility: restart the viewer, repeat step 14 — the
     addicted doses land on exactly the same draw indices.
-12. Cure: `cureaddiction` → `cured 1 addiction(s)`; `effects` shows
+16. Cure: `cureaddiction` → `cured 1 addiction(s)`; `effects` shows
     `0 addiction(s)` and the rng counter unchanged.
 
 ## D. Canonical seam: useitem consumes and applies
 
-13. `additem 00015169 2` → inventory has 2 Stimpaks.
-14. `useitem 0000000000000003` (instance ids allocate sequentially from
-    the ledger; the first additem in a fresh session starts at id 3).
-    Expected: `used item 0000000000000003` plus the Stimpak
-    conditioned-skip line from step B — consumption went through the
-    canonical item ledger and still applied the ingestible.
+17. `player.setav health 140`, then `additem 00015169 2` → inventory has 2
+    Stimpaks.
+18. `useitem 0000000000000003` (instance ids allocate sequentially from the
+    ledger; the first additem in a fresh session starts at id 3).
+    Expected: `used item 0000000000000003` plus `Stimpak: health 170, 1
+    conditioned effect(s) false`; inventory count drops to 1 and current
+    health is 170. Using Aid from the Pip-Boy performs the same canonical
+    consume-and-apply operation.
 
 ## E. Console reference
 

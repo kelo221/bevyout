@@ -21,8 +21,11 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 use crate::actor_state::{ActorSkill, ActorValue, SpecialAttribute};
+use crate::perks::PerkProgression;
 use crate::radiation::radiation_penalties;
-use crate::stats::CharacterSheet;
+use crate::stats::{
+    CharacterSheet, DerivedAttributes, GmstSettings, clamp_resistance_bps, derived_from_special,
+};
 
 /// Maps the engine's internal actor-value index found in `MGEF.DATA`'s
 /// primary actor-value field onto the domain `ActorValue` (M9 wave 3).
@@ -111,6 +114,50 @@ pub struct EffectDefinition {
     pub actor_value: Option<ActorValue>,
 }
 
+/// The decoded subset of one ingestible effect's `CTDA` condition.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct IngestibleCondition {
+    pub oper: u8,
+    pub comparison_value: f32,
+    pub function: u32,
+    pub param1: u32,
+}
+
+pub const CONDITION_FUNCTION_HAS_PERK: u32 = 449;
+pub const CONDITION_OPER_EQUAL: u8 = 0;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IngestibleConditionOutcome {
+    True,
+    False,
+    Unsupported,
+}
+
+#[must_use]
+pub fn evaluate_ingestible_condition(
+    condition: &IngestibleCondition,
+    perks: &PerkProgression,
+) -> IngestibleConditionOutcome {
+    if condition.oper != CONDITION_OPER_EQUAL
+        || condition.function != CONDITION_FUNCTION_HAS_PERK
+        || !condition.comparison_value.is_finite()
+        || !matches!(condition.comparison_value, 0.0 | 1.0)
+    {
+        return IngestibleConditionOutcome::Unsupported;
+    }
+    let actual = if perks.rank(condition.param1) > 0 {
+        1.0
+    } else {
+        0.0
+    };
+    if actual == condition.comparison_value {
+        IngestibleConditionOutcome::True
+    } else {
+        IngestibleConditionOutcome::False
+    }
+}
+
 /// One effect item of an ingestible: the decoded `EFID`/`EFIT` pair.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
@@ -123,10 +170,9 @@ pub struct IngestibleEffect {
     /// Resolved target when both the MGEF archetype modifies a value and
     /// its AV index maps onto the domain enum.
     pub actor_value: Option<ActorValue>,
-    /// True when a `CTDA` condition gates this effect item; conditioned
-    /// items stay cataloged but are not run (same conservative contract as
-    /// the wave-2 perk `unknown_conditions`).
-    pub conditioned: bool,
+    /// One decoded condition. Unsupported families remain cataloged and are
+    /// conservatively skipped by the runtime.
+    pub condition: Option<IngestibleCondition>,
 }
 
 impl IngestibleEffect {
@@ -326,6 +372,35 @@ pub fn projected_special(
             (attribute, effective)
         })
         .collect()
+}
+
+/// Derived attributes from effective SPECIAL plus direct active modifiers.
+#[must_use]
+pub fn projected_derived(
+    sheet: &CharacterSheet,
+    ledger: &ActiveEffectsLedger,
+    rads: u16,
+    settings: &GmstSettings,
+) -> DerivedAttributes {
+    let special = projected_special(sheet, ledger, rads);
+    let mut derived = derived_from_special(
+        sheet.level,
+        special[&SpecialAttribute::Strength],
+        special[&SpecialAttribute::Endurance],
+        special[&SpecialAttribute::Agility],
+        special[&SpecialAttribute::Luck],
+        settings,
+    );
+    derived.max_action_points =
+        (derived.max_action_points + ledger.modifier_for(ActorValue::ActionPoints)).max(0.0);
+    derived
+}
+
+/// Active RadResist modifiers converted from percentage points to basis points.
+#[must_use]
+pub fn active_rad_resistance_bps(ledger: &ActiveEffectsLedger) -> u32 {
+    let total = (ledger.modifier_for(ActorValue::RadResist).max(0.0) * 100.0).round();
+    clamp_resistance_bps(total.clamp(0.0, u32::MAX as f32) as u32)
 }
 
 #[cfg(test)]

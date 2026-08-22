@@ -21,7 +21,7 @@ use super::super::paths::fingerprint;
 
 /// Bump whenever this catalog's serialized shape changes, including
 /// serde-defaulted fields, per the prepared-asset rule in AGENTS.md.
-pub(crate) const EFFECT_CATALOG_REVISION: &str = "openmw-effects-v1";
+pub(crate) const EFFECT_CATALOG_REVISION: &str = "openmw-effects-v2";
 
 /// Plain boundary-conversion inputs; the orchestrator fills these from the
 /// parsed plugin chain's `ALCH`/`MGEF` records with the associated actor
@@ -47,8 +47,7 @@ pub(crate) struct EffectCatalogCounters {
     /// engine-builtin UMON monitor `0x0000014F` on real data) plus items
     /// with an unmapped associated actor value: cataloged, not applied.
     pub(crate) unresolved_effects: usize,
-    /// Effect items gated by a `CTDA` condition: stored, never run (the
-    /// wave-2 conservative-contract pattern).
+    /// Effect items gated by a decoded `CTDA` condition.
     pub(crate) conditioned_effects: usize,
 }
 
@@ -94,7 +93,7 @@ pub(crate) fn build_effect_catalog(
         conditioned_effects: ingestibles
             .iter()
             .flat_map(|ingestible| ingestible.effects.iter())
-            .filter(|effect| effect.conditioned)
+            .filter(|effect| effect.condition.is_some())
             .count(),
     };
     PreparedEffectCatalog {

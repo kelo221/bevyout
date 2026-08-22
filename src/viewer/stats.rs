@@ -9,6 +9,7 @@
 //! seeding pattern.
 
 use bevy::prelude::*;
+use bevyout_core::effects::projected_derived;
 use bevyout_core::perks::PerkDefinition;
 use bevyout_core::stats::{
     CharacterSheet, DerivedAttributes as CoreDerivedAttributes, GmstSettings, xp_threshold,
@@ -16,8 +17,8 @@ use bevyout_core::stats::{
 use std::collections::BTreeMap;
 use std::path::Path;
 
+use super::effects::{ActiveEffectsList, EffectsSet, PlayerRadiation};
 use super::player::FpsPlayer;
-use super::plugins::ViewerSet;
 use crate::vsa::{
     GMST_CATALOG_REVISION, PERK_CATALOG_REVISION, PreparedGmstCatalog, PreparedPerkCatalog,
     PreparedSceneManifest,
@@ -67,11 +68,10 @@ impl Plugin for StatsPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<StatsSettings>()
             .init_resource::<PerkCatalog>()
+            .add_systems(Update, attach_stats_to_player.in_set(EffectsSet::Attach))
             .add_systems(
                 Update,
-                (attach_stats_to_player, recalculate_derived_stats)
-                    .chain()
-                    .in_set(ViewerSet::WorldSync),
+                recalculate_derived_stats.in_set(EffectsSet::Project),
             );
     }
 }
@@ -87,15 +87,26 @@ fn attach_stats_to_player(players: Query<Entity, Added<FpsPlayer>>, mut commands
     }
 }
 
-/// Recomputes derived values whenever the sheet (or a fresh player spawn)
-/// changes. `Changed<ActorStats>` fires on insert and on every console
-/// mutation because those go through `entity_mut`.
-fn recalculate_derived_stats(
-    settings: Res<StatsSettings>,
-    mut players: Query<(&ActorStats, &mut DerivedAttributes, &mut Experience), Changed<ActorStats>>,
-) {
-    for (stats, mut derived, mut experience) in &mut players {
-        derived.0 = stats.0.derived(&settings.0);
+type DerivedProjectionQuery<'w, 's> = Query<
+    'w,
+    's,
+    (
+        &'static ActorStats,
+        &'static ActiveEffectsList,
+        &'static PlayerRadiation,
+        &'static mut DerivedAttributes,
+        &'static mut Experience,
+    ),
+    Or<(
+        Changed<ActorStats>,
+        Changed<ActiveEffectsList>,
+        Changed<PlayerRadiation>,
+    )>,
+>;
+
+fn recalculate_derived_stats(settings: Res<StatsSettings>, mut players: DerivedProjectionQuery) {
+    for (stats, effects, radiation, mut derived, mut experience) in &mut players {
+        derived.0 = projected_derived(&stats.0, &effects.ledger, radiation.0.rads, &settings.0);
         experience.xp = stats.0.xp;
         experience.level = stats.0.level;
         experience.xp_into_level = stats.0.xp_into_level(&settings.0);

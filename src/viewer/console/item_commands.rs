@@ -477,9 +477,12 @@ pub(super) fn use_item(
     let item_id = parse_item_instance_id(value)
         .ok_or_else(|| ConsoleError::new("bad_type", "item instance id must be hexadecimal"))?;
     let used = world
-        .resource_mut::<interaction::CanonicalItemLedger>()
-        .ledger
-        .use_item(HolderId::Player, item_id)
+        .resource_scope(
+            |world, mut canonical: Mut<interaction::CanonicalItemLedger>| {
+                let mut inventory = world.resource_mut::<interaction::PlayerInventory>();
+                canonical.use_player_item(&mut inventory, item_id)
+            },
+        )
         .map_err(|error| ConsoleError::new("useitem_failed", error.to_string()))?;
     // M9 wave 3 (#318): when the consumed item is a cataloged ingestible,
     // its authored effects apply through `effects::apply_ingestible`

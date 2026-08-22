@@ -28,7 +28,7 @@ impl ConsoleCommandProvider for EffectCommandProvider {
             ConsoleCommand::new(
                 "addrads",
                 "[player.]addrads <n>",
-                "Apply n rads of environmental dose (resistance 0) to the player.",
+                "Apply n rads of environmental dose through active RadResist.",
                 add_rads,
             )
             .reference_callable(false)
@@ -123,6 +123,10 @@ pub(super) fn apply_ingestible_to_player(
         .get::<ActorStats>(entity)
         .expect("the FPS player carries ActorStats")
         .clone();
+    let perks = world
+        .get::<super::super::stats::ActorPerks>(entity)
+        .expect("the FPS player carries ActorPerks")
+        .clone();
     // The PRNG state is Copy: mutate a local copy while borrowing the
     // player's components, then write it back so the resource stays the
     // single stream authority.
@@ -142,6 +146,7 @@ pub(super) fn apply_ingestible_to_player(
         super::super::effects::apply_ingestible(
             definition,
             &stats,
+            &perks,
             &settings,
             super::super::effects::PlayerEffectComponents {
                 vitals: vitals.into_inner(),
@@ -214,10 +219,14 @@ pub(super) fn add_rads(
         .map_err(|_| ConsoleError::new("bad_type", "addrads expects a whole number of rads"))?;
     let entity = effects_player_entity(world, invocation)?;
     let outcome = {
-        let mut pool = world
-            .get_mut::<super::super::effects::PlayerRadiation>(entity)
-            .unwrap();
-        bevyout_core::radiation::apply_radiation(&mut pool.0, amount, 0)
+        let mut query = world.query::<(
+            &mut super::super::effects::PlayerRadiation,
+            &super::super::effects::ActiveEffectsList,
+        )>();
+        let (mut pool, effects) = query
+            .get_mut(world, entity)
+            .expect("the FPS player carries radiation and effects");
+        super::super::effects::apply_player_radiation(&mut pool, effects, amount)
     };
     Ok(ConsoleCommandResult::new(
         json!({
@@ -448,7 +457,9 @@ pub(super) fn application_json(application: &super::super::effects::AppliedInges
         "rads_removed": application.rads_removed,
         "rads_added": application.rads_added,
         "applied_modifiers": application.applied_modifiers,
-        "skipped_conditioned_effects": application.skipped_conditioned,
+        "condition_false": application.condition_false,
+        "condition_unsupported": application.condition_unsupported,
+        "skipped_conditioned_effects": application.condition_false + application.condition_unsupported,
         "addiction_roll": application.addiction_roll,
         "rng_draw_index": application.rng_draw_index,
     })
@@ -474,10 +485,16 @@ pub(super) fn application_summary(
             application.applied_modifiers
         ));
     }
-    if application.skipped_conditioned > 0 {
+    if application.condition_false > 0 {
         parts.push(format!(
-            "{} conditioned effect(s) skipped",
-            application.skipped_conditioned
+            "{} conditioned effect(s) false",
+            application.condition_false
+        ));
+    }
+    if application.condition_unsupported > 0 {
+        parts.push(format!(
+            "{} conditioned effect(s) unsupported",
+            application.condition_unsupported
         ));
     }
     if let Some(rolled) = application.addiction_roll {

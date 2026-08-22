@@ -105,3 +105,27 @@ Feature: Pure active-effect, radiation, and addiction kernels
     Then the withdrawal 00033067 addiction phase is withdrawing
     When the withdrawal 00033067 is cured
     Then the withdrawal 00033067 addiction phase is clean
+
+  Scenario: Derived health and action points use projected actor values
+    Given a clean effect ledger
+    And a radiation pool of 600 rads
+    When the player takes a timed chem effect endurance +3 lasting 240 seconds
+    And the player takes a timed action_points effect +30 lasting 240 seconds
+    And derived actor values are projected
+    Then projected maximum health is 200
+    And projected maximum action points is 101
+
+  Scenario: Active RadResist is converted and capped for radiation doses
+    Given a clean effect ledger
+    When the player takes a timed rad_resist effect +25 lasting 240 seconds
+    Then active radiation resistance is 2500 basis points
+    When the player takes a timed rad_resist effect +100 lasting 240 seconds
+    Then active radiation resistance is 8500 basis points
+
+  Scenario: Real Stimpak conditions select one Fast Metabolism branch
+    Given the player does not own perk 00094ebf
+    Then the Stimpak 30 health condition is true
+    And the Stimpak 36 health condition is false
+    Given the player owns perk 00094ebf
+    Then the Stimpak 30 health condition is false
+    And the Stimpak 36 health condition is true

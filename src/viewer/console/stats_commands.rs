@@ -9,6 +9,7 @@
 use bevyout_core::actor_state::ActorValue;
 use bevyout_core::stats as core_stats;
 
+use super::super::effects::{ActiveEffectsList, PlayerRadiation, PlayerVitals};
 use super::stats::{ActorStats, Experience, StatsSettings};
 use super::*;
 
@@ -20,7 +21,7 @@ impl ConsoleCommandProvider for StatsCommandProvider {
             ConsoleCommand::new(
                 "getav",
                 "[player.]getav <value>",
-                "Read a player actor value: a SPECIAL attribute, a skill, or health (max).",
+                "Read a player actor value, including current health and projected effects.",
                 get_actor_value,
             )
             .reference_callable(false),
@@ -100,14 +101,43 @@ fn parse_actor_value(raw: &str) -> Result<ActorValue, ConsoleError> {
 /// synchronously from the sheet plus active settings (not the possibly
 /// one-frame-stale `DerivedAttributes` component) so console batches read
 /// exactly what earlier commands wrote.
+fn projected_max_health(world: &World, entity: Entity) -> Result<f32, ConsoleError> {
+    let stats = world.get::<ActorStats>(entity).ok_or_else(|| {
+        ConsoleError::new("player_unavailable", "the FPS player has no stats sheet")
+    })?;
+    let settings = world.resource::<StatsSettings>().0;
+    let empty_ledger = bevyout_core::effects::ActiveEffectsLedger::default();
+    let ledger = world
+        .get::<ActiveEffectsList>(entity)
+        .map_or(&empty_ledger, |effects| &effects.ledger);
+    let rads = world
+        .get::<PlayerRadiation>(entity)
+        .map_or(0, |radiation| radiation.0.rads);
+    Ok(bevyout_core::effects::projected_derived(&stats.0, ledger, rads, &settings).max_health)
+}
+
 fn read_actor_value(world: &World, entity: Entity, value: ActorValue) -> Result<f64, ConsoleError> {
     let stats = world.get::<ActorStats>(entity).ok_or_else(|| {
         ConsoleError::new("player_unavailable", "the FPS player has no stats sheet")
     })?;
     let settings = world.resource::<StatsSettings>().0;
+    let effects = world.get::<ActiveEffectsList>(entity);
+    let empty_ledger = bevyout_core::effects::ActiveEffectsLedger::default();
+    let ledger = effects.map_or(&empty_ledger, |effects| &effects.ledger);
+    let rads = world
+        .get::<PlayerRadiation>(entity)
+        .map_or(0, |radiation| radiation.0.rads);
+    let derived = bevyout_core::effects::projected_derived(&stats.0, ledger, rads, &settings);
     let resolved = match value {
-        ActorValue::Health => stats.0.derived(&settings).max_health,
-        ActorValue::Special(attribute) => f32::from(stats.0.effective_special(attribute)),
+        ActorValue::Health => world
+            .get::<PlayerVitals>(entity)
+            .map_or(derived.max_health, |vitals| vitals.current_health),
+        ActorValue::ActionPoints => derived.max_action_points,
+        ActorValue::RadResist => ledger.modifier_for(ActorValue::RadResist).max(0.0),
+        ActorValue::Special(attribute) => {
+            let projected = bevyout_core::effects::projected_special(&stats.0, ledger, rads);
+            f32::from(projected[&attribute])
+        }
         ActorValue::Skill(skill) => f32::from(stats.0.skill_value(skill)),
         other => {
             return Err(ConsoleError::new(
@@ -160,6 +190,21 @@ pub(super) fn set_actor_value(
     let value = parse_actor_value(&invocation.args[0])?;
     let amount = parse_amount(&invocation.args[1], "setav")?;
     let entity = player_stats_entity(world, invocation)?;
+    if value == ActorValue::Health {
+        let max_health = projected_max_health(world, entity)?;
+        let applied = f32::from(amount).clamp(0.0, max_health);
+        let mut vitals = world.get_mut::<PlayerVitals>(entity).ok_or_else(|| {
+            ConsoleError::new(
+                "player_unavailable",
+                "the FPS player has no health component",
+            )
+        })?;
+        vitals.current_health = applied;
+        return Ok(ConsoleCommandResult::new(
+            json!({ "value": value.label(), "result": applied }),
+            vec![format!("{} set to {}", value.label(), applied)],
+        ));
+    }
     let mut entity_mut = world
         .get_entity_mut(entity)
         .map_err(|_| ConsoleError::new("player_unavailable", "the FPS player does not exist"))?;
@@ -186,12 +231,7 @@ pub(super) fn set_actor_value(
             stats.0.add_skill_points(skill, target - current);
             i16::from(stats.0.skill_value(skill))
         }
-        ActorValue::Health => {
-            return Err(ConsoleError::new(
-                "unsupported_actor_value",
-                "health is derived; change endurance or level instead",
-            ));
-        }
+        ActorValue::Health => unreachable!("health handled before borrowing ActorStats"),
         other => {
             return Err(ConsoleError::new(
                 "unsupported_actor_value",
@@ -218,6 +258,21 @@ pub(super) fn mod_actor_value(
     let value = parse_actor_value(&invocation.args[0])?;
     let delta = parse_amount(&invocation.args[1], "modav")?;
     let entity = player_stats_entity(world, invocation)?;
+    if value == ActorValue::Health {
+        let max_health = projected_max_health(world, entity)?;
+        let mut vitals = world.get_mut::<PlayerVitals>(entity).ok_or_else(|| {
+            ConsoleError::new(
+                "player_unavailable",
+                "the FPS player has no health component",
+            )
+        })?;
+        vitals.current_health = (vitals.current_health + f32::from(delta)).clamp(0.0, max_health);
+        let applied = vitals.current_health;
+        return Ok(ConsoleCommandResult::new(
+            json!({ "value": value.label(), "result": applied }),
+            vec![format!("{} now {}", value.label(), applied)],
+        ));
+    }
     let mut entity_mut = world
         .get_entity_mut(entity)
         .map_err(|_| ConsoleError::new("player_unavailable", "the FPS player does not exist"))?;
@@ -230,12 +285,7 @@ pub(super) fn mod_actor_value(
             stats.0.add_skill_points(skill, delta);
             i16::from(stats.0.skill_value(skill))
         }
-        ActorValue::Health => {
-            return Err(ConsoleError::new(
-                "unsupported_actor_value",
-                "health is derived; change endurance or level instead",
-            ));
-        }
+        ActorValue::Health => unreachable!("health handled before borrowing ActorStats"),
         other => {
             return Err(ConsoleError::new(
                 "unsupported_actor_value",

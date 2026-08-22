@@ -4,6 +4,7 @@
 //! brackets, the LVL/HP/AP/XP stat bar up top, section tabs along the bottom
 //! of the screen, and the STATS/ITEMS/DATA button bank on the bezel.
 
+use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 use bevy::ui::{BackgroundGradient, ColorStop, RadialGradient, RadialGradientShape, UiPosition};
 use bevy::window::{CursorGrabMode, CursorOptions, PrimaryWindow};
@@ -12,16 +13,23 @@ use crate::app_state::GameplayModal;
 
 use super::audio::PlaySound;
 use super::bindings::HotkeyBindings;
+use super::effects::{
+    ActiveEffectsList, Addictions, EffectCatalog, PlayerEffectComponents, PlayerRadiation,
+    PlayerVitals, RngResource, apply_ingestible,
+};
 use super::fallout_ui::{
     BEZEL, BEZEL_EDGE, BEZEL_RECESS, LAMP, LAMP_DIM, PHOSPHOR as GREEN, PHOSPHOR_DIM as GREEN_DIM,
     PHOSPHOR_FAINT as GREEN_FAINT, SCREEN, SCREEN_GLOW, glow, spawn_corner_brackets,
     spawn_selection_marker,
 };
 use super::interaction::{
-    EquipToggleRequested, InteractionNotice, PlayerEquipment, PlayerInventory, item_rules, item_use,
+    CanonicalItemLedger, EquipToggleRequested, InteractionNotice, PlayerEquipment, PlayerInventory,
+    item_rules, item_use,
 };
-use super::inventory::{DropAction, StackKey, TransferResult, drop_action};
+use super::inventory::{DropAction, StackKey, drop_action};
 use super::pipboy_reader::OpenReaderRequested;
+use super::player::FpsPlayer;
+use super::stats::{ActorPerks, ActorStats, StatsSettings};
 use super::{
     CellInfo, PreparedItemCatalog, PreparedItemCategory, PreparedItemDefinition, PreparedItemStats,
     cell_label,
@@ -253,6 +261,10 @@ fn install(app: &mut App) {
         .init_resource::<StatusFigureEditor>()
         .init_resource::<StatusMoveRepeat>()
         .init_resource::<Clipboard>()
+        .init_resource::<CanonicalItemLedger>()
+        .init_resource::<EffectCatalog>()
+        .init_resource::<StatsSettings>()
+        .init_resource::<RngResource>()
         // `handle_item_action_button`'s dependencies, normally registered by
         // `interaction`/`audio`/`pipboy_reader`'s installs -- `init_resource`
         // and `add_message` are both no-ops when already registered, so this
@@ -575,7 +587,7 @@ fn close_quantity_picker(commands: &mut Commands, overlays: &Query<Entity, With<
 /// `pipboy_reader`'s public seam -- the stack is never touched.
 fn handle_item_action_button(
     buttons: Query<(&Interaction, &ItemActionButton), Changed<Interaction>>,
-    mut inventory: ResMut<PlayerInventory>,
+    mut aid_use: AidUseContext,
     catalog: Res<PreparedItemCatalog>,
     mut notice: ResMut<InteractionNotice>,
     mut sounds: MessageWriter<PlaySound>,
@@ -587,7 +599,7 @@ fn handle_item_action_button(
         }
         match *action {
             ItemActionButton::Use(key) => {
-                use_item(key, &mut inventory, &catalog, &mut notice, &mut sounds)
+                use_item(key, &mut aid_use, &catalog, &mut notice, &mut sounds)
             }
             ItemActionButton::Read(base_form_id) => {
                 reader_requests.write(OpenReaderRequested { base_form_id });
@@ -596,9 +608,33 @@ fn handle_item_action_button(
     }
 }
 
+type AidPlayerQuery<'w, 's> = Query<
+    'w,
+    's,
+    (
+        &'static ActorStats,
+        &'static ActorPerks,
+        &'static mut PlayerVitals,
+        &'static mut PlayerRadiation,
+        &'static mut ActiveEffectsList,
+        &'static mut Addictions,
+    ),
+    With<FpsPlayer>,
+>;
+
+#[derive(SystemParam)]
+struct AidUseContext<'w, 's> {
+    canonical: ResMut<'w, CanonicalItemLedger>,
+    inventory: ResMut<'w, PlayerInventory>,
+    effect_catalog: Res<'w, EffectCatalog>,
+    settings: Res<'w, StatsSettings>,
+    rng: ResMut<'w, RngResource>,
+    player: AidPlayerQuery<'w, 's>,
+}
+
 fn use_item(
     key: StackKey,
-    inventory: &mut PlayerInventory,
+    context: &mut AidUseContext,
     catalog: &PreparedItemCatalog,
     notice: &mut InteractionNotice,
     sounds: &mut MessageWriter<PlaySound>,
@@ -615,11 +651,34 @@ fn use_item(
     {
         return;
     }
-    if !matches!(
-        inventory.remove(key, item_use::USE_CONSUMES_COUNT),
-        TransferResult::Applied { .. }
-    ) {
+    let Some(item_id) = context.canonical.player_item_id_for_stack(key) else {
         return;
+    };
+    let Ok(used) = context
+        .canonical
+        .use_player_item(&mut context.inventory, item_id)
+    else {
+        return;
+    };
+    if let Some(definition) = context.effect_catalog.get(used.base_form_id) {
+        let Ok((stats, perks, mut vitals, mut radiation, mut effects, mut addictions)) =
+            context.player.single_mut()
+        else {
+            return;
+        };
+        apply_ingestible(
+            definition,
+            stats,
+            perks,
+            &context.settings,
+            PlayerEffectComponents {
+                vitals: &mut vitals,
+                radiation: &mut radiation,
+                effects: &mut effects,
+                addictions: &mut addictions,
+            },
+            &mut context.rng.0,
+        );
     }
     if let Some(form_id) = item.audio.pickup_sound_form_id {
         sounds.write(PlaySound {
@@ -694,7 +753,7 @@ struct ItemRowActivated(RowPrimaryAction);
 /// `handle_item_action_button`) already use -- this system only dispatches.
 fn handle_item_row_activation(
     mut activations: MessageReader<ItemRowActivated>,
-    mut inventory: ResMut<PlayerInventory>,
+    mut aid_use: AidUseContext,
     catalog: Res<PreparedItemCatalog>,
     mut notice: ResMut<InteractionNotice>,
     mut sounds: MessageWriter<PlaySound>,
@@ -707,7 +766,7 @@ fn handle_item_row_activation(
                 equip_requests.write(EquipToggleRequested(key));
             }
             RowPrimaryAction::Use(key) => {
-                use_item(key, &mut inventory, &catalog, &mut notice, &mut sounds);
+                use_item(key, &mut aid_use, &catalog, &mut notice, &mut sounds);
             }
             RowPrimaryAction::Read(base_form_id) => {
                 reader_requests.write(OpenReaderRequested { base_form_id });

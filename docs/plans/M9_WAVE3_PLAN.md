@@ -30,8 +30,9 @@ BIPL — skip content), `ENIT`, then one or more effect pairs `EFID` + `EFIT`
     health 60 (0x00065960). Jet: AP+30 (0x00066EB8), duration 108000.
   - Common trailing effect MGEF 0x0000014F (mag 30, long duration) on
     chems — the chem-duration umbrella; identify via MGEF decode.
-  - Stimpak's second effect carries a CTDA with function 0x000001C1
-    (GetHealthPercentage, value 1.0) — the "don't overheal" condition.
+  - Shipped correction: both Stimpak effects carry CTDAs with function
+    0x000001C1 (`HasPerk`) against Fast Metabolism 00094EBF; comparisons 0
+    and 1 select the 30 HP and 36 HP branches.
 
 ### MGEF (effect definition)
 
@@ -138,12 +139,14 @@ commonly 10%) and record it as a plan amendment.
   ("restore" semantics). Instant positive-Rads ingestible effects remove
   rads; negative magnitudes irradiate. Verified by direct ESM byte probe
   (MGEF 0x0001517A, av index 54, flags 0x70) and live bridge.
-- **Conditioned effect policy (#316/#318).** 47 of the catalog's effect
-  items carry CTDA conditions (Stimpak heals condition on
-  GetHealthPercentage). Wave 3 decodes and stores `conditioned: true`
-  but does not evaluate conditions at runtime — application skips them
-  with an explicit count in the JSON/log so the behavior is visible.
-  Condition evaluation is future work.
+- **Shipped amendment — conditioned Stimpak effects (#316/#318).** The
+  original `GetHealthPercentage` identification was incorrect: function
+  `0x1C1` is `HasPerk`. Both real Stimpak effects reference Fast Metabolism
+  `00094EBF`; equality comparisons against 0 and 1 select the mutually
+  exclusive 30 HP and 36 HP branches. `openmw-effects-v2` preserves the
+  decoded operator, comparison, function, and first parameter. Runtime
+  evaluates only this narrow `HasPerk == 0/1` family; every other conditioned
+  effect remains conservatively skipped and reported as unsupported.
 - **`PlayerVitals` component added beyond the plan list.** No damage/
   health surface existed on the player before this wave, so instant
   Health effects had nothing to heal into; wave 3 adds a minimal

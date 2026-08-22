@@ -245,6 +245,29 @@ impl CanonicalItemLedger {
             })
     }
 
+    pub(crate) fn player_item_id_for_stack(&self, key: StackKey) -> Option<ItemInstanceId> {
+        self.ledger
+            .holders()
+            .get(&HolderId::Player)?
+            .items
+            .iter()
+            .filter(|item| {
+                item.base_form_id == key.base_form_id && item.state.condition == key.condition
+            })
+            .map(|item| item.id)
+            .min()
+    }
+
+    pub(crate) fn use_player_item(
+        &mut self,
+        inventory: &mut PlayerInventory,
+        item_id: ItemInstanceId,
+    ) -> Result<bevyout_core::item_transaction::ItemInstance, TransactionError> {
+        let used = self.ledger.use_item(HolderId::Player, item_id)?;
+        self.write_player_projection(inventory);
+        Ok(used)
+    }
+
     pub(crate) fn player_legacy_snapshot(&self) -> Option<Inventory> {
         let state = self.ledger.holders().get(&HolderId::Player)?;
         let mut stacks = BTreeMap::<(u32, Option<u32>), i32>::new();

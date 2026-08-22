@@ -11,8 +11,8 @@ use bevyout_core::actor::{
 };
 use bevyout_core::actor_state::{ActorSkill, ActorValue};
 use bevyout_core::effects::{
-    EffectDefinition, IngestibleDefinition, IngestibleEffect, actor_value_from_effect_index,
-    archetype_modifies_value,
+    EffectDefinition, IngestibleCondition, IngestibleDefinition, IngestibleEffect,
+    actor_value_from_effect_index, archetype_modifies_value,
 };
 use bevyout_core::facegen::{FaceGenAssetKind, FaceGenDiagnostic, FaceGenRaw};
 use bevyout_core::image_space::IMAGE_SPACE_MODIFIER_CATALOG_REVISION;
@@ -3302,7 +3302,14 @@ fn build_effect_catalog_inputs(parsed: &ParsedPlugin) -> EffectCatalogInputs {
                                 .and_then(|definition| {
                                     actor_value_from_effect_index(definition.actor_value_index)
                                 }),
-                            conditioned: effect.condition.is_some(),
+                            condition: effect.condition.as_ref().map(|condition| {
+                                IngestibleCondition {
+                                    oper: condition.oper,
+                                    comparison_value: condition.comparison_value,
+                                    function: condition.function,
+                                    param1: condition.param1,
+                                }
+                            }),
                         }
                     })
                     .collect(),

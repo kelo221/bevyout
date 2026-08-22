@@ -2,7 +2,8 @@ use super::*;
 
 use bevyout_core::actor_state::{ActorValue, SpecialAttribute};
 use bevyout_core::effects::{
-    ARCHETYPE_VALUE_AND_PARTS, ARCHETYPE_VALUE_MODIFIER, EffectDefinition, IngestibleDefinition,
+    ARCHETYPE_VALUE_AND_PARTS, ARCHETYPE_VALUE_MODIFIER, CONDITION_FUNCTION_HAS_PERK,
+    CONDITION_OPER_EQUAL, EffectDefinition, IngestibleCondition, IngestibleDefinition,
     IngestibleEffect,
 };
 
@@ -22,7 +23,7 @@ fn jet() -> IngestibleDefinition {
             magnitude: 30.0,
             duration_s: 240,
             actor_value: Some(ActorValue::ActionPoints),
-            conditioned: false,
+            condition: None,
         }],
     }
 }
@@ -42,7 +43,12 @@ fn stimpak() -> IngestibleDefinition {
                 magnitude: 30.0,
                 duration_s: 0,
                 actor_value: Some(ActorValue::Health),
-                conditioned: false,
+                condition: Some(IngestibleCondition {
+                    oper: CONDITION_OPER_EQUAL,
+                    comparison_value: 0.0,
+                    function: CONDITION_FUNCTION_HAS_PERK,
+                    param1: 0x0009_4ebf,
+                }),
             },
             IngestibleEffect {
                 mgef_form_id: 0x0009_fe63,
@@ -50,7 +56,12 @@ fn stimpak() -> IngestibleDefinition {
                 magnitude: 36.0,
                 duration_s: 0,
                 actor_value: Some(ActorValue::Health),
-                conditioned: true,
+                condition: Some(IngestibleCondition {
+                    oper: CONDITION_OPER_EQUAL,
+                    comparison_value: 1.0,
+                    function: CONDITION_FUNCTION_HAS_PERK,
+                    param1: 0x0009_4ebf,
+                }),
             },
         ],
         ..IngestibleDefinition::default()
@@ -59,7 +70,7 @@ fn stimpak() -> IngestibleDefinition {
 
 #[test]
 fn revision_is_pinned() {
-    assert_eq!(EFFECT_CATALOG_REVISION, "openmw-effects-v1");
+    assert_eq!(EFFECT_CATALOG_REVISION, "openmw-effects-v2");
 }
 
 #[test]
@@ -118,7 +129,7 @@ fn builds_sorted_entries_with_counters() {
     assert_eq!(catalog.counters.ingestibles, 2);
     assert_eq!(catalog.counters.effects, 3);
     assert_eq!(catalog.counters.addictive, 1);
-    assert_eq!(catalog.counters.conditioned_effects, 1);
+    assert_eq!(catalog.counters.conditioned_effects, 2);
     // Both of Jet's effect items resolve; Stimpak's do too.
     assert_eq!(catalog.counters.unresolved_effects, 0);
 }
@@ -164,7 +175,7 @@ fn unresolved_effect_items_are_counted_not_dropped() {
                     magnitude: 30.0,
                     duration_s: 240,
                     actor_value: Some(ActorValue::ActionPoints),
-                    conditioned: false,
+                    condition: None,
                 },
                 IngestibleEffect {
                     mgef_form_id: 0x0000_014f,
@@ -172,7 +183,7 @@ fn unresolved_effect_items_are_counted_not_dropped() {
                     magnitude: 30.0,
                     duration_s: 108_000,
                     actor_value: None,
-                    conditioned: false,
+                    condition: None,
                 },
             ],
             ..IngestibleDefinition::default()

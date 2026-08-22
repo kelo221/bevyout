@@ -2,10 +2,13 @@ use super::*;
 
 use crate::actor_state::{ActorSkill, ActorValue, SpecialAttribute};
 use crate::effects::{
-    ActiveEffect, ActiveEffectsLedger, EffectSource, PERMANENT_MS, actor_value_from_effect_index,
-    projected_special,
+    ActiveEffect, ActiveEffectsLedger, CONDITION_FUNCTION_HAS_PERK, CONDITION_OPER_EQUAL,
+    EffectSource, IngestibleCondition, IngestibleConditionOutcome, PERMANENT_MS,
+    active_rad_resistance_bps, actor_value_from_effect_index, evaluate_ingestible_condition,
+    projected_derived, projected_special,
 };
-use crate::stats::CharacterSheet;
+use crate::perks::PerkProgression;
+use crate::stats::{CharacterSheet, GmstSettings};
 
 fn chem(value: ActorValue, magnitude: f32, remaining_ms: u32) -> ActiveEffect {
     ActiveEffect {
@@ -197,6 +200,112 @@ fn projected_special_clamps_to_one_through_ten() {
     let projected = projected_special(&sheet, &ledger, 0);
     assert_eq!(projected[&SpecialAttribute::Strength], 10);
     assert_eq!(projected[&SpecialAttribute::Luck], 1);
+}
+
+#[test]
+fn projected_derived_uses_effective_special_and_direct_ap_modifiers() {
+    let sheet = CharacterSheet::default();
+    let settings = GmstSettings::default();
+    let mut ledger = ActiveEffectsLedger::default();
+    ledger.apply(chem(
+        ActorValue::Special(SpecialAttribute::Endurance),
+        3.0,
+        240_000,
+    ));
+    ledger.apply(chem(ActorValue::ActionPoints, 30.0, 240_000));
+
+    let buffed = projected_derived(&sheet, &ledger, 0, &settings);
+    assert_eq!(buffed.max_health, 260.0);
+    assert_eq!(buffed.max_action_points, 105.0);
+
+    let irradiated = projected_derived(&sheet, &ledger, 600, &settings);
+    assert_eq!(irradiated.max_health, 200.0);
+    assert_eq!(irradiated.max_action_points, 101.0);
+}
+
+#[test]
+fn active_rad_resistance_converts_percent_points_and_hard_caps() {
+    let mut ledger = ActiveEffectsLedger::default();
+    assert_eq!(active_rad_resistance_bps(&ledger), 0);
+    ledger.apply(chem(ActorValue::RadResist, 25.0, 240_000));
+    assert_eq!(active_rad_resistance_bps(&ledger), 2_500);
+    ledger.apply(ActiveEffect {
+        source: EffectSource::Withdrawal,
+        actor_value: ActorValue::RadResist,
+        magnitude: -30.0,
+        remaining_ms: PERMANENT_MS,
+    });
+    assert_eq!(active_rad_resistance_bps(&ledger), 0);
+    ledger.clear_source(EffectSource::Withdrawal);
+    ledger.apply(ActiveEffect {
+        source: EffectSource::Perk,
+        actor_value: ActorValue::RadResist,
+        magnitude: 100.0,
+        remaining_ms: PERMANENT_MS,
+    });
+    assert_eq!(active_rad_resistance_bps(&ledger), 8_500);
+}
+
+#[test]
+fn stimpak_has_perk_conditions_are_mutually_exclusive() {
+    let without = IngestibleCondition {
+        oper: CONDITION_OPER_EQUAL,
+        comparison_value: 0.0,
+        function: CONDITION_FUNCTION_HAS_PERK,
+        param1: 0x0009_4ebf,
+    };
+    let with = IngestibleCondition {
+        comparison_value: 1.0,
+        ..without
+    };
+    let mut perks = PerkProgression::default();
+    assert_eq!(
+        evaluate_ingestible_condition(&without, &perks),
+        IngestibleConditionOutcome::True
+    );
+    assert_eq!(
+        evaluate_ingestible_condition(&with, &perks),
+        IngestibleConditionOutcome::False
+    );
+    perks.set_rank(0x0009_4ebf, 1);
+    assert_eq!(
+        evaluate_ingestible_condition(&without, &perks),
+        IngestibleConditionOutcome::False
+    );
+    assert_eq!(
+        evaluate_ingestible_condition(&with, &perks),
+        IngestibleConditionOutcome::True
+    );
+}
+
+#[test]
+fn unsupported_ingestible_conditions_stay_conservative() {
+    let perks = PerkProgression::default();
+    for condition in [
+        IngestibleCondition {
+            oper: 1,
+            comparison_value: 0.0,
+            function: CONDITION_FUNCTION_HAS_PERK,
+            param1: 1,
+        },
+        IngestibleCondition {
+            oper: CONDITION_OPER_EQUAL,
+            comparison_value: 2.0,
+            function: CONDITION_FUNCTION_HAS_PERK,
+            param1: 1,
+        },
+        IngestibleCondition {
+            oper: CONDITION_OPER_EQUAL,
+            comparison_value: 0.0,
+            function: 431,
+            param1: 1,
+        },
+    ] {
+        assert_eq!(
+            evaluate_ingestible_condition(&condition, &perks),
+            IngestibleConditionOutcome::Unsupported
+        );
+    }
 }
 
 #[test]

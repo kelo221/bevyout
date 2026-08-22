@@ -374,6 +374,62 @@ fn aid_test_app(quest_item: bool) -> App {
     app.world_mut()
         .spawn((CursorOptions::default(), PrimaryWindow));
     install(&mut app);
+    let snapshot = app.world().resource::<PlayerInventory>().legacy_snapshot();
+    app.world_mut()
+        .resource_mut::<CanonicalItemLedger>()
+        .sync_player(&snapshot)
+        .unwrap();
+    use bevyout_core::actor_state::ActorValue;
+    use bevyout_core::effects::{
+        CONDITION_FUNCTION_HAS_PERK, CONDITION_OPER_EQUAL, IngestibleCondition,
+        IngestibleDefinition, IngestibleEffect,
+    };
+    app.world_mut()
+        .resource_mut::<EffectCatalog>()
+        .ingestibles
+        .insert(
+            0x77,
+            IngestibleDefinition {
+                form_id: 0x77,
+                editor_id: "Stimpak".into(),
+                effects: vec![
+                    IngestibleEffect {
+                        magnitude: 30.0,
+                        actor_value: Some(ActorValue::Health),
+                        condition: Some(IngestibleCondition {
+                            oper: CONDITION_OPER_EQUAL,
+                            comparison_value: 0.0,
+                            function: CONDITION_FUNCTION_HAS_PERK,
+                            param1: 0x0009_4ebf,
+                        }),
+                        ..IngestibleEffect::default()
+                    },
+                    IngestibleEffect {
+                        magnitude: 36.0,
+                        actor_value: Some(ActorValue::Health),
+                        condition: Some(IngestibleCondition {
+                            oper: CONDITION_OPER_EQUAL,
+                            comparison_value: 1.0,
+                            function: CONDITION_FUNCTION_HAS_PERK,
+                            param1: 0x0009_4ebf,
+                        }),
+                        ..IngestibleEffect::default()
+                    },
+                ],
+                ..IngestibleDefinition::default()
+            },
+        );
+    app.world_mut().spawn((
+        FpsPlayer::default(),
+        ActorStats::default(),
+        ActorPerks::default(),
+        PlayerVitals {
+            current_health: 140.0,
+        },
+        PlayerRadiation::default(),
+        ActiveEffectsList::default(),
+        Addictions::default(),
+    ));
     app.world_mut().resource_mut::<PipBoyState>().view = PipBoyView::Items;
     app.world_mut().resource_mut::<PipBoyState>().category = PreparedItemCategory::Aid;
     app.world_mut()
@@ -396,6 +452,25 @@ fn using_an_aid_stack_decrements_the_authoritative_inventory() {
     app.update();
 
     assert_eq!(app.world().resource::<PlayerInventory>().count(0x77), 2);
+    let canonical_count = app
+        .world()
+        .resource::<CanonicalItemLedger>()
+        .ledger
+        .holders()
+        .get(&bevyout_core::item_transaction::HolderId::Player)
+        .unwrap()
+        .items
+        .iter()
+        .map(|item| item.count)
+        .sum::<u32>();
+    assert_eq!(canonical_count, 2);
+    let health = app
+        .world_mut()
+        .query::<&PlayerVitals>()
+        .single(app.world())
+        .unwrap()
+        .current_health;
+    assert_eq!(health, 170.0);
     assert_eq!(
         app.world().resource::<InteractionNotice>().text(),
         "Used Stimpak: Restore Health"

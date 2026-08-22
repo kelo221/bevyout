@@ -1311,6 +1311,8 @@ struct BevyoutWorld {
     rads_removed: u16,
     rpg_expired_effects: Vec<effects::ActiveEffect>,
     rpg_projected_special: std::collections::BTreeMap<actor_state::SpecialAttribute, u8>,
+    rpg_projected_derived: stats::DerivedAttributes,
+    rpg_perk_progression_effects: perks::PerkProgression,
     rpg_addictions: chems::Addictions,
     rpg_rng: chems::RpgRngState,
     rpg_addiction_roll: Option<(bool, u32)>,
@@ -5458,7 +5460,7 @@ async fn when_item_is_used(
                 base_form_id: parse_hex(&form_id),
                 condition: None,
             },
-            item_use::USE_CONSUMES_COUNT,
+            1,
         );
     }
 }
@@ -18437,6 +18439,24 @@ async fn when_rpg_take_chem_effect(
     });
 }
 
+#[when(
+    regex = r"^the player takes a timed (action_points|rad_resist) effect ([+-]\d+) lasting (\d+) seconds$"
+)]
+async fn when_rpg_take_actor_value_effect(
+    world: &mut BevyoutWorld,
+    label: String,
+    magnitude: String,
+    seconds: String,
+) {
+    let actor_value = actor_state::ActorValue::parse(&label).expect("known actor value");
+    world.rpg_effect_ledger.apply(effects::ActiveEffect {
+        source: effects::EffectSource::Chem,
+        actor_value,
+        magnitude: magnitude.parse::<f32>().unwrap(),
+        remaining_ms: seconds.parse::<u32>().unwrap() * 1000,
+    });
+}
+
 #[when(regex = r"^the ledger ticks (\d+) milliseconds$")]
 async fn when_rpg_tick_ledger(world: &mut BevyoutWorld, delta_ms: String) {
     let expired = world
@@ -18507,6 +18527,64 @@ async fn then_rpg_projected_special_value(
             .copied()
             .expect("projection covers every SPECIAL attribute"),
         expected.parse::<u8>().unwrap()
+    );
+}
+
+#[when(regex = r"^derived actor values are projected$")]
+async fn when_rpg_project_derived(world: &mut BevyoutWorld) {
+    world.rpg_projected_derived = effects::projected_derived(
+        &stats::CharacterSheet::default(),
+        &world.rpg_effect_ledger,
+        world.rpg_radiation_pool.rads,
+        &stats::GmstSettings::default(),
+    );
+}
+
+#[then(regex = r"^projected maximum health is (\d+)$")]
+async fn then_rpg_projected_health(world: &mut BevyoutWorld, expected: String) {
+    assert_eq!(
+        world.rpg_projected_derived.max_health,
+        expected.parse::<f32>().unwrap()
+    );
+}
+
+#[then(regex = r"^projected maximum action points is (\d+)$")]
+async fn then_rpg_projected_ap(world: &mut BevyoutWorld, expected: String) {
+    assert_eq!(
+        world.rpg_projected_derived.max_action_points,
+        expected.parse::<f32>().unwrap()
+    );
+}
+
+#[then(regex = r"^active radiation resistance is (\d+) basis points$")]
+async fn then_rpg_rad_resistance(world: &mut BevyoutWorld, expected: String) {
+    assert_eq!(
+        effects::active_rad_resistance_bps(&world.rpg_effect_ledger),
+        expected.parse::<u32>().unwrap()
+    );
+}
+
+#[given(regex = r"^the player (does not own|owns) perk ([0-9a-fA-F]{8})$")]
+async fn given_rpg_effect_perk(world: &mut BevyoutWorld, ownership: String, form_id: String) {
+    let form_id = u32::from_str_radix(&form_id, 16).unwrap();
+    world
+        .rpg_perk_progression_effects
+        .set_rank(form_id, u8::from(ownership == "owns"));
+}
+
+#[then(regex = r"^the Stimpak (30|36) health condition is (true|false)$")]
+async fn then_rpg_stimpak_condition(world: &mut BevyoutWorld, magnitude: String, expected: String) {
+    let condition = effects::IngestibleCondition {
+        oper: effects::CONDITION_OPER_EQUAL,
+        comparison_value: if magnitude == "30" { 0.0 } else { 1.0 },
+        function: effects::CONDITION_FUNCTION_HAS_PERK,
+        param1: 0x0009_4ebf,
+    };
+    let actual =
+        effects::evaluate_ingestible_condition(&condition, &world.rpg_perk_progression_effects);
+    assert_eq!(
+        actual == effects::IngestibleConditionOutcome::True,
+        expected == "true"
     );
 }
 
