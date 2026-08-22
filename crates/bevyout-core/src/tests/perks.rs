@@ -367,6 +367,30 @@ fn modifier_rounding_saturates_and_reasons_have_stable_kinds() {
         active_perk_modifiers(&progression, &doubles).bonus_skill_points,
         0
     );
+    for value in [-1.0, f32::NAN, f32::INFINITY] {
+        doubles.insert(
+            0x4,
+            PerkDefinition {
+                form_id: 0x4,
+                min_level: 1,
+                ranks: 1,
+                entries: vec![entry_point(
+                    0,
+                    ENTRY_CODE_XP_AWARD_MULTIPLIER,
+                    EntryPointPayload::Value(value),
+                )],
+                ..PerkDefinition::default()
+            },
+        );
+        progression.set_rank(0x1, 0);
+        progression.set_rank(0x2, 0);
+        progression.set_rank(0x4, 1);
+        assert_eq!(
+            active_perk_modifiers(&progression, &doubles).xp_award_multiplier_bps,
+            10_000
+        );
+        progression.set_rank(0x4, 0);
+    }
     // Stable machine kinds for the console surface.
     assert_eq!(
         PerkBlockReason::MinLevel {

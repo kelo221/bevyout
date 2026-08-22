@@ -27,7 +27,7 @@ impl ConsoleCommandProvider for StatsCommandProvider {
             ConsoleCommand::new(
                 "setav",
                 "[player.]setav <value> <n>",
-                "Set a base player SPECIAL attribute or skill value (clamped to range).",
+                "Set a player SPECIAL attribute or effective skill value (clamped to range).",
                 set_actor_value,
             )
             .reference_callable(false)
@@ -35,7 +35,7 @@ impl ConsoleCommandProvider for StatsCommandProvider {
             ConsoleCommand::new(
                 "modav",
                 "[player.]modav <value> <delta>",
-                "Shift a base player SPECIAL attribute or skill value (clamped to range).",
+                "Shift a player SPECIAL attribute or effective skill value (clamped to range).",
                 mod_actor_value,
             )
             .reference_callable(false)
@@ -175,16 +175,11 @@ pub(super) fn set_actor_value(
             i16::from(stats.0.set_special(attribute, clamped as u8))
         }
         ActorValue::Skill(skill) => {
-            let current = i16::from(stats.0.skill_value(skill));
             let target = amount.clamp(
                 i16::from(core_stats::SKILL_MIN),
                 i16::from(core_stats::SKILL_MAX),
             );
-            // add_skill_points floors the stored increase at zero, so a
-            // target below the current base is unreachable by design;
-            // report the effective value either way.
-            stats.0.add_skill_points(skill, target - current);
-            i16::from(stats.0.skill_value(skill))
+            i16::from(stats.0.set_skill_value(skill, target))
         }
         ActorValue::Health => {
             return Err(ConsoleError::new(
@@ -226,10 +221,7 @@ pub(super) fn mod_actor_value(
         .expect("player_stats_entity verified the sheet");
     let applied = match value {
         ActorValue::Special(attribute) => i16::from(stats.0.mod_special(attribute, delta)),
-        ActorValue::Skill(skill) => {
-            stats.0.add_skill_points(skill, delta);
-            i16::from(stats.0.skill_value(skill))
-        }
+        ActorValue::Skill(skill) => i16::from(stats.0.mod_skill_value(skill, delta)),
         ActorValue::Health => {
             return Err(ConsoleError::new(
                 "unsupported_actor_value",

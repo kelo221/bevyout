@@ -271,6 +271,7 @@ pub struct CharacterSheet {
     pub special: BTreeMap<SpecialAttribute, u8>,
     pub tagged_skills: BTreeSet<ActorSkill>,
     pub skill_increases: BTreeMap<ActorSkill, i16>,
+    pub skill_modifiers: BTreeMap<ActorSkill, i16>,
     pub level: u8,
     pub xp: u32,
 }
@@ -292,6 +293,7 @@ impl Default for CharacterSheet {
             .collect(),
             tagged_skills: BTreeSet::new(),
             skill_increases: BTreeMap::new(),
+            skill_modifiers: BTreeMap::new(),
             level: 1,
             xp: 0,
         }
@@ -338,9 +340,28 @@ impl CharacterSheet {
     /// Effective skill value, clamped to `0..=100`.
     #[must_use]
     pub fn skill_value(&self, skill: ActorSkill) -> u8 {
+        let base = i32::from(self.skill_base(skill));
+        let increases = i32::from(self.skill_increases.get(&skill).copied().unwrap_or(0));
+        let modifier = i32::from(self.skill_modifiers.get(&skill).copied().unwrap_or(0));
+        (base + increases + modifier).clamp(i32::from(SKILL_MIN), i32::from(SKILL_MAX)) as u8
+    }
+
+    /// Sets the signed effective-value modifier needed to reach `value`.
+    /// Progression points remain separate so console mutations do not erase
+    /// points earned through level-ups.
+    pub fn set_skill_value(&mut self, skill: ActorSkill, value: i16) -> u8 {
+        let target = value.clamp(i16::from(SKILL_MIN), i16::from(SKILL_MAX));
         let base = i16::from(self.skill_base(skill));
         let increases = self.skill_increases.get(&skill).copied().unwrap_or(0);
-        (base + increases).clamp(i16::from(SKILL_MIN), i16::from(SKILL_MAX)) as u8
+        self.skill_modifiers
+            .insert(skill, target - base - increases);
+        self.skill_value(skill)
+    }
+
+    /// Shifts an effective skill value, clamping the result to `0..=100`.
+    pub fn mod_skill_value(&mut self, skill: ActorSkill, delta: i16) -> u8 {
+        let target = i16::from(self.skill_value(skill)).saturating_add(delta);
+        self.set_skill_value(skill, target)
     }
 
     /// Spends `points` on a skill (negative values refund), keeping the
@@ -348,7 +369,9 @@ impl CharacterSheet {
     /// read by `skill_value`.
     pub fn add_skill_points(&mut self, skill: ActorSkill, points: i16) -> i16 {
         let current = self.skill_increases.entry(skill).or_insert(0);
-        *current = (*current + points).clamp(0, i16::from(SKILL_MAX));
+        *current = current
+            .saturating_add(points)
+            .clamp(0, i16::from(SKILL_MAX));
         *current
     }
 
@@ -455,9 +478,9 @@ pub fn award_xp(
     settings: &GmstSettings,
 ) -> AwardXpOutcome {
     // `u32::MAX * u32::MAX` still fits in u64, so the plain product cannot
-    // overflow; dividing after the multiply keeps the rounding exact
-    // (1000 XP at 11 000 bps = 1100).
-    let amount = ((u64::from(amount) * u64::from(xp_multiplier_bps)) / 10_000) as u32;
+    // overflow; clamp the scaled quotient before narrowing to u32.
+    let scaled = (u64::from(amount) * u64::from(xp_multiplier_bps)) / 10_000;
+    let amount = scaled.min(u64::from(u32::MAX)) as u32;
     let cap_level = settings.max_player_level.max(1);
     let cap_xp = xp_threshold(cap_level, settings);
     let total = sheet.xp.saturating_add(amount).min(cap_xp);

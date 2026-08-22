@@ -516,6 +516,7 @@ pub(crate) struct PerkRecord {
     pub(crate) playable: bool,
     pub(crate) hidden: bool,
     pub(crate) conditions: Vec<PerkConditionWire>,
+    pub(crate) malformed_conditions: u32,
     pub(crate) entries: Vec<PerkEntryWire>,
     pub(crate) ignored_subrecords: Vec<String>,
 }

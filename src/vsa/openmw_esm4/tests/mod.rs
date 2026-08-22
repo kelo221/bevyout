@@ -2297,7 +2297,8 @@ fn perk_decodes_quest_and_ability_entries() {
 #[test]
 fn perk_decodes_bonus_skill_point_entry_and_short_ctda_safely() {
     // Educated (00031DD8): entry code 0x0A with EPFD 3.0; a truncated CTDA
-    // is skipped instead of guessed into a condition.
+    // is retained as an unknown condition rather than guessed into a partial
+    // condition.
     let perk = parse_perk(
         &[
             direct_subrecord("EDID", b"Educated\0".to_vec()),
@@ -2325,4 +2326,10 @@ fn perk_decodes_bonus_skill_point_entry_and_short_ctda_safely() {
         }]
     );
     assert!(perk.conditions.is_empty());
+    assert_eq!(perk.malformed_conditions, 1);
+    let mut oversized_ctda = perk_ctda(4.0, 0x1ef, 9);
+    oversized_ctda.push(0);
+    let oversized = parse_perk(&[direct_subrecord("CTDA", oversized_ctda)], 0x0003_1dd8, 0);
+    assert!(oversized.conditions.is_empty());
+    assert_eq!(oversized.malformed_conditions, 1);
 }

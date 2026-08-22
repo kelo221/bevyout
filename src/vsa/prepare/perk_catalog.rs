@@ -20,7 +20,7 @@ use super::super::paths::fingerprint;
 
 /// Bump whenever this catalog's serialized shape changes, including
 /// serde-defaulted fields, per the prepared-asset rule in AGENTS.md.
-pub(crate) const PERK_CATALOG_REVISION: &str = "openmw-perks-v1";
+pub(crate) const PERK_CATALOG_REVISION: &str = "openmw-perks-v2";
 
 /// Plain boundary-conversion inputs; the orchestrator fills these from the
 /// parsed plugin chain's `PERK` records with raw CTDA/entry words already

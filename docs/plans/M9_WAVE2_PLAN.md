@@ -141,10 +141,10 @@ documented; unmapped indices block eligibility as `unknown_conditions`.
 
 The base `Fallout3.esm` carries **87 perks** (58 playable, 3 hidden), not
 the plan's ~120 estimate (no DLC plugins in this content set). The "0
-unsupported subrecords" gate materialized as **48 perks with non-
-GetActorValue CTDA functions** (GetIsSex, HasPerk, …) — counted per-perk,
-surfaced as `unknown_conditions` eligibility blockers and in
-`showperks --eligible` reasons. Zero unknown subrecord signatures.
+unsupported subrecords" gate materialized as **48 unsupported condition words
+across 21 perks**, including non-`GetActorValue` CTDA functions (GetIsSex,
+HasPerk, …). They are surfaced as `unknown_conditions` eligibility blockers
+and in `showperks --eligible` reasons. Zero unknown subrecord signatures.
 
 ### A3 — one kernel parameter, not two
 

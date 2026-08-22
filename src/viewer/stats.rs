@@ -1,15 +1,14 @@
 //! Player RPG stats runtime (M9 wave 1, #310).
 //!
 //! Thin Bevy adapter over the pure `bevyout_core::stats` kernels (#309):
-//! `ActorStats` is the authoritative progression state, `DerivedAttributes`
-//! and `Experience` are recomputed projections, and `StatsSettings` carries
-//! the prepared GMST settings (GOTY defaults until a catalog overrides
-//! them). The FPS player is despawned/respawned on camera-mode changes, so
-//! components attach through `Added<FpsPlayer>` exactly like the actor-state
-//! seeding pattern.
+//! `PlayerProgression` is the authoritative state that survives transient FPS
+//! player entities. `ActorStats` and `ActorPerks` are entity projections,
+//! `DerivedAttributes` and the calculated fields of `Experience` are
+//! recomputed projections, and `StatsSettings` carries the prepared GMST
+//! settings (GOTY defaults until a catalog overrides them).
 
 use bevy::prelude::*;
-use bevyout_core::perks::PerkDefinition;
+use bevyout_core::perks::{PerkDefinition, PerkProgression};
 use bevyout_core::stats::{
     CharacterSheet, DerivedAttributes as CoreDerivedAttributes, GmstSettings, xp_threshold,
 };
@@ -34,14 +33,22 @@ pub(crate) struct StatsSettings(pub(crate) GmstSettings);
 #[derive(Resource, Debug, Clone, Default, PartialEq)]
 pub(crate) struct PerkCatalog(pub(crate) BTreeMap<u32, PerkDefinition>);
 
-/// Owned perk ranks; the authoritative perk progression state next to
-/// `ActorStats` (#314). Mutated only by console commands; modifiers are
-/// recomputed from it on demand.
-#[derive(Component, Debug, Clone, Default, PartialEq)]
-pub(crate) struct ActorPerks(pub(crate) bevyout_core::perks::PerkProgression);
+/// Persistent player progression snapshot. The FPS entity is transient across
+/// camera-mode changes, so its RPG state is transferred through this resource.
+#[derive(Resource, Debug, Clone, Default, PartialEq)]
+pub(crate) struct PlayerProgression {
+    pub(crate) stats: CharacterSheet,
+    pub(crate) perks: PerkProgression,
+    pub(crate) unspent_skill_points: u16,
+    pub(crate) total_skill_points: u16,
+}
 
-/// Authoritative player-authored progression state. Only console and future
-/// gameplay systems mutate this sheet; everything else reads projections.
+/// Owned perk ranks projected onto the transient FPS player entity.
+#[derive(Component, Debug, Clone, Default, PartialEq)]
+pub(crate) struct ActorPerks(pub(crate) PerkProgression);
+
+/// Player-authored progression sheet projected onto the transient FPS player
+/// entity. The persistent copy lives in [`PlayerProgression`].
 #[derive(Component, Debug, Clone, Default, PartialEq)]
 pub(crate) struct ActorStats(pub(crate) CharacterSheet);
 
@@ -67,6 +74,7 @@ impl Plugin for StatsPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<StatsSettings>()
             .init_resource::<PerkCatalog>()
+            .init_resource::<PlayerProgression>()
             .add_systems(
                 Update,
                 (attach_stats_to_player, recalculate_derived_stats)
@@ -76,14 +84,22 @@ impl Plugin for StatsPlugin {
     }
 }
 
-fn attach_stats_to_player(players: Query<Entity, Added<FpsPlayer>>, mut commands: Commands) {
+fn attach_stats_to_player(
+    players: Query<Entity, Added<FpsPlayer>>,
+    progression: Res<PlayerProgression>,
+    mut commands: Commands,
+) {
     for entity in &players {
         commands
             .entity(entity)
-            .insert(ActorStats::default())
-            .insert(ActorPerks::default())
+            .insert(ActorStats(progression.stats.clone()))
+            .insert(ActorPerks(progression.perks.clone()))
             .insert(DerivedAttributes::default())
-            .insert(Experience::default());
+            .insert(Experience {
+                unspent_skill_points: progression.unspent_skill_points,
+                total_skill_points: progression.total_skill_points,
+                ..default()
+            });
     }
 }
 
@@ -101,6 +117,37 @@ fn recalculate_derived_stats(
         experience.xp_into_level = stats.0.xp_into_level(&settings.0);
         experience.next_threshold = xp_threshold(stats.0.level.saturating_add(1), &settings.0);
     }
+}
+
+pub(crate) fn restore_player_progression(world: &mut World, entity: Entity) {
+    let Some(progression) = world.get_resource::<PlayerProgression>().cloned() else {
+        return;
+    };
+    world
+        .entity_mut(entity)
+        .insert(ActorStats(progression.stats))
+        .insert(ActorPerks(progression.perks))
+        .insert(DerivedAttributes::default())
+        .insert(Experience {
+            unspent_skill_points: progression.unspent_skill_points,
+            total_skill_points: progression.total_skill_points,
+            ..default()
+        });
+}
+
+pub(crate) fn capture_player_progression(world: &mut World, entity: Entity) {
+    let Some(stats) = world.get::<ActorStats>(entity).cloned() else {
+        return;
+    };
+    let perks = world.get::<ActorPerks>(entity).cloned().unwrap_or_default();
+    let experience = world.get::<Experience>(entity).copied().unwrap_or_default();
+    let Some(mut progression) = world.get_resource_mut::<PlayerProgression>() else {
+        return;
+    };
+    progression.stats = stats.0;
+    progression.perks = perks.0;
+    progression.unspent_skill_points = experience.unspent_skill_points;
+    progression.total_skill_points = experience.total_skill_points;
 }
 
 /// Loads GMST settings for a manifest's content set from the deterministic

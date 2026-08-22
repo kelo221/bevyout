@@ -355,6 +355,9 @@ pub fn active_perk_modifiers(
             let EntryPointPayload::Value(value) = payload else {
                 continue;
             };
+            if !value.is_finite() || *value < 0.0 {
+                continue;
+            }
             if *code == ENTRY_CODE_XP_AWARD_MULTIPLIER {
                 xp_product *= f64::from(*value);
             } else if *code == ENTRY_CODE_BONUS_SKILL_POINTS {

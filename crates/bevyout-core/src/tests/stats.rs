@@ -210,9 +210,21 @@ fn skill_values_clamp_into_zero_to_one_hundred() {
     assert_eq!(world.skill_base(ActorSkill::Science), 15);
     world.add_skill_points(ActorSkill::Science, 95);
     assert_eq!(world.skill_value(ActorSkill::Science), 100);
-    // Increases cannot go negative or above 100.
+    // Progression points cannot go negative or above 100.
     world.add_skill_points(ActorSkill::Science, -500);
     assert_eq!(world.skill_value(ActorSkill::Science), 15);
+}
+
+#[test]
+fn skill_value_mutations_support_the_full_effective_range() {
+    let mut world = sheet();
+    assert_eq!(world.set_skill_value(ActorSkill::SmallGuns, 0), 0);
+    assert_eq!(world.skill_value(ActorSkill::SmallGuns), 0);
+    world.add_skill_points(ActorSkill::SmallGuns, 20);
+    assert_eq!(world.skill_value(ActorSkill::SmallGuns), 20);
+    assert_eq!(world.mod_skill_value(ActorSkill::SmallGuns, -50), 0);
+    assert_eq!(world.mod_skill_value(ActorSkill::SmallGuns, 500), 100);
+    assert_eq!(world.skill_value(ActorSkill::SmallGuns), 100);
 }
 
 #[test]
@@ -255,8 +267,9 @@ fn perk_modifiers_scale_award_xp_and_bonus_skill_points() {
     assert_eq!(skill_points_per_level(&world, &settings(), 3), 18);
     // The multiplier saturates rather than wrapping on absurd values.
     let mut huge = sheet();
-    award_xp(&mut huge, u32::MAX, u32::MAX, &settings());
-    assert!(huge.xp <= xp_threshold(30, &settings()));
+    let huge_outcome = award_xp(&mut huge, u32::MAX, u32::MAX, &settings());
+    assert_eq!(huge.xp, xp_threshold(30, &settings()));
+    assert_eq!(huge_outcome.level, 30);
 }
 
 #[test]
@@ -265,6 +278,7 @@ fn character_sheet_round_trips_through_serde() {
     world.set_special(SpecialAttribute::Endurance, 8);
     world.tagged_skills.insert(ActorSkill::SmallGuns);
     world.add_skill_points(ActorSkill::Sneak, 12);
+    world.set_skill_value(ActorSkill::Science, 0);
     award_xp(&mut world, 700, 10_000, &settings());
     let encoded = ron::to_string(&world).expect("serialize sheet");
     let decoded: CharacterSheet = ron::from_str(&encoded).expect("deserialize sheet");

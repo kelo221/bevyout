@@ -23,9 +23,9 @@ level. Four console commands expose all of it: `addperk`, `removeperk`,
    perk catalog: 87 perks, 58 playable, 3 hidden, 18 quest, 58 ability, 42 entry-point entries, 48 unknown conditions -> catalogs/<fingerprint>/perks.ron
    ```
 
-   (48 perks carry non-GetActorValue conditions like GetIsSex/HasPerk;
-   those block eligibility with `unknown_conditions` reasons rather than
-   being silently accepted.)
+   (The catalog contains 48 unsupported or malformed condition words across
+   21 perks. They block eligibility with `unknown_conditions` reasons rather
+   than being silently accepted.)
 
 2. Launch the viewer with the agent bridge:
 
@@ -50,6 +50,7 @@ level. Four console commands expose all of it: `addperk`, `removeperk`,
    | `player.addperk 00031dd3` | `rank 1/3`, modifiers `xp ×1.10` |
    | `player.rewardxp 1000` | XP 1000 → **2100** (1000 × 1.10) |
    | `player.addperk 00031dd3` | `rank 2/3`, modifiers `xp ×1.20` |
+   | `player.removeperk 00031dd3` | `rank 1/3`, modifier remains `xp ×1.10` |
    | `player.removeperk 00031dd3` | `rank 0/3`, modifiers back to ×1.00 |
 
 5. Educated adds +3 skill points per level (INT 4 gate passes at INT 5):
