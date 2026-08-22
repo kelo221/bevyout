@@ -126,4 +126,33 @@ commonly 10%) and record it as a plan amendment.
 
 ## Shipped amendments
 
-(none yet)
+- **Addiction chance location (open verification item) — RESOLVED.**
+  The chance lives in `ALCH.ENIT` at offset 12 as an authored f32
+  fraction (Jet 0.2 = 20%, Buffout 0.1), *not* in the addiction PERK
+  records and not a global default. `ENIT` also carries the withdrawal
+  spell FormID at offset 8 (e.g. Jet 0x00033067). The catalog stores it
+  as `addiction_chance_percent`; the kernels consume basis points.
+- **RadAway polarity.** Real data authors RadAway's
+  "RestoreRadiationLevel" MGEF with a **positive** EFIT magnitude (+50)
+  on the Rads actor value; positive on Rads means *remove* rads
+  ("restore" semantics). Instant positive-Rads ingestible effects remove
+  rads; negative magnitudes irradiate. Verified by direct ESM byte probe
+  (MGEF 0x0001517A, av index 54, flags 0x70) and live bridge.
+- **Conditioned effect policy (#316/#318).** 47 of the catalog's effect
+  items carry CTDA conditions (Stimpak heals condition on
+  GetHealthPercentage). Wave 3 decodes and stores `conditioned: true`
+  but does not evaluate conditions at runtime — application skips them
+  with an explicit count in the JSON/log so the behavior is visible.
+  Condition evaluation is future work.
+- **`PlayerVitals` component added beyond the plan list.** No damage/
+  health surface existed on the player before this wave, so instant
+  Health effects had nothing to heal into; wave 3 adds a minimal
+  `PlayerVitals { current_health }` seeded at derived max (heals clamp
+  there; negative Health effects are out of scope until combat W4).
+- **Chem-dose attribution.** The core ledger cannot name which chem an
+  expiring effect belonged to, so the runtime keeps a parallel
+  `chem_doses_ms` map keyed by withdrawal spell FormID; expiry emits
+  `ExpiredChemDose` for withdrawal handling.
+- **Manual acceptance numbers.** With the default seed the first Jet
+  addiction lands on PRNG draw 9 (390 bps < 2000 bps); draws 0–8 fail.
+  Cited in `M9_WAVE3_MANUAL.md` step C.
