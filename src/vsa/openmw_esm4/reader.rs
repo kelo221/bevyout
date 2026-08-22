@@ -452,6 +452,33 @@ pub(crate) fn walk_container(
                     state.navigation = Some(navigation);
                 }
             }
+            // M9 wave 3 (#316): ALCH/MGEF feed the content-set-wide effect
+            // catalog. ALCH stays a pickup base as well (the item catalog
+            // reads its ENIT value and DATA weight), so the arm also runs
+            // the shared base decode instead of falling through.
+            "ALCH" => {
+                if flags & RECORD_DELETED != 0 {
+                    state.bases.remove(&form_id);
+                    state.alchs.remove(&form_id);
+                } else {
+                    if let Some(mut base) = parse_base(&sig, &subs, resolver) {
+                        base.record_flags = flags;
+                        state.bases.insert(form_id, base);
+                    }
+                    state
+                        .alchs
+                        .insert(form_id, parse_alch(&subs, form_id, flags, resolver));
+                }
+            }
+            "MGEF" => {
+                if flags & RECORD_DELETED != 0 {
+                    state.mgefs.remove(&form_id);
+                } else {
+                    state
+                        .mgefs
+                        .insert(form_id, parse_mgef(&subs, form_id, flags));
+                }
+            }
             _ => {
                 if flags & RECORD_DELETED != 0 {
                     state.bases.remove(&form_id);

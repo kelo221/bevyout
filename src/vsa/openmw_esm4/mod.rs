@@ -520,6 +520,96 @@ pub(crate) struct PerkRecord {
     pub(crate) ignored_subrecords: Vec<String>,
 }
 
+/// One raw `ALCH` `CTDA` condition (M9 wave 3 #316). Same 28-byte wire
+/// layout as `PerkConditionWire`; kept as its own type because ingestible
+/// conditions gate effect items, not perk ownership, and wave 3 stores
+/// them without running them.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct EffectConditionWire {
+    pub(crate) oper: u8,
+    pub(crate) comparison_value: f32,
+    pub(crate) function: u32,
+    pub(crate) param1: u32,
+}
+
+/// `ALCH.ENIT` body (M9 wave 3 #316), verified against the real GOTY
+/// `Fallout3.esm` with fopdoc's Fallout 3 layout: 20 bytes =
+/// `{ i32 value_caps, u8 flags, [3 pad 0xCD], u32 withdrawal_spell_formid,
+/// f32 addiction_chance, u32 consume_sound_formid }`.
+/// Ground truth: Jet's withdrawal SPEL `WithdrawalJet` (`00033067`) with a
+/// 20% chance and the consume sound `NPCHumanUsingJet` (`0008c77b`);
+/// Stimpak has zero chance and no withdrawal effect.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct AlchEnit {
+    pub(crate) value_caps: u32,
+    /// 0x01 no auto-calc, 0x02 food item, 0x04 medicine.
+    pub(crate) flags: u8,
+    pub(crate) withdrawal_spell_form_id: u32,
+    /// Base percentage chance of addiction as authored (0.0..=1.0 scale
+    /// observed: 0.2 = 20% for Jet).
+    pub(crate) addiction_chance: f32,
+    pub(crate) consume_sound_form_id: u32,
+}
+
+/// One `ALCH` effect item: an `EFID`/`EFIT` pair plus an optional trailing
+/// `CTDA` (M9 wave 3 #316). `EFIT` is 20 bytes =
+/// `{ i32 magnitude, u32 area, u32 duration_seconds, i32 range, u32
+/// primary_actor_value_index }`; the trailing index duplicates the MGEF's
+/// primary actor value (Jet's `ChemIncAPJet` carries 12 = ActionPoints on
+/// both the MGEF and every `EFIT`).
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct AlchEffectWire {
+    pub(crate) mgef_form_id: u32,
+    pub(crate) magnitude: i32,
+    pub(crate) area: u32,
+    /// Authored duration in game seconds (Jet's AP boost is 240; the
+    /// engine-builtin UMON monitor effect carries 108000).
+    pub(crate) duration_seconds: u32,
+    pub(crate) range: i32,
+    pub(crate) condition: Option<EffectConditionWire>,
+}
+
+/// Decoded `ALCH` ingestible record (M9 wave 3 #316). `DATA` is the weight
+/// f32 (also read by `parse_value_weight` for the item catalog); `ENIT`
+/// carries the addiction facts the chem engine (#317) keys on.
+#[allow(dead_code)]
+#[derive(Debug, Clone)]
+pub(crate) struct AlchRecord {
+    pub(crate) form_id: u32,
+    pub(crate) record_flags: u32,
+    pub(crate) editor_id: Option<String>,
+    pub(crate) name: Option<String>,
+    pub(crate) weight: Option<f32>,
+    pub(crate) enit: Option<AlchEnit>,
+    pub(crate) effects: Vec<AlchEffectWire>,
+    pub(crate) ignored_subrecords: Vec<String>,
+}
+
+/// Decoded `MGEF` base-effect record (M9 wave 3 #316). `DATA` is 72 bytes;
+/// the fields this slice consumes are the flags dword at offset 0 (low
+/// bits: 0x02 Recover, 0x04 Detrimental, delivery bits 0x10..0x40), the
+/// base-cost f32 at 4, the archetype u32 at 64 (0 Value Modifier, 1
+/// Script, 34 Value And Parts -- Stimpak's restore), and the primary
+/// actor-value i32 at 68 using the engine AV index family also seen in
+/// perk `CTDA` conditions (see
+/// `bevyout_core::effects::actor_value_from_effect_index`).
+#[allow(dead_code)]
+#[derive(Debug, Clone)]
+pub(crate) struct MgefRecord {
+    pub(crate) form_id: u32,
+    pub(crate) record_flags: u32,
+    pub(crate) editor_id: Option<String>,
+    pub(crate) name: Option<String>,
+    pub(crate) flags: u32,
+    pub(crate) base_cost: f32,
+    pub(crate) archetype: u32,
+    pub(crate) actor_value_index: i32,
+    pub(crate) ignored_subrecords: Vec<String>,
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct SoundParameters {
     pub(crate) byte_len: u32,
@@ -771,6 +861,10 @@ pub(crate) struct ParsedPlugin {
     pub(crate) actor_values: SharedCatalog<u32, AvifRecord>,
     // M9 wave 2 (#312): perks feed the content-set-wide perk catalog.
     pub(crate) perks: SharedCatalog<u32, PerkRecord>,
+    // M9 wave 3 (#316): ingestibles and base effects feed the
+    // content-set-wide effect catalog.
+    pub(crate) alchs: SharedCatalog<u32, AlchRecord>,
+    pub(crate) mgefs: SharedCatalog<u32, MgefRecord>,
     pub(crate) lighting_templates: SharedCatalog<u32, LightingTemplateRecord>,
     pub(crate) climates: SharedCatalog<u32, ClimateRecord>,
     pub(crate) weathers: SharedCatalog<u32, WeatherRecord>,
@@ -1062,6 +1156,8 @@ impl ParsedContentSet {
             gmsts: state.gmsts.clone(),
             actor_values: state.actor_values.clone(),
             perks: state.perks.clone(),
+            alchs: state.alchs.clone(),
+            mgefs: state.mgefs.clone(),
             lighting_templates: state.lighting_templates.clone(),
             climates: state.climates.clone(),
             weathers: state.weathers.clone(),
@@ -1113,6 +1209,8 @@ pub(crate) struct ParsedState {
     gmsts: SharedCatalog<u32, GmstRecord>,
     actor_values: SharedCatalog<u32, AvifRecord>,
     perks: SharedCatalog<u32, PerkRecord>,
+    alchs: SharedCatalog<u32, AlchRecord>,
+    mgefs: SharedCatalog<u32, MgefRecord>,
     lighting_templates: SharedCatalog<u32, LightingTemplateRecord>,
     climates: SharedCatalog<u32, ClimateRecord>,
     weathers: SharedCatalog<u32, WeatherRecord>,

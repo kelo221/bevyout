@@ -61,7 +61,10 @@ fn test_app() -> App {
         },
     ));
     install(&mut app);
-    app.add_plugins(super::super::stats::StatsPlugin);
+    app.add_plugins((
+        super::super::stats::StatsPlugin,
+        super::super::effects::EffectsPlugin,
+    ));
     player::set_camera_mode(app.world_mut(), player::CameraMode::Fps).unwrap();
     app.update();
     app
@@ -2802,4 +2805,236 @@ fn showperks_lists_owned_and_eligible_with_blocked_reasons() {
     assert_eq!(educated["eligible"], false);
     assert_eq!(educated["reasons"][0]["kind"], "min_level");
     assert_eq!(educated["reasons"][0]["required"].as_i64(), Some(4));
+}
+
+// ---------------------------------------------------------------------
+// M9 wave 3 (#318): chem/aid/radiation console surface.
+// ---------------------------------------------------------------------
+
+use crate::viewer::effects::EffectCatalog;
+
+/// Synthetic effect catalog with the real-data ground-truth shapes:
+/// Stimpak (instant heal 30, medicine), RadAway (instant -50 rads),
+/// Buffout (STR +2 / END +3 for 240 s), and Jet (AP +30 for 240 s with a
+/// 20% addiction chance against withdrawal 00033067). FormIDs match the
+/// real GOTY Fallout3.esm records.
+fn ingestible_test_catalog() -> EffectCatalog {
+    use bevyout_core::actor_state::{ActorValue, SpecialAttribute};
+    use bevyout_core::effects::{IngestibleDefinition, IngestibleEffect};
+    let instant = |mgef: u32, value: ActorValue, magnitude: f32| IngestibleEffect {
+        mgef_form_id: mgef,
+        magnitude,
+        duration_s: 0,
+        actor_value: Some(value),
+        ..IngestibleEffect::default()
+    };
+    let timed = |mgef: u32, value: ActorValue, magnitude: f32| IngestibleEffect {
+        mgef_form_id: mgef,
+        magnitude,
+        duration_s: 240,
+        actor_value: Some(value),
+        ..IngestibleEffect::default()
+    };
+    let stimpak = IngestibleDefinition {
+        form_id: 0x0001_5169,
+        editor_id: "Stimpak".into(),
+        flags: 0x04,
+        effects: vec![instant(0x48C7B, ActorValue::Health, 30.0)],
+        ..IngestibleDefinition::default()
+    };
+    let radaway = IngestibleDefinition {
+        form_id: 0x0001_5167,
+        editor_id: "RadAway".into(),
+        // Real-data polarity: RestoreRadiationLevel carries +50 (removes
+        // rads), verified against the GOTY ESM.
+        effects: vec![instant(0x1517A, ActorValue::Rads, 50.0)],
+        ..IngestibleDefinition::default()
+    };
+    let buffout = IngestibleDefinition {
+        form_id: 0x0001_5163,
+        editor_id: "Buffout".into(),
+        weight: 0.1,
+        effects: vec![
+            timed(
+                0x6697C,
+                ActorValue::Special(SpecialAttribute::Strength),
+                2.0,
+            ),
+            timed(
+                0x6697D,
+                ActorValue::Special(SpecialAttribute::Endurance),
+                3.0,
+            ),
+        ],
+        ..IngestibleDefinition::default()
+    };
+    let jet = IngestibleDefinition {
+        form_id: 0x0001_5164,
+        editor_id: "Jet".into(),
+        weight: 0.2,
+        withdrawal_form_id: 0x0003_3067,
+        addiction_chance_percent: 20.0,
+        effects: vec![timed(0x66EB8, ActorValue::ActionPoints, 30.0)],
+        ..IngestibleDefinition::default()
+    };
+    EffectCatalog {
+        ingestibles: [stimpak, radaway, buffout, jet]
+            .into_iter()
+            .map(|ingestible| (ingestible.form_id, ingestible))
+            .collect(),
+    }
+}
+
+#[test]
+fn rads_reports_dose_and_threshold_penalties() {
+    let mut app = test_app();
+    let fresh = exec(&mut app, "player.rads");
+    assert!(fresh.ok);
+    assert_eq!(fresh.value["rads"].as_i64(), Some(0));
+    assert_eq!(fresh.log, ["0 rads (no penalties)"]);
+    let dosed = exec(&mut app, "addrads 600");
+    assert!(dosed.ok);
+    assert_eq!(dosed.value["absorbed_rads"].as_i64(), Some(600));
+    let report = exec(&mut app, "rads");
+    assert_eq!(report.value["rads"].as_i64(), Some(600));
+    assert_eq!(report.value["threshold"].as_i64(), Some(600));
+    let penalties = report.value["penalties"].as_str().unwrap();
+    assert!(penalties.contains("endurance-3"), "{penalties}");
+    assert!(penalties.contains("agility-2"), "{penalties}");
+    assert!(penalties.contains("strength-1"), "{penalties}");
+}
+
+#[test]
+fn addrads_clamps_at_the_fatal_cap_and_removerads_reverses() {
+    let mut app = test_app();
+    let fatal = exec(&mut app, "addrads 1500");
+    assert_eq!(fatal.value["rads"].as_i64(), Some(1000));
+    assert_eq!(fatal.value["fatal"], true);
+    // RadAway semantics: removing more than held never goes below zero.
+    let removed = exec(&mut app, "removerads 1200");
+    assert_eq!(removed.value["removed_rads"].as_i64(), Some(1000));
+    assert_eq!(removed.value["rads"].as_i64(), Some(0));
+}
+
+#[test]
+fn addchem_applies_instant_heal_and_timed_modifiers_without_inventory() {
+    let mut app = test_app();
+    app.insert_resource(ingestible_test_catalog());
+    let healed = exec(&mut app, "addchem 00015169");
+    assert!(healed.ok, "addchem stimpak failed: {:?}", healed.error);
+    assert_eq!(healed.value["application"]["editor_id"], "Stimpak");
+    // Non-addictive items consume no PRNG draw and report no roll.
+    assert_eq!(
+        healed.value["application"]["rng_draw_index"].as_i64(),
+        Some(0)
+    );
+
+    let buffed = exec(&mut app, "addchem 00015163");
+    assert!(buffed.ok);
+    assert_eq!(
+        buffed.value["application"]["applied_modifiers"].as_i64(),
+        Some(2)
+    );
+    // The ledger carries both timed modifiers; the base sheet is untouched.
+    let list = exec(&mut app, "effects");
+    assert_eq!(
+        list.value["active_effects"].as_array().map(Vec::len),
+        Some(2)
+    );
+    let sheet = exec(&mut app, "getav strength");
+    assert_eq!(sheet.value["result"].as_f64(), Some(5.0));
+}
+
+#[test]
+fn jet_rolls_addiction_against_the_seeded_rng_and_cure_clears_it() {
+    let mut app = test_app();
+    app.insert_resource(ingestible_test_catalog());
+    // Seed 0's first draw is 7535 bps against Jet's effective 2000 bps:
+    // no addiction, one draw consumed.
+    let first = exec(&mut app, "addchem 00015164");
+    assert!(first.ok);
+    assert_eq!(first.value["application"]["addiction_roll"], false);
+    assert_eq!(
+        first.value["application"]["rng_draw_index"].as_i64(),
+        Some(1)
+    );
+    assert_eq!(
+        exec(&mut app, "effects").value["addictions"]
+            .as_array()
+            .map(Vec::len),
+        Some(0)
+    );
+
+    // Force the machine into Addicted to prove cureaddiction clears it.
+    {
+        let mut query = app
+            .world_mut()
+            .query_filtered::<&mut crate::viewer::effects::Addictions, ()>();
+        query
+            .single_mut(app.world_mut())
+            .unwrap()
+            .0
+            .addict(0x0003_3067);
+    }
+    let cured_all = exec(&mut app, "cureaddiction all");
+    assert!(cured_all.ok);
+    assert_eq!(cured_all.value["cured"].as_i64(), Some(1));
+    assert_eq!(
+        exec(&mut app, "effects").value["addictions"]
+            .as_array()
+            .map(Vec::len),
+        Some(0)
+    );
+
+    // Curing a non-existent addiction errors.
+    let missing = exec(&mut app, "cureaddiction 00033067");
+    assert!(!missing.ok);
+    assert_eq!(error_code(&missing), "not_addicted");
+}
+
+#[test]
+fn useitem_applies_ingestible_effects_through_the_canonical_seam() {
+    let mut app = test_app();
+    app.insert_resource(ingestible_test_catalog());
+    // Put a stimpak stack in the player inventory (canonical + projection).
+    let stack = InventoryStack {
+        base_form_id: 0x0001_5169,
+        count: 2,
+        condition: None,
+    };
+    let before = app
+        .world()
+        .resource::<crate::viewer::interaction::PlayerInventory>()
+        .legacy_snapshot();
+    app.world_mut()
+        .resource_mut::<crate::viewer::interaction::CanonicalItemLedger>()
+        .add_player_item(&before, stack)
+        .unwrap();
+    app.world_mut()
+        .resource_mut::<crate::viewer::interaction::PlayerInventory>()
+        .add_stack(stack);
+    let item_id = app
+        .world()
+        .resource::<crate::viewer::interaction::CanonicalItemLedger>()
+        .ledger
+        .holders()
+        .get(&HolderId::Player)
+        .and_then(|state| state.items.first().map(|item| item.id))
+        .unwrap();
+    // Damage the player through the vitals component, then heal with one
+    // stimpak: 140 + 30 = 170 under the level-1 max of 200.
+    {
+        let mut query = app
+            .world_mut()
+            .query_filtered::<&mut crate::viewer::effects::PlayerVitals, ()>();
+        query.single_mut(app.world_mut()).unwrap().current_health = 140.0;
+    }
+    let output = exec(&mut app, &format!("useitem {:016x}", item_id.0));
+    assert!(output.ok, "useitem failed: {:?}", output.error);
+    assert_eq!(output.value["ingestible"]["editor_id"], "Stimpak");
+    let healed_to = output.value["ingestible"]["healed_to"].as_f64().unwrap();
+    assert!(
+        (healed_to - 170.0).abs() < f64::EPSILON,
+        "healed to {healed_to}"
+    );
 }

@@ -91,9 +91,10 @@ pub(crate) use physics::{
 pub(crate) use prepare::ITEM_CATALOG_REVISION;
 pub(crate) use prepare::{
     ACTOR_ANIMATION_CATALOG_REVISION, ACTOR_ANIMATION_NATIVE_CONVERTER_REVISION,
-    ACTOR_CATALOG_REVISION, ActorBlueprint, ActorCatalogEntry, GMST_CATALOG_REVISION,
-    PACKAGE_CATALOG_REVISION, PERK_CATALOG_REVISION, PreparedActorCatalog, PreparedGmstCatalog,
-    PreparedPackageCatalog, PreparedPackageEntry, PreparedPerkCatalog,
+    ACTOR_CATALOG_REVISION, ActorBlueprint, ActorCatalogEntry, EFFECT_CATALOG_REVISION,
+    GMST_CATALOG_REVISION, PACKAGE_CATALOG_REVISION, PERK_CATALOG_REVISION, PreparedActorCatalog,
+    PreparedEffectCatalog, PreparedGmstCatalog, PreparedPackageCatalog, PreparedPackageEntry,
+    PreparedPerkCatalog,
 };
 // Issue #128's `tnm` console command decodes `navgraph.ron` (issue #111)
 // straight into these types -- see `viewer::nav_overlay`.
