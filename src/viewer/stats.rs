@@ -1,12 +1,10 @@
 //! Player RPG stats runtime (M9 wave 1, #310).
 //!
 //! Thin Bevy adapter over the pure `bevyout_core::stats` kernels (#309):
-//! `ActorStats` is the authoritative progression state, `DerivedAttributes`
-//! and `Experience` are recomputed projections, and `StatsSettings` carries
-//! the prepared GMST settings (GOTY defaults until a catalog overrides
-//! them). The FPS player is despawned/respawned on camera-mode changes, so
-//! components attach through `Added<FpsPlayer>` exactly like the actor-state
-//! seeding pattern.
+//! `PlayerProgression` is the authoritative state that survives transient FPS
+//! player entities. `ActorStats`, `DerivedAttributes`, and `Experience` are
+//! entity projections, and `StatsSettings` carries the prepared GMST settings
+//! (GOTY defaults until a catalog overrides them).
 
 use bevy::prelude::*;
 use bevyout_core::stats::{
@@ -22,8 +20,17 @@ use crate::vsa::{GMST_CATALOG_REVISION, PreparedGmstCatalog, PreparedSceneManife
 #[derive(Resource, Debug, Clone, Copy, Default, PartialEq)]
 pub(crate) struct StatsSettings(pub(crate) GmstSettings);
 
-/// Authoritative player-authored progression state. Only console and future
-/// gameplay systems mutate this sheet; everything else reads projections.
+/// Persistent player-authored progression state. The FPS player entity is
+/// transient across camera-mode changes, so console and gameplay systems
+/// mutate this resource rather than an entity projection.
+#[derive(Resource, Debug, Clone, Default, PartialEq)]
+pub(crate) struct PlayerProgression {
+    pub(crate) stats: CharacterSheet,
+    pub(crate) unspent_skill_points: u16,
+    pub(crate) total_skill_points: u16,
+}
+
+/// Player-authored progression sheet projected onto the transient FPS entity.
 #[derive(Component, Debug, Clone, Default, PartialEq)]
 pub(crate) struct ActorStats(pub(crate) CharacterSheet);
 
@@ -47,38 +54,77 @@ pub(crate) struct StatsPlugin;
 
 impl Plugin for StatsPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<StatsSettings>().add_systems(
-            Update,
-            (attach_stats_to_player, recalculate_derived_stats)
-                .chain()
-                .in_set(ViewerSet::WorldSync),
-        );
+        app.init_resource::<StatsSettings>()
+            .init_resource::<PlayerProgression>()
+            .add_systems(
+                Update,
+                (attach_stats_to_player, recalculate_derived_stats)
+                    .chain()
+                    .in_set(ViewerSet::WorldSync),
+            );
     }
 }
 
-fn attach_stats_to_player(players: Query<Entity, Added<FpsPlayer>>, mut commands: Commands) {
+fn attach_stats_to_player(
+    players: Query<Entity, Added<FpsPlayer>>,
+    progression: Res<PlayerProgression>,
+    mut commands: Commands,
+) {
     for entity in &players {
         commands
             .entity(entity)
-            .insert(ActorStats::default())
-            .insert(DerivedAttributes::default())
-            .insert(Experience::default());
+            .insert(ProjectionBundle::from(&progression));
     }
 }
 
-/// Recomputes derived values whenever the sheet (or a fresh player spawn)
-/// changes. `Changed<ActorStats>` fires on insert and on every console
-/// mutation because those go through `entity_mut`.
+#[derive(Bundle)]
+struct ProjectionBundle {
+    stats: ActorStats,
+    derived: DerivedAttributes,
+    experience: Experience,
+}
+
+impl ProjectionBundle {
+    fn from(progression: &PlayerProgression) -> Self {
+        Self {
+            stats: ActorStats(progression.stats.clone()),
+            derived: DerivedAttributes::default(),
+            experience: Experience {
+                unspent_skill_points: progression.unspent_skill_points,
+                total_skill_points: progression.total_skill_points,
+                ..default()
+            },
+        }
+    }
+}
+
+pub(crate) fn restore_player_progression(world: &mut World, entity: Entity) {
+    let Some(progression) = world.get_resource::<PlayerProgression>().cloned() else {
+        return;
+    };
+    world
+        .entity_mut(entity)
+        .insert(ProjectionBundle::from(&progression));
+}
+
+/// Keeps the active FPS entity as a projection of the persistent progression
+/// resource. Console commands mutate the resource directly, so this also
+/// repairs the projection after a command batch without relying on entity
+/// change detection.
 fn recalculate_derived_stats(
     settings: Res<StatsSettings>,
-    mut players: Query<(&ActorStats, &mut DerivedAttributes, &mut Experience), Changed<ActorStats>>,
+    progression: Res<PlayerProgression>,
+    mut players: Query<(&mut ActorStats, &mut DerivedAttributes, &mut Experience)>,
 ) {
-    for (stats, mut derived, mut experience) in &mut players {
+    for (mut stats, mut derived, mut experience) in &mut players {
+        stats.0 = progression.stats.clone();
         derived.0 = stats.0.derived(&settings.0);
         experience.xp = stats.0.xp;
         experience.level = stats.0.level;
         experience.xp_into_level = stats.0.xp_into_level(&settings.0);
         experience.next_threshold = xp_threshold(stats.0.level.saturating_add(1), &settings.0);
+        experience.unspent_skill_points = progression.unspent_skill_points;
+        experience.total_skill_points = progression.total_skill_points;
     }
 }
 

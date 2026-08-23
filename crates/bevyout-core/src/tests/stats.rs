@@ -216,6 +216,23 @@ fn skill_values_clamp_into_zero_to_one_hundred() {
 }
 
 #[test]
+fn skill_value_mutations_cover_the_full_effective_range_without_spending_points() {
+    let mut world = sheet();
+    world.add_skill_points(ActorSkill::SmallGuns, 20);
+    assert_eq!(world.skill_value(ActorSkill::SmallGuns), 35);
+
+    assert_eq!(world.set_skill_value(ActorSkill::SmallGuns, 0), 0);
+    assert_eq!(world.skill_increases[&ActorSkill::SmallGuns], 20);
+    assert_eq!(world.skill_value(ActorSkill::SmallGuns), 0);
+
+    assert_eq!(world.mod_skill_value(ActorSkill::SmallGuns, 5), 5);
+    assert_eq!(world.skill_increases[&ActorSkill::SmallGuns], 20);
+    assert_eq!(world.mod_skill_value(ActorSkill::SmallGuns, -500), 0);
+    assert_eq!(world.mod_skill_value(ActorSkill::SmallGuns, 500), 100);
+    assert_eq!(world.skill_increases[&ActorSkill::SmallGuns], 20);
+}
+
+#[test]
 fn resistances_capped_at_eighty_five_percent() {
     assert_eq!(clamp_resistance_bps(9_900), 8_500);
     assert_eq!(clamp_resistance_bps(3_000), 3_000);
@@ -248,11 +265,26 @@ fn character_sheet_round_trips_through_serde() {
     world.set_special(SpecialAttribute::Endurance, 8);
     world.tagged_skills.insert(ActorSkill::SmallGuns);
     world.add_skill_points(ActorSkill::Sneak, 12);
+    world.set_skill_value(ActorSkill::SmallGuns, 7);
     award_xp(&mut world, 700, &settings());
     let encoded = ron::to_string(&world).expect("serialize sheet");
     let decoded: CharacterSheet = ron::from_str(&encoded).expect("deserialize sheet");
     assert_eq!(decoded, world);
     assert_eq!(decoded.level, 3);
+    assert_eq!(decoded.skill_value(ActorSkill::SmallGuns), 7);
+}
+
+#[test]
+fn extreme_xp_settings_are_rejected_and_thresholds_saturate() {
+    let mut settings = settings();
+    settings.max_player_level = 99;
+    settings.xp_base = 1_000_000;
+    settings.xp_bump_base = 1_000_000;
+    assert!(matches!(
+        settings.validate(),
+        Err(StatsError::XpCurveOutOfRange { level: 99, .. })
+    ));
+    assert_eq!(xp_threshold(99, &settings), u32::MAX);
 }
 
 #[test]

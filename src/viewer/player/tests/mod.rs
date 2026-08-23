@@ -15,6 +15,7 @@ fn camera_transition_world(physics_disabled: bool, collisions_ready: bool) -> Wo
     world.insert_resource(PlayerNoClip::default());
     world.insert_resource(RefRegistry::default());
     world.insert_resource(crate::console::ConsoleSessionStore::default());
+    world.insert_resource(crate::viewer::stats::PlayerProgression::default());
     world.spawn((
         Camera3d::default(),
         Transform::from_xyz(2.0, 3.0, 4.0),
@@ -73,6 +74,17 @@ fn fps_transition_round_trips_hierarchy_and_player_reference() {
     assert_eq!(world.resource::<CameraModeState>().player, Some(player));
     assert!(!world.resource::<PlayerNoClip>().0);
     let session = crate::console::ConsoleSessionId::new("ui");
+    let mut progression = world.resource_mut::<crate::viewer::stats::PlayerProgression>();
+    progression
+        .stats
+        .set_special(bevyout_core::actor_state::SpecialAttribute::Strength, 9);
+    progression
+        .stats
+        .set_skill_value(bevyout_core::actor_state::ActorSkill::SmallGuns, 0);
+    progression.stats.level = 3;
+    progression.stats.xp = 700;
+    progression.unspent_skill_points = 12;
+    progression.total_skill_points = 27;
     world
         .resource_mut::<crate::console::ConsoleSessionStore>()
         .select(session.clone(), player);
@@ -82,6 +94,20 @@ fn fps_transition_round_trips_hierarchy_and_player_reference() {
     assert_eq!(
         set_camera_mode(&mut world, CameraMode::Free),
         Ok(CameraMode::Free)
+    );
+    assert_eq!(
+        world
+            .resource::<crate::viewer::stats::PlayerProgression>()
+            .stats
+            .level,
+        3
+    );
+    assert_eq!(
+        world
+            .resource::<crate::viewer::stats::PlayerProgression>()
+            .stats
+            .xp,
+        700
     );
     assert!(!world.entities().contains(player));
     assert!(crate::console::resolve_reference(&world, "player").is_err());

@@ -229,8 +229,28 @@ impl GmstSettings {
         if self.max_player_level == 0 || self.max_player_level > 99 {
             return Err(StatsError::LevelCapOutOfRange(self.max_player_level));
         }
-        if self.xp_base == 0 {
+        if self.level_up_skill_points_base > 100 {
+            return Err(StatsError::LevelUpSkillPointsBaseOutOfRange(
+                self.level_up_skill_points_base,
+            ));
+        }
+        if self.level_up_skill_points_interval > 100 {
+            return Err(StatsError::LevelUpSkillPointsIntervalOutOfRange(
+                self.level_up_skill_points_interval,
+            ));
+        }
+        if self.xp_base == 0 || self.xp_base > 1_000_000 {
             return Err(StatsError::XpBaseOutOfRange(self.xp_base));
+        }
+        if self.xp_bump_base > 1_000_000 {
+            return Err(StatsError::XpBumpBaseOutOfRange(self.xp_bump_base));
+        }
+        let threshold = xp_threshold_u64(self.max_player_level, self);
+        if threshold > u64::from(u32::MAX) {
+            return Err(StatsError::XpCurveOutOfRange {
+                level: self.max_player_level,
+                threshold,
+            });
         }
         Ok(())
     }
@@ -245,7 +265,11 @@ pub enum StatsError {
     NonFiniteSetting(&'static str),
     NegativeSetting(&'static str),
     LevelCapOutOfRange(u8),
+    LevelUpSkillPointsBaseOutOfRange(u8),
+    LevelUpSkillPointsIntervalOutOfRange(u8),
     XpBaseOutOfRange(u32),
+    XpBumpBaseOutOfRange(u32),
+    XpCurveOutOfRange { level: u8, threshold: u64 },
 }
 
 impl fmt::Display for StatsError {
@@ -256,7 +280,20 @@ impl fmt::Display for StatsError {
             Self::LevelCapOutOfRange(level) => {
                 write!(f, "max player level {level} outside 1..=99")
             }
+            Self::LevelUpSkillPointsBaseOutOfRange(value) => {
+                write!(f, "level-up skill points base {value} outside 0..=100")
+            }
+            Self::LevelUpSkillPointsIntervalOutOfRange(value) => {
+                write!(f, "level-up skill points interval {value} outside 0..=100")
+            }
             Self::XpBaseOutOfRange(base) => write!(f, "xp base {base} outside 1..=1_000_000"),
+            Self::XpBumpBaseOutOfRange(bump) => {
+                write!(f, "xp bump base {bump} outside 0..=1_000_000")
+            }
+            Self::XpCurveOutOfRange { level, threshold } => write!(
+                f,
+                "xp threshold at level {level} is {threshold}, above u32::MAX"
+            ),
         }
     }
 }
@@ -271,6 +308,7 @@ pub struct CharacterSheet {
     pub special: BTreeMap<SpecialAttribute, u8>,
     pub tagged_skills: BTreeSet<ActorSkill>,
     pub skill_increases: BTreeMap<ActorSkill, i16>,
+    pub skill_modifiers: BTreeMap<ActorSkill, i16>,
     pub level: u8,
     pub xp: u32,
 }
@@ -292,6 +330,7 @@ impl Default for CharacterSheet {
             .collect(),
             tagged_skills: BTreeSet::new(),
             skill_increases: BTreeMap::new(),
+            skill_modifiers: BTreeMap::new(),
             level: 1,
             xp: 0,
         }
@@ -338,9 +377,28 @@ impl CharacterSheet {
     /// Effective skill value, clamped to `0..=100`.
     #[must_use]
     pub fn skill_value(&self, skill: ActorSkill) -> u8 {
+        let base = i32::from(self.skill_base(skill));
+        let increases = i32::from(self.skill_increases.get(&skill).copied().unwrap_or(0));
+        let modifier = i32::from(self.skill_modifiers.get(&skill).copied().unwrap_or(0));
+        (base + increases + modifier).clamp(i32::from(SKILL_MIN), i32::from(SKILL_MAX)) as u8
+    }
+
+    /// Sets the signed effective-value modifier needed to reach `value`.
+    /// Progression points remain separate so console mutations do not erase
+    /// points earned through level-ups.
+    pub fn set_skill_value(&mut self, skill: ActorSkill, value: i16) -> u8 {
+        let target = value.clamp(i16::from(SKILL_MIN), i16::from(SKILL_MAX));
         let base = i16::from(self.skill_base(skill));
         let increases = self.skill_increases.get(&skill).copied().unwrap_or(0);
-        (base + increases).clamp(i16::from(SKILL_MIN), i16::from(SKILL_MAX)) as u8
+        self.skill_modifiers
+            .insert(skill, target - base - increases);
+        self.skill_value(skill)
+    }
+
+    /// Shifts an effective skill value, clamping the result to `0..=100`.
+    pub fn mod_skill_value(&mut self, skill: ActorSkill, delta: i16) -> u8 {
+        let target = i16::from(self.skill_value(skill)).saturating_add(delta);
+        self.set_skill_value(skill, target)
     }
 
     /// Spends `points` on a skill (negative values refund), keeping the
@@ -348,7 +406,9 @@ impl CharacterSheet {
     /// read by `skill_value`.
     pub fn add_skill_points(&mut self, skill: ActorSkill, points: i16) -> i16 {
         let current = self.skill_increases.entry(skill).or_insert(0);
-        *current = (*current + points).clamp(0, i16::from(SKILL_MAX));
+        *current = current
+            .saturating_add(points)
+            .clamp(0, i16::from(SKILL_MAX));
         *current
     }
 
@@ -410,14 +470,18 @@ pub fn base_poison_rad_resistance_bps(endurance: u8) -> u32 {
 /// `(level - 1) * iXPBase + (level - 1) * (level - 2) / 2 * iXPBumpBase`
 /// (vanilla: 200, 550, 1050, 1700, ... 66 700 at level 30).
 #[must_use]
-pub fn xp_threshold(level: u8, settings: &GmstSettings) -> u32 {
+fn xp_threshold_u64(level: u8, settings: &GmstSettings) -> u64 {
     if level <= 1 {
         return 0;
     }
-    let level = u32::from(level);
+    let level = u64::from(level);
     let steps = level - 1;
-    steps.saturating_mul(settings.xp_base)
-        + (steps * (level - 2) / 2).saturating_mul(settings.xp_bump_base)
+    let bump_steps = steps * (level - 2) / 2;
+    steps * u64::from(settings.xp_base) + bump_steps * u64::from(settings.xp_bump_base)
+}
+
+pub fn xp_threshold(level: u8, settings: &GmstSettings) -> u32 {
+    xp_threshold_u64(level, settings).min(u64::from(u32::MAX)) as u32
 }
 
 /// Skill points granted by one level-up:

@@ -2550,6 +2550,34 @@ fn modav_and_setav_clamp_special_into_one_to_ten() {
 }
 
 #[test]
+fn skill_setav_and_modav_cover_the_full_effective_range() {
+    let mut app = test_app();
+    let awarded = exec(&mut app, "player.rewardxp 200");
+    assert!(awarded.ok);
+    let set_low = exec(&mut app, "player.setav small_guns 0");
+    assert_eq!(set_low.value["result"], 0);
+    assert_eq!(
+        exec(&mut app, "player.getav small_guns").value["result"].as_f64(),
+        Some(0.0)
+    );
+    assert_eq!(
+        exec(&mut app, "player.modav small_guns 20").value["result"],
+        20
+    );
+    assert_eq!(
+        exec(&mut app, "player.setav small_guns 200").value["result"],
+        100
+    );
+    assert_eq!(
+        exec(&mut app, "player.modav small_guns -500").value["result"],
+        0
+    );
+    let progression = app.world().resource::<super::stats::PlayerProgression>();
+    assert_eq!(progression.unspent_skill_points, 15);
+    assert_eq!(progression.total_skill_points, 15);
+}
+
+#[test]
 fn rewardxp_crosses_the_level_threshold_and_updates_derived_health() {
     let mut app = test_app();
     let output = exec(&mut app, "player.rewardxp 200");
