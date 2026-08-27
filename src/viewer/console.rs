@@ -100,9 +100,7 @@ fn install(app: &mut App) {
         .init_resource::<RealtimeShadowSettings>()
         .init_resource::<nav_overlay::NavMeshOverlayState>()
         .init_resource::<nav_overlay::NavOverlayExposureLock>()
-        // Issue #151: the `tdi`-toggled debug info HUD -- state lives with
-        // the HUD it drives in `diagnostics.rs`; spawn/update follow the
-        // same Startup+Update split as `player::mod`'s collider/step HUDs.
+        // Issue #151: `tdi` debug HUD state lives in `diagnostics.rs`.
         .init_resource::<diagnostics::DebugInfoState>()
         .add_systems(Startup, diagnostics::spawn_debug_info_hud)
         .add_systems(
