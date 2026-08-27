@@ -2,6 +2,8 @@ use bevy::ecs::system::SystemParam;
 use bevy::picking::mesh_picking::ray_cast::{MeshRayCast, MeshRayCastSettings, RayCastVisibility};
 use bevy::prelude::*;
 
+use bevyout_core::combat::body::BodyPartId;
+use bevyout_core::combat::limbs::ShotId;
 use bevyout_core::weapon::{
     ImpactEvidence, ImpactOutcome, WeaponDefinition, impact_is_in_range, resolve_actor_impact,
 };
@@ -19,6 +21,7 @@ pub(super) struct WeaponHitQueries<'w, 's> {
     parents: Query<'w, 's, &'static ChildOf>,
     viewmodels: Query<'w, 's, Entity, With<super::presentation::WeaponViewmodelRoot>>,
     actors: Query<'w, 's, (&'static ActorRuntime, &'static ActorStateRuntime)>,
+    names: Query<'w, 's, &'static Name>,
 }
 
 pub(super) fn resolve_accepted_shots(
@@ -54,8 +57,16 @@ pub(super) fn resolve_accepted_shots(
             };
             continue;
         };
+        let node_name = queries
+            .names
+            .get(*hit_entity)
+            .map(Name::as_str)
+            .unwrap_or("");
         let evidence = ImpactEvidence {
             distance_meters: hit.distance,
+            body_part: Some(BodyPartId::from_node_name(node_name)),
+            shot_id: Some(ShotId(shot.shot_index)),
+            target: None,
         };
         let weapon_definition = WeaponDefinition::new(shot.damage, shot.weapon.range_meters);
         if !impact_is_in_range(weapon_definition, evidence) {
@@ -99,8 +110,11 @@ pub(super) fn resolve_accepted_shots(
         match resolve_actor_impact(weapon_definition, evidence, &projected.definition, state) {
             Ok(ImpactOutcome::Actor(outcome)) => {
                 screen_fx.write(crate::viewer::screen_fx::ScreenFxRequested::weapon_hit());
+                if outcome.limb.is_some_and(|limb| limb.head_blur) {
+                    screen_fx.write(crate::viewer::screen_fx::ScreenFxRequested::head_cripple());
+                }
                 runtime.last_fire = FireReport {
-                    status: if outcome.killed {
+                    status: if outcome.health.killed {
                         FireStatus::ActorKilled
                     } else {
                         FireStatus::ActorHit
@@ -108,17 +122,26 @@ pub(super) fn resolve_accepted_shots(
                     shot_index: Some(shot.shot_index),
                     target_reference_form_id: Some(actor.reference_form_id),
                     hit_distance: Some(hit.distance),
-                    applied_damage: Some(outcome.applied_damage),
-                    remaining_health: Some(outcome.remaining_health),
+                    applied_damage: Some(outcome.health.applied_damage),
+                    remaining_health: Some(outcome.health.remaining_health),
                 };
                 info!(
                     "weapon hit {:08x} target={:08x} damage={:.1} health={:.1} life={}",
                     shot.weapon.base_form_id,
                     actor.reference_form_id,
-                    outcome.applied_damage,
-                    outcome.remaining_health,
+                    outcome.health.applied_damage,
+                    outcome.health.remaining_health,
                     state.life_state.label()
                 );
+            }
+            Ok(ImpactOutcome::Duplicate) => {
+                runtime.last_fire = FireReport {
+                    status: FireStatus::ActorHit,
+                    shot_index: Some(shot.shot_index),
+                    target_reference_form_id: Some(actor.reference_form_id),
+                    hit_distance: Some(hit.distance),
+                    ..Default::default()
+                };
             }
             Ok(ImpactOutcome::OutOfRange) => unreachable!("range checked before actor resolution"),
             Err(error) => {

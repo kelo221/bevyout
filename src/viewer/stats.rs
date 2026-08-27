@@ -11,12 +11,16 @@
 
 use bevy::prelude::*;
 use bevyout_core::chems::Addictions as CoreAddictions;
-use bevyout_core::effects::{ActiveEffectsLedger, projected_derived};
+use bevyout_core::combat::body::BodyPartId;
+use bevyout_core::combat::limbs::LimbState;
+use bevyout_core::combat::medical::{MedicalSource, restore_limbs};
+use bevyout_core::effects::{ActiveEffectsLedger, projected_derived_with_limbs};
 use bevyout_core::perks::{PerkDefinition, PerkProgression};
 use bevyout_core::radiation::RadiationPool;
 use bevyout_core::stats::{
     CharacterSheet, DerivedAttributes as CoreDerivedAttributes, GmstSettings, xp_threshold,
 };
+use bevyout_core::time::GameTime;
 use std::collections::BTreeMap;
 use std::path::Path;
 
@@ -53,6 +57,26 @@ pub(crate) struct PlayerProgression {
     pub(crate) chem_doses_ms: BTreeMap<u32, u32>,
     pub(crate) addictions: CoreAddictions,
     pub(crate) current_health: Option<f32>,
+    pub(crate) limbs: LimbState,
+}
+
+/// Player-selected limb for targeted Stimpak restoration. Defaults to torso.
+#[derive(Resource, Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct PlayerLimbTarget(pub(crate) BodyPartId);
+
+impl Default for PlayerLimbTarget {
+    fn default() -> Self {
+        Self(BodyPartId::Torso)
+    }
+}
+
+pub(crate) fn restore_targeted_stimpak(progression: &mut PlayerProgression, part: BodyPartId) {
+    restore_limbs(
+        &mut progression.limbs,
+        MedicalSource::TargetedStimpak,
+        Some(part),
+        GameTime::from_ms(0),
+    );
 }
 
 /// Player-authored progression sheet projected onto the transient FPS entity.
@@ -82,6 +106,7 @@ impl Plugin for StatsPlugin {
         app.init_resource::<StatsSettings>()
             .init_resource::<PerkCatalog>()
             .init_resource::<PlayerProgression>()
+            .init_resource::<PlayerLimbTarget>()
             .add_systems(
                 Update,
                 (attach_stats_to_player, recalculate_derived_stats)
@@ -159,8 +184,20 @@ fn recalculate_derived_stats(
         stats.0 = progression.stats.clone();
         let rads = radiation.map_or(progression.radiation.rads, |radiation| radiation.0.rads);
         derived.0 = match effects {
-            Some(effects) => projected_derived(&stats.0, &effects.ledger, rads, &settings.0),
-            None => projected_derived(&stats.0, &progression.effects, rads, &settings.0),
+            Some(effects) => projected_derived_with_limbs(
+                &stats.0,
+                &effects.ledger,
+                rads,
+                &settings.0,
+                Some(&progression.limbs),
+            ),
+            None => projected_derived_with_limbs(
+                &stats.0,
+                &progression.effects,
+                rads,
+                &settings.0,
+                Some(&progression.limbs),
+            ),
         };
         experience.xp = stats.0.xp;
         experience.level = stats.0.level;

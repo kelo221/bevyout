@@ -17,16 +17,24 @@ use crate::item_transaction::{
     TransactionId,
 };
 use bevyout_core::actor_state::{ActorInstanceState, ActorLifeState, ActorPackageCheckpoint};
+use bevyout_core::chems::{Addictions as ChemAddictions, RpgRngState};
+use bevyout_core::combat::limbs::LimbState;
 use bevyout_core::combat::rng::CombatRngState;
 use bevyout_core::dialogue::DialogueSnapshot;
+use bevyout_core::effects::ActiveEffectsLedger;
 use bevyout_core::manifest::exterior::WorldLocation;
+use bevyout_core::perks::PerkProgression;
+use bevyout_core::radiation::RadiationPool;
+use bevyout_core::stats::CharacterSheet;
 
 mod openmw;
 
 use openmw::{read_records, read_subrecords, tag, write_record, write_subrecord};
 
-pub const CURRENT_SAVE_FORMAT_VERSION: u32 = 8;
+pub const CURRENT_SAVE_FORMAT_VERSION: u32 = 9;
 pub const MIN_SUPPORTED_SAVE_FORMAT_VERSION: u32 = 1;
+/// RPGS envelope revision introduced with save format v9.
+pub const RPG_SAVE_REVISION: u32 = 1;
 
 #[derive(Debug, Clone)]
 pub struct SaveGame {
@@ -53,6 +61,25 @@ pub struct SaveGame {
     /// decode with `None` and expose only the identity-only header-cell
     /// fallback through [`SaveGame::legacy_location_fallback_cell`].
     pub location: Option<WorldLocation>,
+    /// Player-specific RPG state (stats, perks, effects, radiation, limbs, RNG).
+    /// Format v9 writers emit this as `RPGS`; v1–v8 decode as defaults.
+    pub rpg: RpgSaveState,
+}
+
+/// Canonical player RPG snapshot stored in the v9 `RPGS` record.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct RpgSaveState {
+    pub stats: CharacterSheet,
+    pub perks: PerkProgression,
+    pub unspent_skill_points: u16,
+    pub total_skill_points: u16,
+    pub radiation: RadiationPool,
+    pub effects: ActiveEffectsLedger,
+    pub chem_doses_ms: BTreeMap<u32, u32>,
+    pub addictions: ChemAddictions,
+    pub current_health: Option<f32>,
+    pub limbs: LimbState,
+    pub rng: RpgRngState,
 }
 
 impl PartialEq for SaveGame {
@@ -65,6 +92,7 @@ impl PartialEq for SaveGame {
             && self.combat_rng == other.combat_rng
             && self.dialogue == other.dialogue
             && self.location == other.location
+            && self.rpg == other.rpg
             && canonical_for_compare(self) == canonical_for_compare(other)
     }
 }
@@ -85,6 +113,7 @@ impl Default for SaveGame {
             canonical: None,
             dialogue: DialogueSnapshot::default(),
             location: None,
+            rpg: RpgSaveState::default(),
         }
     }
 }
@@ -337,6 +366,9 @@ pub fn encode_save(save: &SaveGame) -> Result<Vec<u8>> {
                 .as_bytes(),
         )?;
     }
+    if save.header.format_version >= 9 {
+        write_record(&mut bytes, tag("RPGS"), &encode_rpg(&save.rpg)?)?;
+    }
     let checksum: [u8; 32] = Sha256::digest(&bytes).into();
     write_record(&mut bytes, tag("CHKS"), &checksum)?;
     Ok(bytes)
@@ -348,6 +380,7 @@ pub fn decode_save(bytes: &[u8]) -> Result<SaveGame> {
     let mut saw_header = false;
     let mut saw_rng = false;
     let mut saw_combat_rng = false;
+    let mut saw_rpg = false;
     let mut saw_next_runtime_item = false;
     let mut saw_canonical = false;
     let mut saw_dialogue = false;
@@ -515,6 +548,16 @@ pub fn decode_save(bytes: &[u8]) -> Result<SaveGame> {
                         .context("decoding combat RNG state")?;
                     saw_combat_rng = true;
                 }
+                record_tag if *record_tag == tag("RPGS") => {
+                    if saw_rpg {
+                        bail!("save contains duplicate RPGS records");
+                    }
+                    if !saw_header || save.header.format_version < 9 {
+                        bail!("RPGS is only valid in save format v9 or newer");
+                    }
+                    save.rpg = decode_rpg(&record.payload)?;
+                    saw_rpg = true;
+                }
                 _ => {}
             }
         }
@@ -541,6 +584,12 @@ pub fn decode_save(bytes: &[u8]) -> Result<SaveGame> {
     }
     if save.header.format_version < 8 {
         save.combat_rng = CombatRngState::from_seed(save.rng_state);
+    }
+    if save.header.format_version >= 9 && !saw_rpg {
+        bail!("save format v9 is missing RPGS");
+    }
+    if save.header.format_version < 9 {
+        save.rpg = RpgSaveState::default();
     }
     if save.header.format_version >= 2 && !saw_next_runtime_item {
         bail!("save format v2 is missing NITM");
@@ -1150,6 +1199,15 @@ fn encode_actor(
         bytes.extend_from_slice(&package.elapsed_seconds.to_le_bytes());
         write_subrecord(&mut payload, tag("PACK"), &bytes)?;
     }
+    if actor.limbs != LimbState::healthy() {
+        write_subrecord(
+            &mut payload,
+            tag("LIMB"),
+            ron::ser::to_string(&actor.limbs)
+                .context("encoding ACTR limb state")?
+                .as_bytes(),
+        )?;
+    }
     Ok(payload)
 }
 
@@ -1159,6 +1217,7 @@ fn decode_actor(payload: &[u8]) -> Result<(u32, u32, ActorInstanceState)> {
     let mut life_state = None;
     let mut value_mutations = None;
     let mut package = None;
+    let mut limbs = None;
     for subrecord in read_subrecords(payload)? {
         match &subrecord.tag {
             record_tag if *record_tag == tag("CELL") => {
@@ -1209,6 +1268,14 @@ fn decode_actor(payload: &[u8]) -> Result<(u32, u32, ActorInstanceState)> {
                     ),
                 });
             }
+            record_tag if *record_tag == tag("LIMB") => {
+                if limbs.is_some() {
+                    bail!("ACTR contains duplicate LIMB");
+                }
+                limbs = Some(
+                    ron::de::from_bytes(&subrecord.payload).context("decoding ACTR limb state")?,
+                );
+            }
             _ => {}
         }
     }
@@ -1218,6 +1285,7 @@ fn decode_actor(payload: &[u8]) -> Result<(u32, u32, ActorInstanceState)> {
         life_state: life_state.context("ACTR is missing LIFE")?,
         value_mutations: value_mutations.unwrap_or_default(),
         package,
+        limbs: limbs.unwrap_or_default(),
     };
     actor
         .validate()
@@ -1227,6 +1295,123 @@ fn decode_actor(payload: &[u8]) -> Result<(u32, u32, ActorInstanceState)> {
         reference_form_id,
         actor,
     ))
+}
+
+fn encode_rpg(rpg: &RpgSaveState) -> Result<Vec<u8>> {
+    let mut payload = Vec::new();
+    write_subrecord(&mut payload, tag("HEAD"), &RPG_SAVE_REVISION.to_le_bytes())?;
+    write_subrecord(
+        &mut payload,
+        tag("STAT"),
+        ron::ser::to_string(&(
+            &rpg.stats,
+            rpg.unspent_skill_points,
+            rpg.total_skill_points,
+            rpg.current_health,
+        ))
+        .context("encoding RPGS STAT")?
+        .as_bytes(),
+    )?;
+    write_subrecord(
+        &mut payload,
+        tag("PERK"),
+        ron::ser::to_string(&rpg.perks)
+            .context("encoding RPGS PERK")?
+            .as_bytes(),
+    )?;
+    write_subrecord(
+        &mut payload,
+        tag("EFCT"),
+        ron::ser::to_string(&(&rpg.effects, &rpg.chem_doses_ms))
+            .context("encoding RPGS EFCT")?
+            .as_bytes(),
+    )?;
+    write_subrecord(
+        &mut payload,
+        tag("RADS"),
+        ron::ser::to_string(&rpg.radiation)
+            .context("encoding RPGS RADS")?
+            .as_bytes(),
+    )?;
+    write_subrecord(
+        &mut payload,
+        tag("ADDI"),
+        ron::ser::to_string(&rpg.addictions)
+            .context("encoding RPGS ADDI")?
+            .as_bytes(),
+    )?;
+    write_subrecord(
+        &mut payload,
+        tag("LIMB"),
+        ron::ser::to_string(&rpg.limbs)
+            .context("encoding RPGS LIMB")?
+            .as_bytes(),
+    )?;
+    write_subrecord(
+        &mut payload,
+        tag("RNG0"),
+        ron::ser::to_string(&rpg.rng)
+            .context("encoding RPGS RNG")?
+            .as_bytes(),
+    )?;
+    Ok(payload)
+}
+
+fn decode_rpg(payload: &[u8]) -> Result<RpgSaveState> {
+    let mut rpg = RpgSaveState::default();
+    let mut saw_head = false;
+    for subrecord in read_subrecords(payload)? {
+        match &subrecord.tag {
+            record_tag if *record_tag == tag("HEAD") => {
+                if saw_head {
+                    bail!("RPGS contains duplicate HEAD");
+                }
+                let revision = read_u32(&subrecord.payload, "RPGS.HEAD")?;
+                if revision == 0 || revision > RPG_SAVE_REVISION {
+                    bail!("RPGS.HEAD revision {revision} is unsupported");
+                }
+                saw_head = true;
+            }
+            record_tag if *record_tag == tag("STAT") => {
+                let (stats, unspent, total, health): (CharacterSheet, u16, u16, Option<f32>) =
+                    ron::de::from_bytes(&subrecord.payload).context("decoding RPGS STAT")?;
+                rpg.stats = stats;
+                rpg.unspent_skill_points = unspent;
+                rpg.total_skill_points = total;
+                rpg.current_health = health;
+            }
+            record_tag if *record_tag == tag("PERK") => {
+                rpg.perks =
+                    ron::de::from_bytes(&subrecord.payload).context("decoding RPGS PERK")?;
+            }
+            record_tag if *record_tag == tag("EFCT") => {
+                let (effects, doses): (ActiveEffectsLedger, BTreeMap<u32, u32>) =
+                    ron::de::from_bytes(&subrecord.payload).context("decoding RPGS EFCT")?;
+                rpg.effects = effects;
+                rpg.chem_doses_ms = doses;
+            }
+            record_tag if *record_tag == tag("RADS") => {
+                rpg.radiation =
+                    ron::de::from_bytes(&subrecord.payload).context("decoding RPGS RADS")?;
+            }
+            record_tag if *record_tag == tag("ADDI") => {
+                rpg.addictions =
+                    ron::de::from_bytes(&subrecord.payload).context("decoding RPGS ADDI")?;
+            }
+            record_tag if *record_tag == tag("LIMB") => {
+                rpg.limbs =
+                    ron::de::from_bytes(&subrecord.payload).context("decoding RPGS LIMB")?;
+            }
+            record_tag if *record_tag == tag("RNG0") => {
+                rpg.rng = ron::de::from_bytes(&subrecord.payload).context("decoding RPGS RNG")?;
+            }
+            _ => {}
+        }
+    }
+    if !saw_head {
+        bail!("RPGS is missing HEAD");
+    }
+    Ok(rpg)
 }
 
 fn encode_dropped(cell_form_id: u32, dropped: &DroppedItemState) -> Result<Vec<u8>> {

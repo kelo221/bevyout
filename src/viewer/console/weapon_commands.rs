@@ -50,7 +50,7 @@ impl ConsoleCommandProvider for WeaponCommandProvider {
             ConsoleCommand::new(
                 "hitboxdebug",
                 "hitboxdebug state|on|off [reference-form-id]",
-                "Report hitbox-debug availability; mutation becomes available in M5 wave 6.",
+                "Report hitbox-debug availability; overlay mutation stays deferred.",
                 hitbox_debug,
             ),
             ConsoleCommand::new(
@@ -170,7 +170,7 @@ fn combat_state(
             "condition": true,
             "ballistics": false,
             "armor": false,
-            "limbs": false,
+            "limbs": true,
             "vats": false,
             "ai": false,
         },

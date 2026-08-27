@@ -191,6 +191,7 @@ fn weapon_commands_expose_state_and_queue_normal_action_requests() {
     let combat = exec(&mut app, "combatstate");
     assert_eq!(combat.value["capabilities"]["ammo"], true);
     assert_eq!(combat.value["capabilities"]["condition"], true);
+    assert_eq!(combat.value["capabilities"]["limbs"], true);
     assert_eq!(combat.value["capabilities"]["vats"], false);
     let vats = exec(&mut app, "vatsstate");
     assert_eq!(vats.value["available"], false);
@@ -223,6 +224,21 @@ fn weapon_commands_expose_state_and_queue_normal_action_requests() {
             .count(),
         1
     );
+}
+
+#[test]
+fn limb_commands_report_and_cripple_player_parts() {
+    let mut app = test_app();
+    let shown = exec(&mut app, "showlimbs");
+    assert!(shown.ok);
+    assert_eq!(shown.value["locomotion_bps"], 10_000);
+    assert_eq!(shown.value["selected"], "torso");
+    assert!(exec(&mut app, "selectlimb left_leg").ok);
+    assert!(exec(&mut app, "cripple left_leg").ok);
+    let shown = exec(&mut app, "showlimbs");
+    assert_eq!(shown.value["locomotion_bps"], 6_000);
+    assert_eq!(shown.value["parts"]["left_leg"]["crippled"], true);
+    assert_eq!(shown.value["selected"], "left_leg");
 }
 
 #[test]

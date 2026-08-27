@@ -3,7 +3,7 @@ use std::f32::consts::PI;
 use bevy::gltf::{Gltf, GltfAssetLabel};
 use bevy::prelude::*;
 
-use bevyout_core::weapon::WeaponAction;
+use bevyout_core::weapon::{DEFAULT_RELOAD_SECONDS, WeaponAction};
 
 use super::PlayerWeaponRuntime;
 use crate::app_state::GameplayModal;
@@ -126,6 +126,7 @@ pub(super) fn sync_viewmodel(
 pub(super) fn animate_viewmodel(
     time: Res<Time<Real>>,
     mut runtime: ResMut<PlayerWeaponRuntime>,
+    progression: Option<Res<crate::viewer::stats::PlayerProgression>>,
     mut roots: Query<&mut Transform, With<WeaponViewmodelRoot>>,
     mut lights: Query<&mut Visibility, With<WeaponMuzzleLight>>,
 ) {
@@ -151,6 +152,11 @@ pub(super) fn animate_viewmodel(
     }
     runtime.muzzle_flash_remaining = (runtime.muzzle_flash_remaining - time.delta_secs()).max(0.0);
     if let Some(state) = runtime.state.as_mut() {
+        let reload_bps = progression
+            .as_ref()
+            .map(|progression| progression.limbs.arm_reload_multiplier_bps())
+            .unwrap_or(10_000);
+        state.set_reload_seconds(DEFAULT_RELOAD_SECONDS * reload_bps as f32 / 10_000.0);
         state.advance(time.delta_secs());
     }
 }

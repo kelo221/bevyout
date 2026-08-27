@@ -28,5 +28,6 @@ pub mod perception;
 pub mod perks;
 pub mod radiation;
 pub mod stats;
+pub mod time;
 pub mod time_of_day;
 pub mod weapon;

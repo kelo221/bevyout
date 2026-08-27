@@ -491,13 +491,21 @@ pub(super) fn use_item(
     let ingestible = world
         .get_resource::<super::super::effects::EffectCatalog>()
         .and_then(|catalog| catalog.get(used.base_form_id).cloned());
+    let restore_limbs = ingestible
+        .as_ref()
+        .is_some_and(bevyout_core::effects::IngestibleDefinition::restores_limbs);
     let application = ingestible
-        .map(|definition| super::effect_commands::apply_ingestible_to_player(world, &definition));
+        .as_ref()
+        .map(|definition| super::effect_commands::apply_ingestible_to_player(world, definition));
     let mut value = json!({ "item_id": item_id.0, "base_form_id": used.base_form_id, "count": 1 });
     let mut log = vec![format!("used item {:016x}", item_id.0)];
     if let Some(application) = application {
         value["ingestible"] = effect_commands::application_json(&application);
         log.push(effect_commands::application_summary(&application));
+    }
+    if restore_limbs {
+        limb_commands::restore_selected_player_limb(world);
+        value["limb_restore"] = true.into();
     }
     Ok(ConsoleCommandResult::new(value, log))
 }

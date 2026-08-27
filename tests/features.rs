@@ -1316,6 +1316,15 @@ struct BevyoutWorld {
     rpg_addictions: chems::Addictions,
     rpg_rng: chems::RpgRngState,
     rpg_addiction_roll: Option<(bool, u32)>,
+
+    // -- rpg_limbs.feature (M9 W4 body parts, cripple, medical) --
+    rpg_limbs: bevyout_core::combat::LimbState,
+    rpg_mapped_part: Option<bevyout_core::combat::BodyPartId>,
+    rpg_last_limb_impact: Option<bevyout_core::combat::LimbImpactOutcome>,
+    rpg_last_restoration: Option<bevyout_core::combat::RestorationOutcome>,
+    rpg_last_impact_outcome: Option<weapon::ImpactOutcome>,
+    rpg_actor_definition: actor_state::ActorDefinition,
+    rpg_actor_state: actor_state::ActorInstanceState,
 }
 
 fn synthetic_dialogue_source() -> dialogue::DialogueSource {
@@ -18722,4 +18731,257 @@ async fn when_rpg_begin_withdrawal(world: &mut BevyoutWorld, form_id: String) {
 #[when(regex = r"^the withdrawal ([0-9a-f]{8}) is cured$")]
 async fn when_rpg_cure(world: &mut BevyoutWorld, form_id: String) {
     assert!(world.rpg_addictions.cure(withdrawal_form_id(&form_id)));
+}
+
+// ---------------------------------------------------------------------
+// rpg_limbs.feature -- M9 W4 semantic body parts, cripple, medical aid.
+// ---------------------------------------------------------------------
+
+fn rpg_body_part(label: &str) -> bevyout_core::combat::BodyPartId {
+    bevyout_core::combat::BodyPartId::parse(label)
+        .unwrap_or_else(|| panic!("unknown body part {label:?}"))
+}
+
+#[given(regex = r"^a healthy limb state$")]
+async fn given_rpg_healthy_limbs(world: &mut BevyoutWorld) {
+    world.rpg_limbs = bevyout_core::combat::LimbState::healthy();
+    world.rpg_last_limb_impact = None;
+    world.rpg_last_restoration = None;
+    world.rpg_mapped_part = None;
+}
+
+#[then(regex = r"^the limb state has (\d+) parts$")]
+async fn then_rpg_limb_part_count(world: &mut BevyoutWorld, count: String) {
+    assert_eq!(world.rpg_limbs.parts.len(), count.parse::<usize>().unwrap());
+}
+
+#[then(
+    regex = r"^the (head|torso|left arm|right arm|left leg|right leg) limb is (\d+) milli and (not )?crippled$"
+)]
+async fn then_rpg_limb_condition(
+    world: &mut BevyoutWorld,
+    part: String,
+    milli: String,
+    not_crippled: String,
+) {
+    let condition = world.rpg_limbs.part(rpg_body_part(&part));
+    assert_eq!(condition.current_milli, milli.parse::<u32>().unwrap());
+    assert_eq!(condition.crippled, not_crippled.is_empty());
+}
+
+#[then(regex = r"^the locomotion speed is (\d+) basis points$")]
+async fn then_rpg_locomotion(world: &mut BevyoutWorld, bps: String) {
+    assert_eq!(
+        world.rpg_limbs.locomotion_speed_bps(),
+        bps.parse::<u32>().unwrap()
+    );
+}
+
+#[then(regex = r"^the arm reload multiplier is (\d+) basis points$")]
+async fn then_rpg_arm_reload(world: &mut BevyoutWorld, bps: String) {
+    assert_eq!(
+        world.rpg_limbs.arm_reload_multiplier_bps(),
+        bps.parse::<u32>().unwrap()
+    );
+}
+
+#[then(regex = r"^the arm spread penalty is (\d+) basis points$")]
+async fn then_rpg_arm_spread(world: &mut BevyoutWorld, bps: String) {
+    assert_eq!(
+        world.rpg_limbs.arm_spread_penalty_bps(),
+        bps.parse::<u32>().unwrap()
+    );
+}
+
+#[when(regex = r"^an unmarked node is mapped to a body part$")]
+async fn when_rpg_unmarked_node(world: &mut BevyoutWorld) {
+    world.rpg_mapped_part = Some(bevyout_core::combat::BodyPartId::from_node_name(""));
+}
+
+#[when(regex = r#"^the unknown node "([^"]+)" is mapped to a body part$"#)]
+async fn when_rpg_named_node(world: &mut BevyoutWorld, name: String) {
+    world.rpg_mapped_part = Some(bevyout_core::combat::BodyPartId::from_node_name(&name));
+}
+
+#[then(regex = r"^the mapped body part is (head|torso|left arm|right arm|left leg|right leg)$")]
+async fn then_rpg_mapped_part(world: &mut BevyoutWorld, part: String) {
+    assert_eq!(world.rpg_mapped_part, Some(rpg_body_part(&part)));
+}
+
+#[when(
+    regex = r"^limb impact shot (\d+) hits the (head|torso|left arm|right arm|left leg|right leg) for (\d+) milli$"
+)]
+async fn when_rpg_limb_impact(world: &mut BevyoutWorld, shot: String, part: String, milli: String) {
+    world.rpg_last_limb_impact = Some(bevyout_core::combat::apply_limb_impact(
+        &mut world.rpg_limbs,
+        bevyout_core::combat::LimbImpact {
+            shot_id: bevyout_core::combat::ShotId(shot.parse::<u64>().unwrap()),
+            target: perception::TargetId::player(),
+            part: rpg_body_part(&part),
+            final_damage_milli: milli.parse::<u32>().unwrap(),
+        },
+    ));
+}
+
+#[then(regex = r"^the last limb impact newly crippled$")]
+async fn then_rpg_newly_crippled(world: &mut BevyoutWorld) {
+    assert!(
+        world
+            .rpg_last_limb_impact
+            .expect("limb impact")
+            .newly_crippled
+    );
+}
+
+#[then(regex = r"^the last limb impact did not newly cripple$")]
+async fn then_rpg_not_newly_crippled(world: &mut BevyoutWorld) {
+    assert!(
+        !world
+            .rpg_last_limb_impact
+            .expect("limb impact")
+            .newly_crippled
+    );
+}
+
+#[then(regex = r"^the last limb impact requested head blur$")]
+async fn then_rpg_head_blur(world: &mut BevyoutWorld) {
+    assert!(world.rpg_last_limb_impact.expect("limb impact").head_blur);
+}
+
+#[when(regex = r"^effective SPECIAL is projected with limbs$")]
+async fn when_rpg_project_special_with_limbs(world: &mut BevyoutWorld) {
+    world.rpg_projected_special = effects::projected_special_with_limbs(
+        &world.rpg_sheet,
+        &world.rpg_effect_ledger,
+        world.rpg_radiation_pool.rads,
+        Some(&world.rpg_limbs),
+    );
+}
+
+#[given(regex = r"^a healthy actor with (\d+) health$")]
+async fn given_rpg_healthy_actor(world: &mut BevyoutWorld, health: String) {
+    let health = health.parse::<f32>().unwrap();
+    world.rpg_actor_definition = actor_state::ActorDefinition {
+        base_form_id: 1,
+        reference_form_id: 2,
+        ..Default::default()
+    };
+    world
+        .rpg_actor_definition
+        .base_values
+        .insert(actor_state::ActorValue::Health, health);
+    world.rpg_actor_state =
+        actor_state::ActorInstanceState::new(2, actor_state::ActorLifeState::Alive);
+    world.rpg_limbs = bevyout_core::combat::LimbState::healthy();
+    world.rpg_last_impact_outcome = None;
+}
+
+#[when(
+    regex = r"^weapon impact shot (\d+) hits the (head|torso|left arm|right arm|left leg|right leg) at ([0-9.]+) meters$"
+)]
+async fn when_rpg_weapon_impact(
+    world: &mut BevyoutWorld,
+    shot: String,
+    part: String,
+    distance: String,
+) {
+    let evidence = weapon::ImpactEvidence {
+        distance_meters: distance.parse::<f32>().unwrap(),
+        body_part: Some(rpg_body_part(&part)),
+        shot_id: Some(bevyout_core::combat::ShotId(shot.parse::<u64>().unwrap())),
+        target: Some(perception::TargetId {
+            class: perception::TargetClass::Actor,
+            form_id: world.rpg_actor_state.reference_form_id,
+        }),
+    };
+    let outcome = weapon::resolve_actor_impact(
+        weapon::WeaponDefinition::new(10.0, 100.0),
+        evidence,
+        &world.rpg_actor_definition,
+        &mut world.rpg_actor_state,
+    )
+    .expect("impact resolves");
+    world.rpg_limbs = world.rpg_actor_state.limbs.clone();
+    world.rpg_last_impact_outcome = Some(outcome);
+}
+
+#[then(regex = r"^the actor remaining health is ([0-9.]+)$")]
+async fn then_rpg_actor_health(world: &mut BevyoutWorld, remaining: String) {
+    let actual = world
+        .rpg_actor_definition
+        .resolve_value(&world.rpg_actor_state, actor_state::ActorValue::Health)
+        .effective;
+    assert_eq!(actual, remaining.parse::<f32>().unwrap());
+}
+
+#[then(regex = r"^the impact was duplicate$")]
+async fn then_rpg_duplicate_impact(world: &mut BevyoutWorld) {
+    assert!(matches!(
+        world.rpg_last_impact_outcome,
+        Some(weapon::ImpactOutcome::Duplicate)
+    ));
+}
+
+#[when(
+    regex = r"^a targeted stimpak restores the (head|torso|left arm|right arm|left leg|right leg) at game time (\d+)$"
+)]
+async fn when_rpg_stimpak(world: &mut BevyoutWorld, part: String, time: String) {
+    world.rpg_last_restoration = Some(bevyout_core::combat::restore_limbs(
+        &mut world.rpg_limbs,
+        bevyout_core::combat::MedicalSource::TargetedStimpak,
+        Some(rpg_body_part(&part)),
+        bevyout_core::time::GameTime::from_ms(time.parse::<u64>().unwrap()),
+    ));
+}
+
+#[when(regex = r"^a doctor restores all limbs at game time (\d+)$")]
+async fn when_rpg_doctor(world: &mut BevyoutWorld, time: String) {
+    world.rpg_last_restoration = Some(bevyout_core::combat::restore_limbs(
+        &mut world.rpg_limbs,
+        bevyout_core::combat::MedicalSource::Doctor,
+        None,
+        bevyout_core::time::GameTime::from_ms(time.parse::<u64>().unwrap()),
+    ));
+}
+
+#[when(regex = r"^an owned bed restores all limbs at game time (\d+)$")]
+async fn when_rpg_owned_bed(world: &mut BevyoutWorld, time: String) {
+    world.rpg_last_restoration = Some(bevyout_core::combat::restore_limbs(
+        &mut world.rpg_limbs,
+        bevyout_core::combat::MedicalSource::OwnedBed,
+        None,
+        bevyout_core::time::GameTime::from_ms(time.parse::<u64>().unwrap()),
+    ));
+}
+
+#[then(regex = r"^the last restoration consumed a targeted stimpak$")]
+async fn then_rpg_stimpak_source(world: &mut BevyoutWorld) {
+    assert_eq!(
+        world.rpg_last_restoration.expect("restoration").source,
+        bevyout_core::combat::MedicalSource::TargetedStimpak
+    );
+}
+
+#[then(regex = r"^the last restoration used a doctor$")]
+async fn then_rpg_doctor_source(world: &mut BevyoutWorld) {
+    assert_eq!(
+        world.rpg_last_restoration.expect("restoration").source,
+        bevyout_core::combat::MedicalSource::Doctor
+    );
+}
+
+#[then(regex = r"^the last restoration used an owned bed at game time (\d+)$")]
+async fn then_rpg_bed_source(world: &mut BevyoutWorld, time: String) {
+    let outcome = world.rpg_last_restoration.expect("restoration");
+    assert_eq!(
+        outcome.source,
+        bevyout_core::combat::MedicalSource::OwnedBed
+    );
+    assert_eq!(outcome.at.as_ms(), time.parse::<u64>().unwrap());
+}
+
+#[when(regex = r"^the limb state is serialized and restored$")]
+async fn when_rpg_limbs_round_trip(world: &mut BevyoutWorld) {
+    let encoded = serde_json::to_string(&world.rpg_limbs).expect("encode limbs");
+    world.rpg_limbs = serde_json::from_str(&encoded).expect("decode limbs");
 }

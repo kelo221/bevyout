@@ -234,10 +234,10 @@ fn build_export(
         let Some(asset_path) = placement.asset_path.as_deref() else {
             continue;
         };
-        if let Some(available) = options.available_models {
-            if !available.contains(asset_path) {
-                continue;
-            }
+        if let Some(available) = options.available_models
+            && !available.contains(asset_path)
+        {
+            continue;
         }
         let Some(semantic) = semantic_name(&placement.semantic) else {
             continue;
@@ -564,25 +564,25 @@ fn inspect_glb_materials(
         };
         let mut unlit = false;
         let mut emissive_strength = 1.0;
-        if let Some(json_material) = json_materials.and_then(|materials| materials.get(index)) {
-            if let Some(extensions) = json_material.get("extensions").and_then(Value::as_object) {
-                unlit = extensions.contains_key("KHR_materials_unlit");
-                if let Some(strength) = extensions
-                    .get("KHR_materials_emissive_strength")
-                    .and_then(|value| value.get("emissiveStrength"))
-                    .and_then(Value::as_f64)
-                {
-                    emissive_strength = strength as f32;
-                }
-                for name in ["KHR_materials_volume", "KHR_materials_specular"] {
-                    if extensions.contains_key(name) {
-                        unsupported.push(format!(
-                            "{name} {} material {index}",
-                            path.file_name()
-                                .and_then(|name| name.to_str())
-                                .unwrap_or("model")
-                        ));
-                    }
+        if let Some(json_material) = json_materials.and_then(|materials| materials.get(index))
+            && let Some(extensions) = json_material.get("extensions").and_then(Value::as_object)
+        {
+            unlit = extensions.contains_key("KHR_materials_unlit");
+            if let Some(strength) = extensions
+                .get("KHR_materials_emissive_strength")
+                .and_then(|value| value.get("emissiveStrength"))
+                .and_then(Value::as_f64)
+            {
+                emissive_strength = strength as f32;
+            }
+            for name in ["KHR_materials_volume", "KHR_materials_specular"] {
+                if extensions.contains_key(name) {
+                    unsupported.push(format!(
+                        "{name} {} material {index}",
+                        path.file_name()
+                            .and_then(|name| name.to_str())
+                            .unwrap_or("model")
+                    ));
                 }
             }
         }

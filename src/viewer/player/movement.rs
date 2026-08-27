@@ -49,10 +49,16 @@ pub(crate) fn apply_player_controls(
         &mut KccState,
         &mut LocomotionState,
     )>,
+    progression: Option<Res<crate::viewer::stats::PlayerProgression>>,
 ) {
     let Ok((player, mut transform, mut kcc, mut locomotion)) = players.single_mut() else {
         return;
     };
+    let player_speed = PLAYER_SPEED
+        * progression
+            .as_ref()
+            .map(|progression| progression.limbs.locomotion_speed_bps() as f32 / 10_000.0)
+            .unwrap_or(1.0);
     if !cell_physics.static_collision_ready() {
         kcc.velocity = Vec3::ZERO;
         kcc.grounded = false;
@@ -90,7 +96,7 @@ pub(crate) fn apply_player_controls(
             world_input -= Vec3::Y;
         }
         if world_input != Vec3::ZERO {
-            transform.translation += world_input.normalize() * PLAYER_SPEED * time.delta_secs();
+            transform.translation += world_input.normalize() * player_speed * time.delta_secs();
         }
         kcc.velocity = Vec3::ZERO;
         kcc.grounded = false;
@@ -146,7 +152,7 @@ pub(crate) fn apply_player_controls(
         input -= Vec3::X;
     }
     let world_input = yaw * input;
-    let ground_target = air_control_motion(world_input, false) * PLAYER_SPEED;
+    let ground_target = air_control_motion(world_input, false) * player_speed;
     let mut jumped_this_tick = false;
     if submerged {
         // Swimming is still driven by the same BoxDDD capsule. Only the
@@ -156,16 +162,16 @@ pub(crate) fn apply_player_controls(
         kcc.velocity.x = ground_target.x * 0.65;
         kcc.velocity.z = ground_target.z * 0.65;
         let vertical_input = if jump_pressed {
-            PLAYER_SPEED * 0.45
+            player_speed * 0.45
         } else if keys.pressed(KeyCode::ControlLeft) || keys.pressed(KeyCode::ControlRight) {
-            -PLAYER_SPEED * 0.45
+            -player_speed * 0.45
         } else {
             water
                 .contact
                 .map(|contact| (contact.surface_height - transform.translation.y) * 0.75)
                 .unwrap_or(0.0)
         };
-        kcc.velocity.y = vertical_input.clamp(-PLAYER_SPEED * 0.45, PLAYER_SPEED * 0.45);
+        kcc.velocity.y = vertical_input.clamp(-player_speed * 0.45, player_speed * 0.45);
         grounded = false;
     } else if jump_started && grounded {
         let (height, direction) = jump_profile(world_input);

@@ -29,8 +29,8 @@ use bevy_boxddd::prelude::BoxdddPhysicsContext;
 
 use crate::save::{
     DroppedItemState, EquippedItem, EquippedKind, HotkeyBinding, ItemStack,
-    PersistentReferenceDelta, PlayerState, SaveGame, SaveGameHeader, SavePlugin, SaveStore,
-    SavedBodyState, SavedTransform,
+    PersistentReferenceDelta, PlayerState, RpgSaveState, SaveGame, SaveGameHeader, SavePlugin,
+    SaveStore, SavedBodyState, SavedTransform,
 };
 #[cfg(test)]
 use crate::vsa::PreparedInventoryEntry;
@@ -895,6 +895,7 @@ pub(crate) fn write_save_slot(world: &mut World, slot: &str) -> anyhow::Result<P
     };
     capture_cell_state(world, active);
     capture_exterior_resident_state(world);
+    crate::viewer::stats::persist_player_effects(world);
 
     let legacy_inventory = world
         .get_resource::<interaction::PlayerInventory>()
@@ -1005,6 +1006,7 @@ pub(crate) fn write_save_slot(world: &mut World, slot: &str) -> anyhow::Result<P
         location: world
             .get_resource::<super::CurrentWorldLocation>()
             .and_then(|location| location.0.clone()),
+        rpg: capture_rpg(world),
     };
     let save_dir = world
         .get_resource::<SaveDirectory>()
@@ -1016,6 +1018,30 @@ pub(crate) fn write_save_slot(world: &mut World, slot: &str) -> anyhow::Result<P
     let path = store.primary_path(slot);
     info!("save write {slot} path={}", path.display());
     Ok(path)
+}
+
+fn capture_rpg(world: &World) -> RpgSaveState {
+    let progression = world
+        .get_resource::<crate::viewer::stats::PlayerProgression>()
+        .cloned()
+        .unwrap_or_default();
+    let rng = world
+        .get_resource::<crate::viewer::effects::RngResource>()
+        .map(|rng| rng.0)
+        .unwrap_or_default();
+    RpgSaveState {
+        stats: progression.stats,
+        perks: progression.perks,
+        unspent_skill_points: progression.unspent_skill_points,
+        total_skill_points: progression.total_skill_points,
+        radiation: progression.radiation,
+        effects: progression.effects,
+        chem_doses_ms: progression.chem_doses_ms,
+        addictions: progression.addictions,
+        current_health: progression.current_health,
+        limbs: progression.limbs,
+        rng,
+    }
 }
 
 /// Issue #98 (F98.4): flattens `PlayerEquipment` into the sorted save shape

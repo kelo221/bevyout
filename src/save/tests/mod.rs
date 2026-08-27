@@ -72,6 +72,7 @@ fn sample_save() -> SaveGame {
                         procedure_index: 3,
                         elapsed_seconds: 4.5,
                     }),
+                    limbs: bevyout_core::combat::LimbState::healthy(),
                 },
             )]),
         },
@@ -142,6 +143,7 @@ fn sample_save() -> SaveGame {
         canonical: None,
         dialogue: Default::default(),
         location: None,
+        rpg: RpgSaveState::default(),
     }
 }
 
@@ -166,6 +168,47 @@ fn v8_round_trip_preserves_exact_world_location() {
     ));
     let bytes = encode_save(&save).unwrap();
     assert_eq!(decode_save(&bytes).unwrap(), save);
+}
+
+#[test]
+fn v9_round_trip_preserves_player_limbs_and_rpg() {
+    let mut save = sample_save();
+    save.rpg
+        .limbs
+        .part_mut(bevyout_core::combat::BodyPartId::Head)
+        .current_milli = 0;
+    save.rpg
+        .limbs
+        .part_mut(bevyout_core::combat::BodyPartId::Head)
+        .crippled = true;
+    save.rpg.current_health = Some(70.0);
+    let bytes = encode_save(&save).unwrap();
+    let decoded = decode_save(&bytes).unwrap();
+    assert_eq!(decoded, save);
+    assert!(
+        decoded
+            .rpg
+            .limbs
+            .part(bevyout_core::combat::BodyPartId::Head)
+            .crippled
+    );
+}
+
+#[test]
+fn v8_decode_defaults_missing_rpg_and_actor_limbs() {
+    let mut save = sample_save();
+    save.header.format_version = 8;
+    save.rpg = RpgSaveState::default();
+    let bytes = encode_save(&save).unwrap();
+    let decoded = decode_save(&bytes).unwrap();
+    assert_eq!(decoded.rpg, RpgSaveState::default());
+    let actor = decoded
+        .world
+        .cells
+        .get(&0x0001_51e3)
+        .and_then(|cell| cell.actors.get(&0x0004_1600))
+        .expect("sample actor");
+    assert_eq!(actor.limbs, bevyout_core::combat::LimbState::healthy());
 }
 
 #[test]
@@ -266,9 +309,9 @@ fn version_three_save_round_trips_equipment_and_hotkeys() {
 }
 
 #[test]
-fn version_eight_actor_item_dialogue_location_and_combat_rng_round_trip_deterministically() {
+fn current_format_actor_item_dialogue_location_and_combat_rng_round_trip_deterministically() {
     let save = sample_save();
-    assert_eq!(save.header.format_version, 8);
+    assert_eq!(save.header.format_version, CURRENT_SAVE_FORMAT_VERSION);
     let first = encode_save(&save).unwrap();
     let second = encode_save(&save).unwrap();
     assert_eq!(first, second);

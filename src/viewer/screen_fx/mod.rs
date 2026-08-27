@@ -118,6 +118,46 @@ impl ScreenFxRequested {
         start.intensity = 1.0;
         Self(policy::ScreenFxRequest::Start(start))
     }
+
+    pub(crate) fn head_cripple() -> Self {
+        let modifier_form_id = 0xffff_ff02;
+        let definition = policy::ScreenFxDefinition {
+            modifier_form_id,
+            duration_ms: 900,
+            static_values: policy::ScreenFxValues {
+                blur: 0.55,
+                double_vision: 0.22,
+                motion_blur: 0.28,
+                radial_blur: 0.18,
+                ..policy::ScreenFxValues::neutral()
+            },
+            curves: vec![policy::ScreenFxCurve {
+                property: policy::ScreenFxProperty::Blur,
+                operation: policy::ScreenFxCurveOperation::Additive,
+                keyframes: vec![
+                    policy::ScreenFxKeyframe {
+                        time_ms: 0,
+                        value: 1.0,
+                    },
+                    policy::ScreenFxKeyframe {
+                        time_ms: 900,
+                        value: 0.35,
+                    },
+                ],
+            }],
+            color_keyframes: Vec::new(),
+            fade_color_keyframes: Vec::new(),
+        };
+        let mut start = policy::ScreenFxStart::new(
+            policy::ScreenFxSource::Gameplay,
+            modifier_form_id,
+            90,
+            u64::MAX,
+            definition,
+        );
+        start.intensity = 1.0;
+        Self(policy::ScreenFxRequest::Start(start))
+    }
 }
 
 #[derive(Resource, Debug)]

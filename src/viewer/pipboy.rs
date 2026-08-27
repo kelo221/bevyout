@@ -29,7 +29,9 @@ use super::interaction::{
 use super::inventory::{DropAction, StackKey, drop_action};
 use super::pipboy_reader::OpenReaderRequested;
 use super::player::FpsPlayer;
-use super::stats::{ActorStats, PlayerProgression, StatsSettings};
+use super::stats::{
+    ActorStats, PlayerLimbTarget, PlayerProgression, StatsSettings, restore_targeted_stimpak,
+};
 use super::{
     CellInfo, PreparedItemCatalog, PreparedItemCategory, PreparedItemDefinition, PreparedItemStats,
     cell_label,
@@ -244,6 +246,7 @@ struct ScreenSources<'w> {
     figure_layout: Res<'w, StatusFigureLayout>,
     figure_editor: Res<'w, StatusFigureEditor>,
     presentation: Res<'w, presentation::PipBoyPresentation>,
+    progression: Option<Res<'w, PlayerProgression>>,
 }
 
 pub(crate) struct PipBoyPlugin;
@@ -265,6 +268,7 @@ fn install(app: &mut App) {
         .init_resource::<EffectCatalog>()
         .init_resource::<StatsSettings>()
         .init_resource::<PlayerProgression>()
+        .init_resource::<PlayerLimbTarget>()
         .init_resource::<RngResource>()
         // `handle_item_action_button`'s dependencies, normally registered by
         // `interaction`/`audio`/`pipboy_reader`'s installs -- `init_resource`
@@ -629,7 +633,8 @@ struct AidUseContext<'w, 's> {
     effect_catalog: Res<'w, EffectCatalog>,
     settings: Res<'w, StatsSettings>,
     rng: ResMut<'w, RngResource>,
-    progression: Res<'w, PlayerProgression>,
+    progression: ResMut<'w, PlayerProgression>,
+    limb_target: Res<'w, PlayerLimbTarget>,
     player: AidPlayerQuery<'w, 's>,
 }
 
@@ -680,6 +685,9 @@ fn use_item(
             },
             &mut context.rng.0,
         );
+        if definition.restores_limbs() {
+            restore_targeted_stimpak(&mut context.progression, context.limb_target.0);
+        }
     }
     if let Some(form_id) = item.audio.pickup_sound_form_id {
         sounds.write(PlaySound {

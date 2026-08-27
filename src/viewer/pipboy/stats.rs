@@ -518,14 +518,29 @@ pub(super) fn spawn_stats_body(
                             &sources.figure_layout,
                             &sources.figure_editor,
                         );
-                        for (left, top, width, value) in [
-                            (169.0, 0.0, 82.0, 0.82),
-                            (8.0, 128.0, 94.0, 0.72),
-                            (318.0, 128.0, 94.0, 0.88),
-                            (169.0, 162.0, 82.0, 0.94),
-                            (58.0, 292.0, 94.0, 0.78),
-                            (268.0, 292.0, 94.0, 0.86),
+                        let limbs = sources
+                            .progression
+                            .as_ref()
+                            .map(|progression| &progression.limbs);
+                        for (left, top, width, part) in [
+                            (169.0, 0.0, 82.0, bevyout_core::combat::BodyPartId::Head),
+                            (8.0, 128.0, 94.0, bevyout_core::combat::BodyPartId::LeftArm),
+                            (
+                                318.0,
+                                128.0,
+                                94.0,
+                                bevyout_core::combat::BodyPartId::RightArm,
+                            ),
+                            (169.0, 162.0, 82.0, bevyout_core::combat::BodyPartId::Torso),
+                            (58.0, 292.0, 94.0, bevyout_core::combat::BodyPartId::LeftLeg),
+                            (
+                                268.0,
+                                292.0,
+                                94.0,
+                                bevyout_core::combat::BodyPartId::RightLeg,
+                            ),
                         ] {
+                            let value = limbs.map_or(1.0, |state| state.part(part).fraction());
                             condition_meter(body, left, top, width, value);
                         }
                     });

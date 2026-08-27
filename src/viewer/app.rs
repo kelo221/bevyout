@@ -329,6 +329,19 @@ pub(crate) fn run_view(manifest_path: PathBuf, options: RunViewOptions) -> Resul
         app.insert_resource(world::CurrentWorldLocation(save.location.clone()));
         app.insert_resource(world::PlaythroughSeed(save.rng_state));
         app.insert_resource(weapon::CombatRngRuntime(save.combat_rng));
+        app.insert_resource(stats::PlayerProgression {
+            stats: save.rpg.stats.clone(),
+            perks: save.rpg.perks.clone(),
+            unspent_skill_points: save.rpg.unspent_skill_points,
+            total_skill_points: save.rpg.total_skill_points,
+            radiation: save.rpg.radiation,
+            effects: save.rpg.effects.clone(),
+            chem_doses_ms: save.rpg.chem_doses_ms.clone(),
+            addictions: save.rpg.addictions.clone(),
+            current_health: save.rpg.current_health,
+            limbs: save.rpg.limbs.clone(),
+        });
+        app.insert_resource(effects::RngResource(save.rpg.rng));
         app.world_mut()
             .resource_mut::<dialogue::DialogueRuntime>()
             .restore_snapshot(save.dialogue);

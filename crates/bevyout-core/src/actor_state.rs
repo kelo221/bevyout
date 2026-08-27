@@ -10,6 +10,7 @@ use std::fmt;
 use serde::{Deserialize, Serialize};
 
 use crate::actor::ActorKind;
+use crate::combat::limbs::LimbState;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum SpecialAttribute {
@@ -283,6 +284,8 @@ pub struct ActorInstanceState {
     pub life_state: ActorLifeState,
     pub value_mutations: BTreeMap<ActorValue, f32>,
     pub package: Option<ActorPackageCheckpoint>,
+    /// NPC limb health. Player limbs live on RPGS, not here.
+    pub limbs: LimbState,
 }
 
 impl Default for ActorInstanceState {
@@ -292,6 +295,7 @@ impl Default for ActorInstanceState {
             life_state: ActorLifeState::Alive,
             value_mutations: BTreeMap::new(),
             package: None,
+            limbs: LimbState::healthy(),
         }
     }
 }
