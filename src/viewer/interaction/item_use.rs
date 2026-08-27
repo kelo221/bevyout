@@ -50,10 +50,6 @@ pub(crate) fn classify(stats: ItemStats, quest_item: bool) -> ItemUseAction {
     }
 }
 
-/// F99.2: using a consumable removes exactly one from its stack, never the
-/// whole stack, regardless of how many are held.
-pub(crate) const USE_CONSUMES_COUNT: i32 = 1;
-
 #[cfg(test)]
 #[path = "tests/item_use.rs"]
 mod tests;

@@ -10,6 +10,10 @@ use bevyout_core::actor::{
     select_starting_weapon,
 };
 use bevyout_core::actor_state::{ActorSkill, ActorValue};
+use bevyout_core::effects::{
+    EffectDefinition, IngestibleCondition, IngestibleDefinition, IngestibleEffect,
+    actor_value_from_effect_index, archetype_modifies_value,
+};
 use bevyout_core::facegen::{FaceGenAssetKind, FaceGenDiagnostic, FaceGenRaw};
 use bevyout_core::image_space::IMAGE_SPACE_MODIFIER_CATALOG_REVISION;
 use bevyout_core::manifest::CellInfo;
@@ -1733,6 +1737,27 @@ fn prepare_cell(
         message: perk_catalog_summary.clone(),
     });
     output.push(perk_catalog_summary);
+    // M9 wave 3 (#316): content-set-wide effect catalog (ingestibles +
+    // MGEF base effects), same fingerprint-keyed deterministic-path
+    // contract as perks.ron above.
+    let effect_catalog_inputs = build_effect_catalog_inputs(&parsed);
+    let effect_catalog = build_effect_catalog(&effect_catalog_inputs, &source_fingerprint);
+    let (effect_catalog_path_relative, _effect_catalog_hash) =
+        write_effect_catalog(&cache_dir, &effect_catalog)?;
+    let effect_catalog_summary = format!(
+        "effect catalog: {} ingestibles, {} effects, {} addictive, {} unresolved effect items, {} conditioned effect items -> {}",
+        effect_catalog.counters.ingestibles,
+        effect_catalog.counters.effects,
+        effect_catalog.counters.addictive,
+        effect_catalog.counters.unresolved_effects,
+        effect_catalog.counters.conditioned_effects,
+        effect_catalog_path_relative
+    );
+    diagnostics.push(Diagnostic {
+        severity: "info".into(),
+        message: effect_catalog_summary.clone(),
+    });
+    output.push(effect_catalog_summary);
     // Per-cell artifact next to `scene.ron` -- the actor catalog embeds this
     // cell's ACHR/ACRE placements, so unlike the content-set-wide item/
     // recipe catalogs it must not share one fingerprint-keyed file across
@@ -3222,6 +3247,84 @@ fn perk_condition_resolvable(condition: &PerkConditionWire) -> bool {
 /// integral; anything else stays unknown rather than rounded).
 fn perk_condition_threshold(value: f32) -> Option<u8> {
     (value.fract() == 0.0 && (0.0..=100.0).contains(&value)).then_some(value as u8)
+}
+
+/// Boundary conversion for the content-set-wide effect catalog (M9 wave 3
+/// #316): wire-level `ALCH`/`MGEF` records become core definitions. Each
+/// ingestible effect item resolves its MGEF by FormID; the item applies a
+/// value only when the MGEF exists, its archetype is a value modifier, and
+/// its actor-value index maps onto the domain enum (the engine-builtin
+/// UMON monitor `0x0000014F`, script effects, and limb values stay
+/// cataloged but unapplied).
+fn build_effect_catalog_inputs(parsed: &ParsedPlugin) -> EffectCatalogInputs {
+    let effects = parsed
+        .mgefs
+        .values()
+        .map(|record| EffectDefinition {
+            form_id: record.form_id,
+            editor_id: record.editor_id.clone().unwrap_or_default(),
+            name: record.name.clone(),
+            flags: record.flags,
+            base_cost: record.base_cost,
+            archetype: record.archetype,
+            actor_value_index: record.actor_value_index,
+            actor_value: actor_value_from_effect_index(record.actor_value_index),
+        })
+        .collect::<Vec<_>>();
+    let ingestibles = parsed
+        .alchs
+        .values()
+        .map(|record| {
+            let enit = record.enit;
+            IngestibleDefinition {
+                form_id: record.form_id,
+                editor_id: record.editor_id.clone().unwrap_or_default(),
+                name: record.name.clone(),
+                value_caps: enit.map(|enit| enit.value_caps).unwrap_or(0),
+                flags: enit.map(|enit| enit.flags).unwrap_or(0),
+                weight: record.weight.unwrap_or(0.0),
+                // ENIT's withdrawal SPEL is the addiction identity; a
+                // non-resolving (DLC-indexed or junk) FormID still gates
+                // addiction off because its chance is zero on real data.
+                withdrawal_form_id: enit.map(|enit| enit.withdrawal_spell_form_id).unwrap_or(0),
+                addiction_chance_percent: enit
+                    .map(|enit| enit.addiction_chance * 100.0)
+                    .unwrap_or(0.0),
+                effects: record
+                    .effects
+                    .iter()
+                    .map(|effect| {
+                        let definition = parsed.mgefs.get(&effect.mgef_form_id);
+                        IngestibleEffect {
+                            mgef_form_id: effect.mgef_form_id,
+                            editor_id: definition
+                                .and_then(|definition| definition.editor_id.clone())
+                                .unwrap_or_default(),
+                            magnitude: effect.magnitude as f32,
+                            duration_s: effect.duration_seconds,
+                            actor_value: definition
+                                .filter(|definition| archetype_modifies_value(definition.archetype))
+                                .and_then(|definition| {
+                                    actor_value_from_effect_index(definition.actor_value_index)
+                                }),
+                            condition: effect.condition.as_ref().map(|condition| {
+                                IngestibleCondition {
+                                    oper: condition.oper,
+                                    comparison_value: condition.comparison_value,
+                                    function: condition.function,
+                                    param1: condition.param1,
+                                }
+                            }),
+                        }
+                    })
+                    .collect(),
+            }
+        })
+        .collect();
+    EffectCatalogInputs {
+        ingestibles,
+        effects,
+    }
 }
 
 /// decoded `PACK` record (content-set-wide, like `parsed.recipes`/

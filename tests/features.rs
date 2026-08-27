@@ -62,6 +62,20 @@ mod stats {
 mod perks {
     pub use bevyout_core::perks::*;
 }
+// M9 wave 3/#317 pure active-effect, radiation, and addiction kernels live
+// in the same engine-independent core boundary.
+#[allow(dead_code, unused_imports)]
+mod effects {
+    pub use bevyout_core::effects::*;
+}
+#[allow(dead_code, unused_imports)]
+mod radiation {
+    pub use bevyout_core::radiation::*;
+}
+#[allow(dead_code, unused_imports)]
+mod chems {
+    pub use bevyout_core::chems::*;
+}
 // M6 wave 3's actor-residency policy is pure and dependency-light. Include
 // the production seam verbatim so the executable feature coverage exercises
 // the same canonical identity and handoff decisions as the viewer.
@@ -1288,6 +1302,20 @@ struct BevyoutWorld {
     rpg_perk_progression: perks::PerkProgression,
     rpg_perk_modifiers: perks::PerkModifiers,
     rpg_perk_eligibility: Option<(u32, perks::PerkEligibility)>,
+
+    // -- rpg_effects.feature (M9 W3 #317 pure effect/radiation/addiction
+    //    kernels) --
+    rpg_effect_ledger: effects::ActiveEffectsLedger,
+    rpg_radiation_pool: radiation::RadiationPool,
+    rpg_last_dose: Option<radiation::RadiationDoseOutcome>,
+    rads_removed: u16,
+    rpg_expired_effects: Vec<effects::ActiveEffect>,
+    rpg_projected_special: std::collections::BTreeMap<actor_state::SpecialAttribute, u8>,
+    rpg_projected_derived: stats::DerivedAttributes,
+    rpg_perk_progression_effects: perks::PerkProgression,
+    rpg_addictions: chems::Addictions,
+    rpg_rng: chems::RpgRngState,
+    rpg_addiction_roll: Option<(bool, u32)>,
 }
 
 fn synthetic_dialogue_source() -> dialogue::DialogueSource {
@@ -5432,7 +5460,7 @@ async fn when_item_is_used(
                 base_form_id: parse_hex(&form_id),
                 condition: None,
             },
-            item_use::USE_CONSUMES_COUNT,
+            1,
         );
     }
 }
@@ -18379,4 +18407,319 @@ async fn then_rpg_skill_bonus(world: &mut BevyoutWorld, expected: String) {
         world.rpg_perk_modifiers.bonus_skill_points,
         expected.parse::<u16>().unwrap()
     );
+}
+
+// ---------------------------------------------------------------------
+// rpg_effects.feature -- M9 W3 pure active-effect/radiation/addiction
+// kernels (#317).
+// ---------------------------------------------------------------------
+
+#[given(regex = r"^a clean effect ledger$")]
+async fn given_rpg_clean_ledger(world: &mut BevyoutWorld) {
+    world.rpg_effect_ledger = effects::ActiveEffectsLedger::default();
+    world.rpg_expired_effects = Vec::new();
+}
+
+#[when(regex = r"^the player takes a timed chem effect (\w+) ([+-]\d+) lasting (\d+) seconds$")]
+async fn when_rpg_take_chem_effect(
+    world: &mut BevyoutWorld,
+    label: String,
+    magnitude: String,
+    seconds: String,
+) {
+    let attribute = match actor_state::ActorValue::parse(&label) {
+        Some(actor_state::ActorValue::Special(attribute)) => attribute,
+        other => panic!("unknown SPECIAL label {label:?} (parsed {other:?})"),
+    };
+    world.rpg_effect_ledger.apply(effects::ActiveEffect {
+        source: effects::EffectSource::Chem,
+        actor_value: actor_state::ActorValue::Special(attribute),
+        magnitude: magnitude.parse::<f32>().unwrap(),
+        remaining_ms: seconds.parse::<u32>().unwrap() * 1000,
+    });
+}
+
+#[when(
+    regex = r"^the player takes a timed (action_points|rad_resist) effect ([+-]\d+) lasting (\d+) seconds$"
+)]
+async fn when_rpg_take_actor_value_effect(
+    world: &mut BevyoutWorld,
+    label: String,
+    magnitude: String,
+    seconds: String,
+) {
+    let actor_value = actor_state::ActorValue::parse(&label).expect("known actor value");
+    world.rpg_effect_ledger.apply(effects::ActiveEffect {
+        source: effects::EffectSource::Chem,
+        actor_value,
+        magnitude: magnitude.parse::<f32>().unwrap(),
+        remaining_ms: seconds.parse::<u32>().unwrap() * 1000,
+    });
+}
+
+#[when(regex = r"^the ledger ticks (\d+) milliseconds$")]
+async fn when_rpg_tick_ledger(world: &mut BevyoutWorld, delta_ms: String) {
+    let expired = world
+        .rpg_effect_ledger
+        .tick(delta_ms.parse::<u32>().unwrap());
+    world.rpg_expired_effects.extend(expired);
+}
+
+#[then(regex = r"^the tick expires (\d+) effects$")]
+async fn then_rpg_expired_count(world: &mut BevyoutWorld, expected: String) {
+    assert_eq!(
+        world.rpg_expired_effects.len(),
+        expected.parse::<usize>().unwrap()
+    );
+}
+
+#[then(regex = r"^the ledger holds (\d+) active effects$")]
+async fn then_rpg_ledger_len(world: &mut BevyoutWorld, expected: String) {
+    assert_eq!(
+        world.rpg_effect_ledger.len(),
+        expected.parse::<usize>().unwrap()
+    );
+}
+
+#[then(
+    regex = r"^the (strength|perception|endurance|charisma|intelligence|agility|luck) modifier is ([+-]?\d+)$"
+)]
+async fn then_rpg_modifier(world: &mut BevyoutWorld, label: String, expected: String) {
+    let attribute = rpg_special(&label);
+    let modifier = world
+        .rpg_effect_ledger
+        .modifier_for(actor_state::ActorValue::Special(attribute));
+    assert_eq!(modifier, expected.parse::<f32>().unwrap());
+}
+
+#[given(regex = r"^a radiation pool of (\d+) rads$")]
+async fn given_rpg_radiation_pool(world: &mut BevyoutWorld, rads: String) {
+    world.rpg_radiation_pool = radiation::RadiationPool::new(rads.parse::<u16>().unwrap());
+    world.rpg_last_dose = None;
+    world.rads_removed = 0;
+}
+
+#[when(regex = r"^effective SPECIAL is projected$")]
+async fn when_rpg_project_special(world: &mut BevyoutWorld) {
+    // The projection itself is asserted through the per-attribute steps;
+    // this step exists to make the Gherkin read like the runtime contract.
+    let sheet = stats::CharacterSheet::default();
+    world.rpg_projected_special = effects::projected_special(
+        &sheet,
+        &world.rpg_effect_ledger,
+        world.rpg_radiation_pool.rads,
+    );
+}
+
+#[then(
+    regex = r"^effective (strength|perception|endurance|charisma|intelligence|agility|luck) is (\d+)$"
+)]
+async fn then_rpg_projected_special_value(
+    world: &mut BevyoutWorld,
+    label: String,
+    expected: String,
+) {
+    let attribute = rpg_special(&label);
+    assert_eq!(
+        world
+            .rpg_projected_special
+            .get(&attribute)
+            .copied()
+            .expect("projection covers every SPECIAL attribute"),
+        expected.parse::<u8>().unwrap()
+    );
+}
+
+#[when(regex = r"^derived actor values are projected$")]
+async fn when_rpg_project_derived(world: &mut BevyoutWorld) {
+    world.rpg_projected_derived = effects::projected_derived(
+        &stats::CharacterSheet::default(),
+        &world.rpg_effect_ledger,
+        world.rpg_radiation_pool.rads,
+        &stats::GmstSettings::default(),
+    );
+}
+
+#[then(regex = r"^projected maximum health is (\d+)$")]
+async fn then_rpg_projected_health(world: &mut BevyoutWorld, expected: String) {
+    assert_eq!(
+        world.rpg_projected_derived.max_health,
+        expected.parse::<f32>().unwrap()
+    );
+}
+
+#[then(regex = r"^projected maximum action points is (\d+)$")]
+async fn then_rpg_projected_ap(world: &mut BevyoutWorld, expected: String) {
+    assert_eq!(
+        world.rpg_projected_derived.max_action_points,
+        expected.parse::<f32>().unwrap()
+    );
+}
+
+#[then(regex = r"^active radiation resistance is (\d+) basis points$")]
+async fn then_rpg_rad_resistance(world: &mut BevyoutWorld, expected: String) {
+    assert_eq!(
+        effects::active_rad_resistance_bps(&world.rpg_effect_ledger),
+        expected.parse::<u32>().unwrap()
+    );
+}
+
+#[given(regex = r"^the player (does not own|owns) perk ([0-9a-fA-F]{8})$")]
+async fn given_rpg_effect_perk(world: &mut BevyoutWorld, ownership: String, form_id: String) {
+    let form_id = u32::from_str_radix(&form_id, 16).unwrap();
+    world
+        .rpg_perk_progression_effects
+        .set_rank(form_id, u8::from(ownership == "owns"));
+}
+
+#[then(regex = r"^the Stimpak (30|36) health condition is (true|false)$")]
+async fn then_rpg_stimpak_condition(world: &mut BevyoutWorld, magnitude: String, expected: String) {
+    let condition = effects::IngestibleCondition {
+        oper: effects::CONDITION_OPER_EQUAL,
+        comparison_value: if magnitude == "30" { 0.0 } else { 1.0 },
+        function: effects::CONDITION_FUNCTION_HAS_PERK,
+        param1: 0x0009_4ebf,
+    };
+    let actual =
+        effects::evaluate_ingestible_condition(&condition, &world.rpg_perk_progression_effects);
+    assert_eq!(
+        actual == effects::IngestibleConditionOutcome::True,
+        expected == "true"
+    );
+}
+
+#[then(regex = r"^the highest radiation threshold is (\d+)$")]
+async fn then_rpg_rad_threshold(world: &mut BevyoutWorld, expected: String) {
+    assert_eq!(
+        radiation::threshold_reached(world.rpg_radiation_pool.rads),
+        expected.parse::<u16>().unwrap()
+    );
+}
+
+#[then(regex = r"^the radiation pool is( not)? fatal$")]
+async fn then_rpg_rad_fatal(world: &mut BevyoutWorld, negated: String) {
+    let fatal = world.rpg_radiation_pool.is_fatal();
+    assert_eq!(!fatal, !negated.is_empty(), "fatal = {fatal}");
+}
+
+#[when(regex = r"^(\d+) rads are applied with (\d+) basis points of resistance$")]
+async fn when_rpg_apply_dose(world: &mut BevyoutWorld, dose: String, resistance: String) {
+    world.rpg_last_dose = Some(radiation::apply_radiation(
+        &mut world.rpg_radiation_pool,
+        dose.parse::<u16>().unwrap(),
+        resistance.parse::<u32>().unwrap(),
+    ));
+}
+
+#[then(regex = r"^the absorbed dose is (\d+) rads$")]
+async fn then_rpg_absorbed(world: &mut BevyoutWorld, expected: String) {
+    assert_eq!(
+        world
+            .rpg_last_dose
+            .as_ref()
+            .expect("a dose must have been applied")
+            .absorbed_rads,
+        expected.parse::<u16>().unwrap()
+    );
+}
+
+#[then(regex = r"^the radiation pool is (\d+) rads$")]
+async fn then_rpg_rad_value(world: &mut BevyoutWorld, expected: String) {
+    assert_eq!(
+        world.rpg_radiation_pool.rads,
+        expected.parse::<u16>().unwrap()
+    );
+}
+
+#[when(regex = r"^(\d+) rads are removed$")]
+async fn when_rpg_remove_rads(world: &mut BevyoutWorld, amount: String) {
+    world.rads_removed = radiation::remove_rads(
+        &mut world.rpg_radiation_pool,
+        amount.parse::<u16>().unwrap(),
+    );
+}
+
+#[then(regex = r"^only (\d+) rads were actually removed by the oversized dose$")]
+async fn then_rpg_removed_amount(world: &mut BevyoutWorld, expected: String) {
+    assert_eq!(world.rads_removed, expected.parse::<u16>().unwrap());
+}
+
+#[given(regex = r"^a fresh addiction rng seeded with (\d+)$")]
+async fn given_rpg_rng(world: &mut BevyoutWorld, seed: String) {
+    world.rpg_rng = chems::RpgRngState::new(seed.parse::<u64>().unwrap());
+    world.rpg_addiction_roll = None;
+}
+
+#[when(regex = r"^an addiction roll is made with (\d+) bps chance and (\d+) bps resistance$")]
+async fn when_rpg_roll_addiction(world: &mut BevyoutWorld, chance: String, resistance: String) {
+    let rolled = chems::roll_addiction(
+        chance.parse::<u32>().unwrap(),
+        resistance.parse::<u32>().unwrap(),
+        &mut world.rpg_rng,
+    );
+    world.rpg_addiction_roll = Some((rolled, world.rpg_rng.draw_index));
+}
+
+#[then(regex = r"^the addiction roll is (true|false)$")]
+async fn then_rpg_roll_outcome(world: &mut BevyoutWorld, expected: String) {
+    assert_eq!(
+        world
+            .rpg_addiction_roll
+            .as_ref()
+            .expect("a roll must have been made")
+            .0,
+        expected == "true"
+    );
+}
+
+#[then(regex = r"^(\d+) rng draws were (?:consumed|still consumed in total)$")]
+async fn then_rpg_draw_index(world: &mut BevyoutWorld, expected: String) {
+    assert_eq!(
+        world
+            .rpg_addiction_roll
+            .as_ref()
+            .expect("a roll must have been made")
+            .1,
+        expected.parse::<u32>().unwrap()
+    );
+}
+
+#[given(regex = r"^a clean addiction state$")]
+async fn given_rpg_clean_addictions(world: &mut BevyoutWorld) {
+    world.rpg_addictions = chems::Addictions::default();
+}
+
+fn withdrawal_form_id(hex: &str) -> u32 {
+    u32::from_str_radix(hex, 16).expect("withdrawal FormID must be hex")
+}
+
+#[then(regex = r"^the withdrawal ([0-9a-f]{8}) addiction phase is (clean|addicted|withdrawing)$")]
+async fn then_rpg_phase(world: &mut BevyoutWorld, form_id: String, expected: String) {
+    let id = withdrawal_form_id(&form_id);
+    let actual = match world.rpg_addictions.0.get(&id).copied() {
+        Some(chems::AddictionPhase::Addicted) => "addicted",
+        Some(chems::AddictionPhase::Withdrawing) => "withdrawing",
+        Some(chems::AddictionPhase::Clean) | None => "clean",
+    };
+    assert_eq!(actual, expected);
+}
+
+#[when(regex = r"^the player becomes addicted to withdrawal ([0-9a-f]{8})$")]
+async fn when_rpg_addict(world: &mut BevyoutWorld, form_id: String) {
+    world.rpg_addictions.addict(withdrawal_form_id(&form_id));
+}
+
+#[when(regex = r"^the chem wears off for withdrawal ([0-9a-f]{8})$")]
+async fn when_rpg_begin_withdrawal(world: &mut BevyoutWorld, form_id: String) {
+    assert!(
+        world
+            .rpg_addictions
+            .begin_withdrawal(withdrawal_form_id(&form_id)),
+        "withdrawal only starts while addicted"
+    );
+}
+
+#[when(regex = r"^the withdrawal ([0-9a-f]{8}) is cured$")]
+async fn when_rpg_cure(world: &mut BevyoutWorld, form_id: String) {
+    assert!(world.rpg_addictions.cure(withdrawal_form_id(&form_id)));
 }

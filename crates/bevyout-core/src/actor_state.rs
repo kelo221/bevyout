@@ -41,7 +41,10 @@ pub enum ActorSkill {
 }
 
 /// Authored Fallout 3 values currently exposed by the prepared actor catalog.
-/// Unknown engine actor-value IDs are not guessed into this enum.
+/// Unknown engine actor-value IDs are not guessed into this enum; the M9
+/// wave 3 additions (ActionPoints through Rads) are verified against the
+/// real ESM's `MGEF` primary actor-value indices and the GECK Actor Value
+/// Codes table.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum ActorValue {
     Health,
@@ -49,6 +52,12 @@ pub enum ActorValue {
     SpeedMultiplier,
     Karma,
     Disposition,
+    ActionPoints,
+    CarryWeight,
+    DamageResist,
+    PoisonResist,
+    RadResist,
+    Rads,
     Special(SpecialAttribute),
     Skill(ActorSkill),
     CreatureCombatSkill,
@@ -66,6 +75,12 @@ impl ActorValue {
             Self::SpeedMultiplier => "speed_multiplier",
             Self::Karma => "karma",
             Self::Disposition => "disposition",
+            Self::ActionPoints => "action_points",
+            Self::CarryWeight => "carry_weight",
+            Self::DamageResist => "damage_resist",
+            Self::PoisonResist => "poison_resist",
+            Self::RadResist => "rad_resist",
+            Self::Rads => "rads",
             Self::Special(SpecialAttribute::Strength) => "strength",
             Self::Special(SpecialAttribute::Perception) => "perception",
             Self::Special(SpecialAttribute::Endurance) => "endurance",
@@ -109,6 +124,12 @@ pub const ALL_ACTOR_VALUES: &[ActorValue] = &[
     ActorValue::SpeedMultiplier,
     ActorValue::Karma,
     ActorValue::Disposition,
+    ActorValue::ActionPoints,
+    ActorValue::CarryWeight,
+    ActorValue::DamageResist,
+    ActorValue::PoisonResist,
+    ActorValue::RadResist,
+    ActorValue::Rads,
     ActorValue::Special(SpecialAttribute::Strength),
     ActorValue::Special(SpecialAttribute::Perception),
     ActorValue::Special(SpecialAttribute::Endurance),

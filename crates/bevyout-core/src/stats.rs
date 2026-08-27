@@ -417,18 +417,14 @@ impl CharacterSheet {
     /// `(level - 1)` level term.
     #[must_use]
     pub fn derived(&self, settings: &GmstSettings) -> DerivedAttributes {
-        let endurance = f32::from(self.effective_special(SpecialAttribute::Endurance));
-        let agility = f32::from(self.effective_special(SpecialAttribute::Agility));
-        let strength = f32::from(self.effective_special(SpecialAttribute::Strength));
-        let luck = self.effective_special(SpecialAttribute::Luck);
-        DerivedAttributes {
-            max_health: settings.health_base
-                + endurance * settings.health_endurance_mult
-                + f32::from(self.level.saturating_sub(1)) * settings.health_level_mult,
-            max_action_points: settings.action_points_base + agility * settings.action_points_mult,
-            carry_weight: settings.carry_weight_base + strength * settings.carry_weight_mult,
-            critical_chance_bps: critical_chance_bps(luck, 0),
-        }
+        derived_from_special(
+            self.level,
+            self.effective_special(SpecialAttribute::Strength),
+            self.effective_special(SpecialAttribute::Endurance),
+            self.effective_special(SpecialAttribute::Agility),
+            self.effective_special(SpecialAttribute::Luck),
+            settings,
+        )
     }
 
     /// Total accumulated XP spent inside the current level.
@@ -444,6 +440,27 @@ pub struct DerivedAttributes {
     pub max_action_points: f32,
     pub carry_weight: f32,
     pub critical_chance_bps: u32,
+}
+
+/// Derived attributes from already-resolved SPECIAL values.
+#[must_use]
+pub fn derived_from_special(
+    level: u8,
+    strength: u8,
+    endurance: u8,
+    agility: u8,
+    luck: u8,
+    settings: &GmstSettings,
+) -> DerivedAttributes {
+    DerivedAttributes {
+        max_health: settings.health_base
+            + f32::from(endurance) * settings.health_endurance_mult
+            + f32::from(level.saturating_sub(1)) * settings.health_level_mult,
+        max_action_points: settings.action_points_base
+            + f32::from(agility) * settings.action_points_mult,
+        carry_weight: settings.carry_weight_base + f32::from(strength) * settings.carry_weight_mult,
+        critical_chance_bps: critical_chance_bps(luck, 0),
+    }
 }
 
 /// Critical chance in basis points: `luck * 100 bps` plus perk bonuses.

@@ -807,6 +807,125 @@ fn finalize_perk_entry(draft: Option<PerkEntryDraft>, entries: &mut Vec<PerkEntr
     entries.push(entry);
 }
 
+/// Subrecords the `ALCH` decoder consumes (M9 wave 3 #316); everything
+/// else lands in `ignored_subrecords`.
+const ALCH_SUPPORTED_SUBRECORDS: [&str; 10] = [
+    "EDID", "FULL", "DATA", "ENIT", "EFID", "EFIT", "CTDA", "OBND", "YNAM", "ETYP",
+];
+
+/// Decodes one `CTDA` wire condition shared by perk and ingestible records
+/// (M9 wave 3 #316). Short subrecords yield `None` rather than a guess.
+fn parse_effect_condition(data: &[u8]) -> Option<EffectConditionWire> {
+    if data.len() >= 16
+        && let (Some(value), Some(function), Some(param1)) =
+            (f32_at_option(data, 4), u32_at(data, 8), u32_at(data, 12))
+    {
+        return Some(EffectConditionWire {
+            oper: data[0],
+            comparison_value: value,
+            function,
+            param1,
+        });
+    }
+    None
+}
+
+/// Decoded `ALCH` ingestible (M9 wave 3 #316). The layout was probed
+/// against the real GOTY `Fallout3.esm` with Jet/Stimpak ground truth (see
+/// `docs/plans/M9_WAVE3_PLAN.md` and its shipped amendments): `ENIT` is
+/// 20 bytes with the withdrawal SPEL FormID at 8, the addiction chance
+/// f32 at 12, and the consume sound at 16; effect items are `EFID`+
+/// `EFIT` pairs, each optionally followed by a `CTDA`.
+pub(crate) fn parse_alch(
+    subs: &[Subrecord],
+    form_id: u32,
+    record_flags: u32,
+    resolver: &FormIdResolver,
+) -> AlchRecord {
+    let enit = sub(subs, "ENIT")
+        .filter(|data| data.len() >= 20)
+        .map(|data| AlchEnit {
+            value_caps: u32_at(data, 0).unwrap_or(0),
+            flags: data[4],
+            withdrawal_spell_form_id: u32_at(data, 8).map(|fid| resolver.adjust(fid)).unwrap_or(0),
+            addiction_chance: f32_at_option(data, 12).unwrap_or(0.0),
+            consume_sound_form_id: u32_at(data, 16)
+                .map(|fid| resolver.adjust(fid))
+                .unwrap_or(0),
+        });
+    let mut effects = Vec::new();
+    let mut pending_mgef: Option<u32> = None;
+    for subrecord in subs {
+        match subrecord.signature.as_str() {
+            "EFID" => {
+                // An EFID without its EFIT (or a new EFID before the EFIT)
+                // drops the pending reference; only complete pairs decode.
+                pending_mgef = u32_at_option(&subrecord.data, 0).map(|fid| resolver.adjust(fid));
+            }
+            "EFIT" => {
+                let data = &subrecord.data;
+                if data.len() >= 20
+                    && let Some(mgef_form_id) = pending_mgef.take()
+                {
+                    effects.push(AlchEffectWire {
+                        mgef_form_id,
+                        magnitude: i32_at(data, 0).unwrap_or(0),
+                        area: u32_at(data, 4).unwrap_or(0),
+                        duration_seconds: u32_at(data, 8).unwrap_or(0),
+                        range: i32_at(data, 12).unwrap_or(0),
+                        condition: None,
+                    });
+                }
+            }
+            "CTDA" => {
+                // Attaches to the most recently completed effect item.
+                if let Some(condition) = parse_effect_condition(&subrecord.data)
+                    && let Some(effect) = effects.last_mut()
+                    && effect.condition.is_none()
+                {
+                    effect.condition = Some(condition);
+                }
+            }
+            _ => {}
+        }
+    }
+    AlchRecord {
+        form_id,
+        record_flags,
+        editor_id: sub(subs, "EDID").map(cstring),
+        name: sub(subs, "FULL").map(cstring),
+        weight: sub(subs, "DATA").and_then(|data| f32_at_option(data, 0)),
+        enit,
+        effects,
+        ignored_subrecords: ignored_signatures(subs, &ALCH_SUPPORTED_SUBRECORDS),
+    }
+}
+
+/// Decoded `MGEF` base effect (M9 wave 3 #316). `DATA` is 72 bytes; this
+/// decode reads the flags dword at 0, base cost at 4, archetype at 64, and
+/// the primary actor-value index at 68 (engine AV index family verified
+/// against the GECK "Actor Value Codes" table and the Chem*/Increase*/
+/// Restore* families on the real ESM).
+pub(crate) fn parse_mgef(subs: &[Subrecord], form_id: u32, record_flags: u32) -> MgefRecord {
+    let data = sub(subs, "DATA").filter(|data| data.len() >= 72);
+    MgefRecord {
+        form_id,
+        record_flags,
+        editor_id: sub(subs, "EDID").map(cstring),
+        name: sub(subs, "FULL").map(cstring),
+        flags: data.and_then(|data| u32_at(data, 0)).unwrap_or(0),
+        base_cost: data.and_then(|data| f32_at_option(data, 4)).unwrap_or(0.0),
+        archetype: data.and_then(|data| u32_at(data, 64)).unwrap_or(0),
+        actor_value_index: data.and_then(|data| i32_at(data, 68)).unwrap_or(-1),
+        ignored_subrecords: ignored_signatures(
+            subs,
+            &[
+                "EDID", "FULL", "DATA", "MODL", "MODT", "ICON", "MICO", "SCRI", "SNAM", "TNAM",
+            ],
+        ),
+    }
+}
+
 pub(crate) fn parse_sound_parameters(data: &[u8]) -> Option<SoundParameters> {
     if data.len() < 8 {
         return None;

@@ -5,16 +5,22 @@
 //! player entities. `ActorStats`, `DerivedAttributes`, and `Experience` are
 //! entity projections, and `StatsSettings` carries the prepared GMST settings
 //! (GOTY defaults until a catalog overrides them). `PerkCatalog` is the
-//! prepared perk definitions for console commands (M9 wave 2, #314).
+//! prepared perk definitions for console commands (M9 wave 2, #314). Wave 3
+//! radiation, active effects, addictions, and current health live on the same
+//! resource so camera-mode despawn cannot drop them.
 
 use bevy::prelude::*;
+use bevyout_core::chems::Addictions as CoreAddictions;
+use bevyout_core::effects::{ActiveEffectsLedger, projected_derived};
 use bevyout_core::perks::{PerkDefinition, PerkProgression};
+use bevyout_core::radiation::RadiationPool;
 use bevyout_core::stats::{
     CharacterSheet, DerivedAttributes as CoreDerivedAttributes, GmstSettings, xp_threshold,
 };
 use std::collections::BTreeMap;
 use std::path::Path;
 
+use super::effects::{ActiveEffectsList, Addictions, PlayerRadiation, PlayerVitals};
 use super::player::FpsPlayer;
 use super::plugins::ViewerSet;
 use crate::vsa::{
@@ -42,6 +48,11 @@ pub(crate) struct PlayerProgression {
     pub(crate) perks: PerkProgression,
     pub(crate) unspent_skill_points: u16,
     pub(crate) total_skill_points: u16,
+    pub(crate) radiation: RadiationPool,
+    pub(crate) effects: ActiveEffectsLedger,
+    pub(crate) chem_doses_ms: BTreeMap<u32, u32>,
+    pub(crate) addictions: CoreAddictions,
+    pub(crate) current_health: Option<f32>,
 }
 
 /// Player-authored progression sheet projected onto the transient FPS entity.
@@ -122,24 +133,77 @@ pub(crate) fn restore_player_progression(world: &mut World, entity: Entity) {
         .insert(ProjectionBundle::from(&progression));
 }
 
+type DerivedStatsQuery<'w, 's> = Query<
+    'w,
+    's,
+    (
+        &'static mut ActorStats,
+        &'static mut DerivedAttributes,
+        &'static mut Experience,
+        Option<&'static ActiveEffectsList>,
+        Option<&'static PlayerRadiation>,
+    ),
+>;
+
 /// Keeps the active FPS entity as a projection of the persistent progression
 /// resource. Console commands mutate the resource directly, so this also
 /// repairs the projection after a command batch without relying on entity
-/// change detection.
+/// change detection. Derived max health includes active effects and radiation
+/// when those components are present.
 fn recalculate_derived_stats(
     settings: Res<StatsSettings>,
     progression: Res<PlayerProgression>,
-    mut players: Query<(&mut ActorStats, &mut DerivedAttributes, &mut Experience)>,
+    mut players: DerivedStatsQuery,
 ) {
-    for (mut stats, mut derived, mut experience) in &mut players {
+    for (mut stats, mut derived, mut experience, effects, radiation) in &mut players {
         stats.0 = progression.stats.clone();
-        derived.0 = stats.0.derived(&settings.0);
+        let rads = radiation.map_or(progression.radiation.rads, |radiation| radiation.0.rads);
+        derived.0 = match effects {
+            Some(effects) => projected_derived(&stats.0, &effects.ledger, rads, &settings.0),
+            None => projected_derived(&stats.0, &progression.effects, rads, &settings.0),
+        };
         experience.xp = stats.0.xp;
         experience.level = stats.0.level;
         experience.xp_into_level = stats.0.xp_into_level(&settings.0);
         experience.next_threshold = xp_threshold(stats.0.level.saturating_add(1), &settings.0);
         experience.unspent_skill_points = progression.unspent_skill_points;
         experience.total_skill_points = progression.total_skill_points;
+    }
+}
+
+pub(crate) fn persist_player_effects(world: &mut World) {
+    let Some(entity) = world
+        .query_filtered::<Entity, With<FpsPlayer>>()
+        .iter(world)
+        .next()
+    else {
+        return;
+    };
+    let radiation = world
+        .get::<PlayerRadiation>(entity)
+        .map(|radiation| radiation.0);
+    let effects = world.get::<ActiveEffectsList>(entity).cloned();
+    let addictions = world
+        .get::<Addictions>(entity)
+        .map(|addictions| addictions.0.clone());
+    let current_health = world
+        .get::<PlayerVitals>(entity)
+        .map(|vitals| vitals.current_health);
+    let Some(mut progression) = world.get_resource_mut::<PlayerProgression>() else {
+        return;
+    };
+    if let Some(radiation) = radiation {
+        progression.radiation = radiation;
+    }
+    if let Some(effects) = effects {
+        progression.effects = effects.ledger;
+        progression.chem_doses_ms = effects.chem_doses_ms;
+    }
+    if let Some(addictions) = addictions {
+        progression.addictions = addictions;
+    }
+    if let Some(current_health) = current_health {
+        progression.current_health = Some(current_health);
     }
 }
 

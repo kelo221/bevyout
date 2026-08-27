@@ -2317,8 +2317,7 @@ fn perk_decodes_quest_and_ability_entries() {
 #[test]
 fn perk_decodes_bonus_skill_point_entry_and_short_ctda_safely() {
     // Educated (00031DD8): entry code 0x0A with EPFD 3.0; a truncated CTDA
-    // is retained as an unknown condition rather than guessed into a partial
-    // condition.
+    // is skipped instead of guessed into a condition.
     let perk = parse_perk(
         &[
             direct_subrecord("EDID", b"Educated\0".to_vec()),

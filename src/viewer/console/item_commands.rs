@@ -477,14 +477,29 @@ pub(super) fn use_item(
     let item_id = parse_item_instance_id(value)
         .ok_or_else(|| ConsoleError::new("bad_type", "item instance id must be hexadecimal"))?;
     let used = world
-        .resource_mut::<interaction::CanonicalItemLedger>()
-        .ledger
-        .use_item(HolderId::Player, item_id)
+        .resource_scope(
+            |world, mut canonical: Mut<interaction::CanonicalItemLedger>| {
+                let mut inventory = world.resource_mut::<interaction::PlayerInventory>();
+                canonical.use_player_item(&mut inventory, item_id)
+            },
+        )
         .map_err(|error| ConsoleError::new("useitem_failed", error.to_string()))?;
-    Ok(ConsoleCommandResult::new(
-        json!({ "item_id": item_id.0, "base_form_id": used.base_form_id, "count": 1 }),
-        vec![format!("used item {:016x}", item_id.0)],
-    ))
+    // M9 wave 3 (#318): when the consumed item is a cataloged ingestible,
+    // its authored effects apply through `effects::apply_ingestible`
+    // (health restore, radiation, timed modifiers, addiction roll). Items
+    // without an effect-catalog entry consume exactly as before.
+    let ingestible = world
+        .get_resource::<super::super::effects::EffectCatalog>()
+        .and_then(|catalog| catalog.get(used.base_form_id).cloned());
+    let application = ingestible
+        .map(|definition| super::effect_commands::apply_ingestible_to_player(world, &definition));
+    let mut value = json!({ "item_id": item_id.0, "base_form_id": used.base_form_id, "count": 1 });
+    let mut log = vec![format!("used item {:016x}", item_id.0)];
+    if let Some(application) = application {
+        value["ingestible"] = effect_commands::application_json(&application);
+        log.push(effect_commands::application_summary(&application));
+    }
+    Ok(ConsoleCommandResult::new(value, log))
 }
 
 pub(super) fn merchant_stacks(placement: &interaction::PlacementRoot) -> Vec<(u32, i32)> {

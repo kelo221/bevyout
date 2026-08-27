@@ -758,6 +758,7 @@ pub(crate) fn set_camera_mode(
             world
                 .resource_mut::<ConsoleSessionStore>()
                 .clear_entity(player);
+            super::stats::persist_player_effects(world);
             world.despawn(player);
             let mut state = world.resource_mut::<CameraModeState>();
             state.mode = CameraMode::Free;

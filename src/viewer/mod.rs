@@ -80,6 +80,7 @@ mod controls;
 mod day_night;
 mod diagnostics;
 pub(crate) mod dialogue;
+mod effects;
 mod fallout_ui;
 mod glow_card_policy;
 mod hud;

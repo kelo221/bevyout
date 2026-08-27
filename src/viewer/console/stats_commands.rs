@@ -7,8 +7,10 @@
 //! because NPCs resolve through persisted save state, not this sheet.
 
 use bevyout_core::actor_state::ActorValue;
+use bevyout_core::effects::{ActiveEffectsLedger, projected_derived, projected_special};
 use bevyout_core::stats as core_stats;
 
+use super::super::effects::{ActiveEffectsList, PlayerRadiation, PlayerVitals};
 use super::stats::{PlayerProgression, StatsSettings};
 use super::*;
 
@@ -20,14 +22,14 @@ impl ConsoleCommandProvider for StatsCommandProvider {
             ConsoleCommand::new(
                 "getav",
                 "[player.]getav <value>",
-                "Read a player actor value: a SPECIAL attribute, a skill, or health (max).",
+                "Read a player actor value: a SPECIAL attribute, a skill, current health, or projected AP.",
                 get_actor_value,
             )
             .reference_callable(false),
             ConsoleCommand::new(
                 "setav",
                 "[player.]setav <value> <n>",
-                "Set a player SPECIAL attribute or effective skill value (clamped to range).",
+                "Set a player SPECIAL attribute, effective skill, or current health (clamped to range).",
                 set_actor_value,
             )
             .reference_callable(false)
@@ -35,7 +37,7 @@ impl ConsoleCommandProvider for StatsCommandProvider {
             ConsoleCommand::new(
                 "modav",
                 "[player.]modav <value> <delta>",
-                "Shift a player SPECIAL attribute or effective skill value (clamped to range).",
+                "Shift a player SPECIAL attribute, effective skill, or current health (clamped to range).",
                 mod_actor_value,
             )
             .reference_callable(false)
@@ -75,6 +77,38 @@ fn player_progression_mut(world: &mut World) -> Result<Mut<'_, PlayerProgression
         .ok_or_else(|| ConsoleError::new("player_unavailable", "player progression is unavailable"))
 }
 
+fn fps_player(world: &World) -> Option<Entity> {
+    world
+        .resource::<player::CameraModeState>()
+        .player
+        .filter(|&entity| world.entities().contains(entity))
+}
+
+fn live_or_stored_effects(world: &World) -> (ActiveEffectsLedger, u16) {
+    let stored = world.get_resource::<PlayerProgression>();
+    if let Some(entity) = fps_player(world) {
+        let ledger = world
+            .get::<ActiveEffectsList>(entity)
+            .map(|effects| effects.ledger.clone())
+            .or_else(|| stored.map(|progression| progression.effects.clone()))
+            .unwrap_or_default();
+        let rads = world
+            .get::<PlayerRadiation>(entity)
+            .map(|radiation| radiation.0.rads)
+            .or_else(|| stored.map(|progression| progression.radiation.rads))
+            .unwrap_or(0);
+        return (ledger, rads);
+    }
+    (
+        stored
+            .map(|progression| progression.effects.clone())
+            .unwrap_or_default(),
+        stored
+            .map(|progression| progression.radiation.rads)
+            .unwrap_or(0),
+    )
+}
+
 fn parse_actor_value(raw: &str) -> Result<ActorValue, ConsoleError> {
     ActorValue::parse(raw).ok_or_else(|| {
         ConsoleError::new(
@@ -84,16 +118,51 @@ fn parse_actor_value(raw: &str) -> Result<ActorValue, ConsoleError> {
     })
 }
 
+fn projected_max_health(world: &World) -> Result<f32, ConsoleError> {
+    let progression = player_progression(world)?;
+    let settings = world.resource::<StatsSettings>().0;
+    let (ledger, rads) = live_or_stored_effects(world);
+    Ok(projected_derived(&progression.stats, &ledger, rads, &settings).max_health)
+}
+
+fn current_health(world: &World) -> Result<f32, ConsoleError> {
+    let max_health = projected_max_health(world)?;
+    if let Some(entity) = fps_player(world)
+        && let Some(vitals) = world.get::<PlayerVitals>(entity)
+    {
+        return Ok(vitals.current_health);
+    }
+    Ok(player_progression(world)?
+        .current_health
+        .unwrap_or(max_health))
+}
+
+fn set_current_health(world: &mut World, applied: f32) -> Result<(), ConsoleError> {
+    if let Some(entity) = fps_player(world)
+        && let Some(mut vitals) = world.get_mut::<PlayerVitals>(entity)
+    {
+        vitals.current_health = applied;
+    }
+    player_progression_mut(world)?.current_health = Some(applied);
+    Ok(())
+}
+
 /// Reads an actor value from the sheet. Derived values are computed
-/// synchronously from the sheet plus active settings (not the possibly
-/// one-frame-stale `DerivedAttributes` component) so console batches read
-/// exactly what earlier commands wrote.
+/// synchronously from the sheet plus active settings and live effects (not the
+/// possibly one-frame-stale `DerivedAttributes` component) so console batches
+/// read exactly what earlier commands wrote. Health is current vitals, not max.
 fn read_actor_value(world: &World, value: ActorValue) -> Result<f64, ConsoleError> {
     let progression = player_progression(world)?;
     let settings = world.resource::<StatsSettings>().0;
+    let (ledger, rads) = live_or_stored_effects(world);
+    let derived = projected_derived(&progression.stats, &ledger, rads, &settings);
     let resolved = match value {
-        ActorValue::Health => progression.stats.derived(&settings).max_health,
-        ActorValue::Special(attribute) => f32::from(progression.stats.effective_special(attribute)),
+        ActorValue::Health => current_health(world)?,
+        ActorValue::ActionPoints => derived.max_action_points,
+        ActorValue::RadResist => ledger.modifier_for(ActorValue::RadResist).max(0.0),
+        ActorValue::Special(attribute) => {
+            f32::from(projected_special(&progression.stats, &ledger, rads)[&attribute])
+        }
         ActorValue::Skill(skill) => f32::from(progression.stats.skill_value(skill)),
         other => {
             return Err(ConsoleError::new(
@@ -144,6 +213,15 @@ pub(super) fn set_actor_value(
     }
     let value = parse_actor_value(&invocation.args[0])?;
     let amount = parse_amount(&invocation.args[1], "setav")?;
+    if value == ActorValue::Health {
+        let max_health = projected_max_health(world)?;
+        let applied = f32::from(amount).clamp(0.0, max_health);
+        set_current_health(world, applied)?;
+        return Ok(ConsoleCommandResult::new(
+            json!({ "value": value.label(), "result": applied }),
+            vec![format!("{} set to {}", value.label(), applied)],
+        ));
+    }
     let mut progression = player_progression_mut(world)?;
     let applied = match value {
         ActorValue::Special(attribute) => {
@@ -160,12 +238,7 @@ pub(super) fn set_actor_value(
             );
             i16::from(progression.stats.set_skill_value(skill, target))
         }
-        ActorValue::Health => {
-            return Err(ConsoleError::new(
-                "unsupported_actor_value",
-                "health is derived; change endurance or level instead",
-            ));
-        }
+        ActorValue::Health => unreachable!("health handled before borrowing PlayerProgression"),
         other => {
             return Err(ConsoleError::new(
                 "unsupported_actor_value",
@@ -191,18 +264,22 @@ pub(super) fn mod_actor_value(
     }
     let value = parse_actor_value(&invocation.args[0])?;
     let delta = parse_amount(&invocation.args[1], "modav")?;
+    if value == ActorValue::Health {
+        let max_health = projected_max_health(world)?;
+        let applied = (current_health(world)? + f32::from(delta)).clamp(0.0, max_health);
+        set_current_health(world, applied)?;
+        return Ok(ConsoleCommandResult::new(
+            json!({ "value": value.label(), "result": applied }),
+            vec![format!("{} now {}", value.label(), applied)],
+        ));
+    }
     let mut progression = player_progression_mut(world)?;
     let applied = match value {
         ActorValue::Special(attribute) => {
             i16::from(progression.stats.mod_special(attribute, delta))
         }
         ActorValue::Skill(skill) => i16::from(progression.stats.mod_skill_value(skill, delta)),
-        ActorValue::Health => {
-            return Err(ConsoleError::new(
-                "unsupported_actor_value",
-                "health is derived; change endurance or level instead",
-            ));
-        }
+        ActorValue::Health => unreachable!("health handled before borrowing PlayerProgression"),
         other => {
             return Err(ConsoleError::new(
                 "unsupported_actor_value",
