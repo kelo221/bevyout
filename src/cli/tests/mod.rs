@@ -617,6 +617,30 @@ fn accepts_editor_id_selectors_and_legacy_paths() {
         ])
         .is_err()
     );
+
+    let cli = Cli::try_parse_from(["bevyout", "export-raylib", "SuperDuperMart"]).unwrap();
+    let CommandLine::ExportRaylib(args) = cli.command else {
+        panic!("expected export-raylib command");
+    };
+    assert_eq!(args.selector, "SuperDuperMart");
+    assert!(args.no_actors);
+    assert_eq!(args.shadow_resolution, 512);
+
+    let cli = Cli::try_parse_from([
+        "bevyout",
+        "export-raylib",
+        "SuperDuperMart",
+        "--no-actors",
+        "false",
+        "--shadow-resolution",
+        "128",
+    ])
+    .unwrap();
+    let CommandLine::ExportRaylib(args) = cli.command else {
+        panic!("expected export-raylib command");
+    };
+    assert!(!args.no_actors);
+    assert_eq!(args.shadow_resolution, 128);
 }
 
 #[test]

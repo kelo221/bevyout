@@ -48,8 +48,10 @@ function shouldScan(path: string): boolean {
 		normalized === "src/main.rs" ||
 		normalized.includes("/cli/") ||
 		normalized === "src/vsa/catalog.rs" ||
+		normalized === "src/vsa/export_raylib.rs" ||
 		normalized.includes("src/vsa/bake/") ||
-		normalized.includes("src/vsa/cache_stats/")
+		normalized.includes("src/vsa/cache_stats/") ||
+		normalized.includes("src/vsa/nif_convert/")
 	) return false;
 	return normalized.startsWith("src/") || normalized.startsWith("crates/");
 }
@@ -84,6 +86,8 @@ function selfTest(): void {
 		if (findings.length > 0) throw new Error(`${name} unexpectedly matched: ${findings.map((finding) => finding.ruleId)}`);
 	}
 	if (shouldScan("tools/ast-grep/fixtures/test_code.rs")) throw new Error("test-code fixture was not excluded");
+	if (shouldScan("src/vsa/export_raylib.rs")) throw new Error("CLI export-raylib was not excluded");
+	if (shouldScan("src/vsa/catalog.rs")) throw new Error("CLI catalog was not excluded");
 	console.log("AST-grep fixture suite passed");
 }
 

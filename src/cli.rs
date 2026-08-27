@@ -66,6 +66,9 @@ pub enum CommandLine {
     /// Print a prepared exterior worldspace index in stable catalog form.
     #[command(name = "exterior-catalog")]
     ExteriorCatalog(ExteriorCatalogArgs),
+    /// Export a prepared scene to JSON + GLBs for the Odin/raylib viewer.
+    #[command(name = "export-raylib")]
+    ExportRaylib(ExportRaylibArgs),
 }
 
 #[derive(Parser, Debug)]
@@ -128,6 +131,31 @@ pub struct ExteriorCatalogArgs {
     /// Prepared `worldspaces/<formid>/index.ron` file.
     #[arg(long, value_name = "INDEX.ron")]
     pub(crate) index: PathBuf,
+}
+
+#[derive(Parser, Debug)]
+pub struct ExportRaylibArgs {
+    /// GECK EditorID, or an eight-digit hexadecimal FormID.
+    #[arg(value_name = "EDITOR_ID")]
+    pub(crate) selector: String,
+    /// Prepared scene cache directory; defaults to .bevyout/cache.
+    #[arg(long)]
+    pub(crate) cache_dir: Option<PathBuf>,
+    /// Output directory; defaults to .bevyout/raylib/<formid>.
+    #[arg(long)]
+    pub(crate) output: Option<PathBuf>,
+    /// Exclude NPC, creature, and corpse placements. Enabled by default.
+    #[arg(
+        long,
+        default_value_t = true,
+        action = clap::ArgAction::Set,
+        num_args = 0..=1,
+        default_missing_value = "true"
+    )]
+    pub(crate) no_actors: bool,
+    /// Cubemap face resolution used by the raylib viewer for static point shadows.
+    #[arg(long, default_value_t = 512, value_parser = parse_shadow_resolution)]
+    pub(crate) shadow_resolution: u32,
 }
 
 #[derive(Parser, Debug, Clone)]

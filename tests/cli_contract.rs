@@ -13,7 +13,15 @@ fn help_lists_the_supported_commands() {
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
     for command in [
-        "cache", "prepare", "bake", "render", "view", "report", "cells", "script",
+        "cache",
+        "prepare",
+        "bake",
+        "render",
+        "view",
+        "report",
+        "cells",
+        "script",
+        "export-raylib",
     ] {
         assert!(stdout.contains(command), "help should mention {command}");
     }

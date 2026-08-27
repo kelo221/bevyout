@@ -9,6 +9,7 @@ mod cell_map;
 mod content_index;
 #[allow(dead_code)]
 pub(crate) mod dialogue;
+mod export_raylib;
 mod exterior;
 mod manifest;
 mod nif_convert;
@@ -98,6 +99,7 @@ pub(crate) use prepare::{
 };
 // Issue #128's `tnm` console command decodes `navgraph.ron` (issue #111)
 // straight into these types -- see `viewer::nav_overlay`.
+pub use export_raylib::export_raylib;
 /// Test-only re-export (issue #128): only `viewer::nav_overlay`'s unit
 /// tests construct a `PreparedNavPolygon` fixture directly; production code
 /// only ever iterates `PreparedNavMesh::polygons` without naming the
