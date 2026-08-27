@@ -10,7 +10,7 @@
 use bevyout_core::chems::AddictionPhase;
 use bevyout_core::effects::{EffectSource, PERMANENT_MS};
 
-use super::stats::{ActorStats, StatsSettings};
+use super::stats::{ActorStats, PlayerProgression, StatsSettings};
 use super::*;
 
 pub(super) struct EffectCommandProvider;
@@ -124,8 +124,9 @@ pub(super) fn apply_ingestible_to_player(
         .expect("the FPS player carries ActorStats")
         .clone();
     let perks = world
-        .get::<super::super::stats::ActorPerks>(entity)
-        .expect("the FPS player carries ActorPerks")
+        .get_resource::<PlayerProgression>()
+        .expect("player progression is available")
+        .perks
         .clone();
     // The PRNG state is Copy: mutate a local copy while borrowing the
     // player's components, then write it back so the resource stays the

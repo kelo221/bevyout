@@ -422,7 +422,6 @@ fn aid_test_app(quest_item: bool) -> App {
     app.world_mut().spawn((
         FpsPlayer::default(),
         ActorStats::default(),
-        ActorPerks::default(),
         PlayerVitals {
             current_health: 140.0,
         },

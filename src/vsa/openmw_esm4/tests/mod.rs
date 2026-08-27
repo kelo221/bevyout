@@ -2130,6 +2130,26 @@ fn gmst_decodes_typed_values_by_editor_id_prefix() {
         Some(bevyout_core::stats::GmstValue::Bool(true))
     );
 
+    let short_boolean = parse_gmst(
+        &[
+            direct_subrecord("EDID", b"bActorWithdrawn ".to_vec()),
+            direct_subrecord("DATA", vec![1, 0, 0]),
+        ],
+        0x2d,
+        0,
+    );
+    assert_eq!(short_boolean.value, None);
+
+    let oversized_boolean = parse_gmst(
+        &[
+            direct_subrecord("EDID", b"bActorWithdrawn ".to_vec()),
+            direct_subrecord("DATA", vec![1, 0, 0, 0, 0]),
+        ],
+        0x2e,
+        0,
+    );
+    assert_eq!(oversized_boolean.value, None);
+
     let text = parse_gmst(
         &[
             direct_subrecord("EDID", b"sDefaultPlayerName\0".to_vec()),
@@ -2325,4 +2345,10 @@ fn perk_decodes_bonus_skill_point_entry_and_short_ctda_safely() {
         }]
     );
     assert!(perk.conditions.is_empty());
+    assert_eq!(perk.malformed_conditions, 1);
+    let mut oversized_ctda = perk_ctda(4.0, 0x1ef, 9);
+    oversized_ctda.push(0);
+    let oversized = parse_perk(&[direct_subrecord("CTDA", oversized_ctda)], 0x0003_1dd8, 0);
+    assert!(oversized.conditions.is_empty());
+    assert_eq!(oversized.malformed_conditions, 1);
 }

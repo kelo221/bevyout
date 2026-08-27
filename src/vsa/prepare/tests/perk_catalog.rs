@@ -26,7 +26,7 @@ fn swift_learner() -> PerkDefinition {
 
 #[test]
 fn revision_is_pinned() {
-    assert_eq!(PERK_CATALOG_REVISION, "openmw-perks-v1");
+    assert_eq!(PERK_CATALOG_REVISION, "openmw-perks-v2");
 }
 
 #[test]

@@ -3172,11 +3172,13 @@ fn build_perk_catalog_inputs(parsed: &ParsedPlugin) -> PerkCatalogInputs {
                         .expect("perk_condition_resolvable verified the threshold"),
                 })
                 .collect(),
-            unknown_conditions: record
-                .conditions
-                .iter()
-                .filter(|condition| !perk_condition_resolvable(condition))
-                .count() as u32,
+            unknown_conditions: record.malformed_conditions.saturating_add(
+                record
+                    .conditions
+                    .iter()
+                    .filter(|condition| !perk_condition_resolvable(condition))
+                    .count() as u32,
+            ),
             entries: record
                 .entries
                 .iter()
@@ -3215,7 +3217,10 @@ fn build_perk_catalog_inputs(parsed: &ParsedPlugin) -> PerkCatalogInputs {
                         // EPFT 1 marks a float parameter; any other shape
                         // keeps the raw word uninterpreted.
                         payload: match (function, data) {
-                            (Some(1), Some(bits)) => {
+                            (Some(1), Some(bits))
+                                if f32::from_bits(*bits).is_finite()
+                                    && f32::from_bits(*bits) >= 0.0 =>
+                            {
                                 EntryPointPayload::Value(f32::from_bits(*bits))
                             }
                             (_, Some(bits)) => EntryPointPayload::Raw(*bits),

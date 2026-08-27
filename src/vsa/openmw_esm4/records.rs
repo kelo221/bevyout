@@ -605,7 +605,8 @@ pub(crate) fn parse_gmst(subs: &[Subrecord], form_id: u32, record_flags: u32) ->
         match prefix {
             Some('f') => f32_at(data, 0).ok().map(GmstValue::Float),
             Some('i') => i32_at(data, 0).map(GmstValue::Int),
-            Some('b') => Some(GmstValue::Bool(u32_at(data, 0).unwrap_or(0) != 0)),
+            Some('b') => (data.len() == 4)
+                .then(|| GmstValue::Bool(u32_at(data, 0).is_some_and(|value| value != 0))),
             Some('s') => Some(GmstValue::Str(cstring(data))),
             _ => None,
         }
@@ -665,6 +666,7 @@ struct PerkEntryDraft {
 /// `PRKE`/`PRKF` with a type-specific inner `DATA`.
 pub(crate) fn parse_perk(subs: &[Subrecord], form_id: u32, record_flags: u32) -> PerkRecord {
     let mut conditions = Vec::new();
+    let mut malformed_conditions = 0_u32;
     let mut entries = Vec::new();
     let mut draft: Option<PerkEntryDraft> = None;
     for subrecord in subs {
@@ -672,11 +674,12 @@ pub(crate) fn parse_perk(subs: &[Subrecord], form_id: u32, record_flags: u32) ->
         match subrecord.signature.as_str() {
             "CTDA" => {
                 // 28 bytes: oper u8, 3 pad, comparison f32, function u32,
-                // param1 u32, 12 more bytes. Short subrecords are skipped
-                // rather than guessed into a condition.
-                if data.len() >= 16
-                    && let (Some(value), Some(function), Some(param1)) =
-                        (f32_at_option(data, 4), u32_at(data, 8), u32_at(data, 12))
+                // param1 u32, 12 more bytes. Any non-conforming length is
+                // kept as a conservative blocker rather than guessed.
+                if data.len() != 28 {
+                    malformed_conditions = malformed_conditions.saturating_add(1);
+                } else if let (Some(value), Some(function), Some(param1)) =
+                    (f32_at_option(data, 4), u32_at(data, 8), u32_at(data, 12))
                 {
                     conditions.push(PerkConditionWire {
                         oper: data[0],
@@ -742,6 +745,7 @@ pub(crate) fn parse_perk(subs: &[Subrecord], form_id: u32, record_flags: u32) ->
         playable: gates.playable,
         hidden: gates.hidden,
         conditions,
+        malformed_conditions,
         entries,
         ignored_subrecords: ignored_signatures(subs, &PERK_SUPPORTED_SUBRECORDS),
     }

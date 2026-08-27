@@ -713,6 +713,7 @@ pub(crate) fn set_camera_mode(
                         .with_rotation(Quat::from_rotation_y(yaw)),
                 ))
                 .id();
+            super::stats::restore_player_progression(world, player);
             if let Some(mut transform) = world.get_mut::<Transform>(camera.0) {
                 transform.translation = Vec3::new(0.0, CAMERA_LOCAL_HEIGHT, 0.0);
                 transform.rotation = Quat::from_rotation_x(pitch);
@@ -757,6 +758,7 @@ pub(crate) fn set_camera_mode(
             world
                 .resource_mut::<ConsoleSessionStore>()
                 .clear_entity(player);
+            super::stats::persist_player_effects(world);
             world.despawn(player);
             let mut state = world.resource_mut::<CameraModeState>();
             state.mode = CameraMode::Free;

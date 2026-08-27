@@ -34,7 +34,8 @@ use super::{
     actor, actor_animation, actor_state, diagnostics, interaction, nav, nav_overlay, player, stats,
 };
 mod actor_state_commands;
-// pub(crate): issue #218's package driver shares `start_package` with `runpackage`.
+// pub(crate): issue #218's autonomous package driver calls `start_package`
+// directly -- one implementation shared with the console `runpackage`.
 pub(crate) mod ai_package_commands;
 mod cinema_commands;
 mod common;

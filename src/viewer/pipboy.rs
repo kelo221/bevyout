@@ -29,7 +29,7 @@ use super::interaction::{
 use super::inventory::{DropAction, StackKey, drop_action};
 use super::pipboy_reader::OpenReaderRequested;
 use super::player::FpsPlayer;
-use super::stats::{ActorPerks, ActorStats, StatsSettings};
+use super::stats::{ActorStats, PlayerProgression, StatsSettings};
 use super::{
     CellInfo, PreparedItemCatalog, PreparedItemCategory, PreparedItemDefinition, PreparedItemStats,
     cell_label,
@@ -264,6 +264,7 @@ fn install(app: &mut App) {
         .init_resource::<CanonicalItemLedger>()
         .init_resource::<EffectCatalog>()
         .init_resource::<StatsSettings>()
+        .init_resource::<PlayerProgression>()
         .init_resource::<RngResource>()
         // `handle_item_action_button`'s dependencies, normally registered by
         // `interaction`/`audio`/`pipboy_reader`'s installs -- `init_resource`
@@ -613,7 +614,6 @@ type AidPlayerQuery<'w, 's> = Query<
     's,
     (
         &'static ActorStats,
-        &'static ActorPerks,
         &'static mut PlayerVitals,
         &'static mut PlayerRadiation,
         &'static mut ActiveEffectsList,
@@ -629,6 +629,7 @@ struct AidUseContext<'w, 's> {
     effect_catalog: Res<'w, EffectCatalog>,
     settings: Res<'w, StatsSettings>,
     rng: ResMut<'w, RngResource>,
+    progression: Res<'w, PlayerProgression>,
     player: AidPlayerQuery<'w, 's>,
 }
 
@@ -661,7 +662,7 @@ fn use_item(
         return;
     };
     if let Some(definition) = context.effect_catalog.get(used.base_form_id) {
-        let Ok((stats, perks, mut vitals, mut radiation, mut effects, mut addictions)) =
+        let Ok((stats, mut vitals, mut radiation, mut effects, mut addictions)) =
             context.player.single_mut()
         else {
             return;
@@ -669,7 +670,7 @@ fn use_item(
         apply_ingestible(
             definition,
             stats,
-            perks,
+            &context.progression.perks,
             &context.settings,
             PlayerEffectComponents {
                 vitals: &mut vitals,

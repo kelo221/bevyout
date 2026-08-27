@@ -15,6 +15,7 @@ fn camera_transition_world(physics_disabled: bool, collisions_ready: bool) -> Wo
     world.insert_resource(PlayerNoClip::default());
     world.insert_resource(RefRegistry::default());
     world.insert_resource(crate::console::ConsoleSessionStore::default());
+    world.insert_resource(crate::viewer::stats::PlayerProgression::default());
     world.spawn((
         Camera3d::default(),
         Transform::from_xyz(2.0, 3.0, 4.0),
@@ -73,6 +74,18 @@ fn fps_transition_round_trips_hierarchy_and_player_reference() {
     assert_eq!(world.resource::<CameraModeState>().player, Some(player));
     assert!(!world.resource::<PlayerNoClip>().0);
     let session = crate::console::ConsoleSessionId::new("ui");
+    let mut progression = world.resource_mut::<crate::viewer::stats::PlayerProgression>();
+    progression
+        .stats
+        .set_special(bevyout_core::actor_state::SpecialAttribute::Strength, 9);
+    progression
+        .stats
+        .set_skill_value(bevyout_core::actor_state::ActorSkill::SmallGuns, 0);
+    progression.stats.level = 3;
+    progression.stats.xp = 700;
+    progression.perks.set_rank(0x31dd3, 2);
+    progression.unspent_skill_points = 12;
+    progression.total_skill_points = 27;
     world
         .resource_mut::<crate::console::ConsoleSessionStore>()
         .select(session.clone(), player);
@@ -83,16 +96,61 @@ fn fps_transition_round_trips_hierarchy_and_player_reference() {
         set_camera_mode(&mut world, CameraMode::Free),
         Ok(CameraMode::Free)
     );
+    assert_eq!(
+        world
+            .resource::<crate::viewer::stats::PlayerProgression>()
+            .stats
+            .level,
+        3
+    );
+    assert_eq!(
+        world
+            .resource::<crate::viewer::stats::PlayerProgression>()
+            .stats
+            .xp,
+        700
+    );
     assert!(!world.entities().contains(player));
     assert!(crate::console::resolve_reference(&world, "player").is_err());
+    assert_eq!(
+        set_camera_mode(&mut world, CameraMode::Fps),
+        Ok(CameraMode::Fps)
+    );
+    let restored = world.resource::<CameraModeState>().player.unwrap();
+    let restored_stats = &world
+        .get::<crate::viewer::stats::ActorStats>(restored)
+        .unwrap()
+        .0;
+    assert_eq!(restored_stats.level, 3);
+    assert_eq!(restored_stats.xp, 700);
+    assert_eq!(
+        restored_stats.effective_special(bevyout_core::actor_state::SpecialAttribute::Strength),
+        9
+    );
+    assert_eq!(
+        restored_stats.skill_value(bevyout_core::actor_state::ActorSkill::SmallGuns),
+        0
+    );
+    assert_eq!(
+        world
+            .resource::<crate::viewer::stats::PlayerProgression>()
+            .perks
+            .rank(0x31dd3),
+        2
+    );
+    let restored_experience = world
+        .get::<crate::viewer::stats::Experience>(restored)
+        .unwrap();
+    assert_eq!(restored_experience.unspent_skill_points, 12);
+    assert_eq!(restored_experience.total_skill_points, 27);
     assert_eq!(
         world
             .resource::<crate::console::ConsoleSessionStore>()
             .selected(&session),
         None
     );
-    let mut cameras = world.query_filtered::<Entity, (With<Camera3d>, Without<ChildOf>)>();
-    assert!(cameras.single(&world).is_ok());
+    let mut cameras = world.query_filtered::<&ChildOf, With<Camera3d>>();
+    assert_eq!(cameras.single(&world).unwrap().parent(), restored);
 }
 
 #[test]

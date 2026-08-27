@@ -5,10 +5,11 @@
 //! `chems` kernels (#317), exactly like `stats.rs` is for the wave-1
 //! sheet: `PlayerRadiation`, `ActiveEffectsList`, `Addictions`, and
 //! `PlayerVitals` attach to the FPS player through `Added<FpsPlayer>`,
-//! while `EffectCatalog` and `RngResource` (the seeded PRNG) are app
+//! restored from `PlayerProgression` so camera-mode despawn cannot drop
+//! them. `EffectCatalog` and `RngResource` (the seeded PRNG) are app
 //! resources loaded from the prepared effect catalog. The stored
-//! `ActorStats` sheet stays authoritative — effective SPECIAL is a read
-//! through `projected_special` (#317), never written back.
+//! `PlayerProgression.stats` sheet stays authoritative — effective SPECIAL
+//! is a read through `projected_special` (#317), never written back.
 //!
 //! Timescale note (see also `bevyout_core::effects`): EFIT durations are
 //! authored in game seconds; this wave ticks real frame milliseconds, so
@@ -34,11 +35,12 @@ use bevyout_core::effects::{
     IngestibleDefinition, active_rad_resistance_bps, evaluate_ingestible_condition,
     projected_derived, projected_special,
 };
+use bevyout_core::perks::PerkProgression;
 use bevyout_core::radiation::{self, RadiationPool};
 
 use super::player::FpsPlayer;
 use super::plugins::ViewerSet;
-use super::stats::{ActorPerks, ActorStats, DerivedAttributes};
+use super::stats::{ActorStats, DerivedAttributes, PlayerProgression};
 use crate::vsa::{EFFECT_CATALOG_REVISION, PreparedEffectCatalog, PreparedSceneManifest};
 
 /// Prepared ingestible definitions keyed by FormID, loaded from
@@ -159,12 +161,19 @@ impl Plugin for EffectsPlugin {
     }
 }
 
-fn attach_effects_to_player(players: Query<Entity, Added<FpsPlayer>>, mut commands: Commands) {
+fn attach_effects_to_player(
+    players: Query<Entity, Added<FpsPlayer>>,
+    progression: Res<PlayerProgression>,
+    mut commands: Commands,
+) {
     for entity in &players {
         commands.entity(entity).insert((
-            PlayerRadiation::default(),
-            ActiveEffectsList::default(),
-            Addictions::default(),
+            PlayerRadiation(progression.radiation),
+            ActiveEffectsList {
+                ledger: progression.effects.clone(),
+                chem_doses_ms: progression.chem_doses_ms.clone(),
+            },
+            Addictions(progression.addictions.clone()),
             ProjectedSpecial::default(),
         ));
     }
@@ -176,6 +185,7 @@ fn attach_effects_to_player(players: Query<Entity, Added<FpsPlayer>>, mut comman
 fn seed_player_vitals(
     mut commands: Commands,
     settings: Option<Res<super::stats::StatsSettings>>,
+    progression: Res<PlayerProgression>,
     players: Query<(Entity, &ActorStats), Added<ActorStats>>,
 ) {
     let Some(settings) = settings else {
@@ -184,7 +194,7 @@ fn seed_player_vitals(
     for (entity, stats) in &players {
         let max = stats.0.derived(&settings.0).max_health;
         commands.entity(entity).insert(PlayerVitals {
-            current_health: max,
+            current_health: progression.current_health.unwrap_or(max).min(max).max(0.0),
         });
     }
 }
@@ -312,7 +322,7 @@ pub(crate) struct PlayerEffectComponents<'a> {
 pub(crate) fn apply_ingestible(
     definition: &IngestibleDefinition,
     stats: &ActorStats,
-    perks: &ActorPerks,
+    perks: &PerkProgression,
     settings: &super::stats::StatsSettings,
     player: PlayerEffectComponents,
     rng: &mut RpgRngState,
@@ -343,7 +353,7 @@ pub(crate) fn apply_ingestible(
     };
     for effect in &definition.effects {
         if let Some(condition) = &effect.condition {
-            match evaluate_ingestible_condition(condition, &perks.0) {
+            match evaluate_ingestible_condition(condition, perks) {
                 IngestibleConditionOutcome::True => {}
                 IngestibleConditionOutcome::False => {
                     outcome.condition_false += 1;
@@ -431,7 +441,7 @@ pub(crate) fn apply_ingestible(
             .iter()
             .filter(|effect| {
                 effect.condition.as_ref().is_none_or(|condition| {
-                    evaluate_ingestible_condition(condition, &perks.0)
+                    evaluate_ingestible_condition(condition, perks)
                         == IngestibleConditionOutcome::True
                 })
             })
