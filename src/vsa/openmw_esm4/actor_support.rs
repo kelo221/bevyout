@@ -106,7 +106,9 @@ pub(crate) fn parse_race(
     // pair as padding; retaining only the documented seven avoids inventing
     // an eighth actor-value modifier.
     let skill_boosts = data[..14]
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .filter_map(|pair| {
             let boost = pair[1] as i8;
             (boost != 0).then_some(RaceSkillBoost {
@@ -167,15 +169,19 @@ pub(crate) fn parse_race(
             "HNAM" => {
                 hair_form_ids = subrecord
                     .data
-                    .chunks_exact(4)
-                    .map(|chunk| resolver.adjust(u32::from_le_bytes(chunk.try_into().unwrap())))
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .map(|chunk| resolver.adjust(u32::from_le_bytes(*chunk)))
                     .collect();
             }
             "ENAM" => {
                 eye_form_ids = subrecord
                     .data
-                    .chunks_exact(4)
-                    .map(|chunk| resolver.adjust(u32::from_le_bytes(chunk.try_into().unwrap())))
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .map(|chunk| resolver.adjust(u32::from_le_bytes(*chunk)))
                     .collect();
             }
             "NAM0" => {
@@ -702,8 +708,10 @@ fn decode_package_idle_collection(
         let complete_len = data.len() / 4 * 4;
         raw_animation_form_ids.extend(
             data[..complete_len]
-                .chunks_exact(4)
-                .map(|chunk| u32::from_le_bytes(chunk.try_into().unwrap())),
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|chunk| u32::from_le_bytes(*chunk)),
         );
         if complete_len != data.len() {
             diagnostics.push(format!(

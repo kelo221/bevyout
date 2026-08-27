@@ -713,6 +713,7 @@ pub(crate) fn set_camera_mode(
                         .with_rotation(Quat::from_rotation_y(yaw)),
                 ))
                 .id();
+            super::stats::restore_player_progression(world, player);
             if let Some(mut transform) = world.get_mut::<Transform>(camera.0) {
                 transform.translation = Vec3::new(0.0, CAMERA_LOCAL_HEIGHT, 0.0);
                 transform.rotation = Quat::from_rotation_x(pitch);

@@ -276,7 +276,7 @@ pub(super) fn process_snapshot_blur(source: &Image) -> Option<Image> {
 
     // Sepia phosphor grade: classic warm-brown sepia matrix over the blurred
     // freeze-frame, with a small lift so dark scenes keep a base CRT glow.
-    for pixel in rgba.bytes.chunks_exact_mut(4) {
+    for pixel in rgba.bytes.as_chunks_mut::<4>().0 {
         let r = f32::from(pixel[0]);
         let g = f32::from(pixel[1]);
         let b = f32::from(pixel[2]);
@@ -437,7 +437,7 @@ fn screenshot_to_rgba8(source: &Image) -> Option<Rgba8Image> {
                 return None;
             }
             let mut bytes = Vec::with_capacity(px * 4);
-            for chunk in data[..px * 4].chunks_exact(4) {
+            for chunk in data[..px * 4].as_chunks::<4>().0 {
                 bytes.extend_from_slice(&[chunk[2], chunk[1], chunk[0], chunk[3]]);
             }
             Some(Rgba8Image {
@@ -452,7 +452,7 @@ fn screenshot_to_rgba8(source: &Image) -> Option<Rgba8Image> {
                 return None;
             }
             let mut bytes = Vec::with_capacity(px * 4);
-            for chunk in data[..px * 8].chunks_exact(8) {
+            for chunk in data[..px * 8].as_chunks::<8>().0 {
                 let r = half_to_f32([chunk[0], chunk[1]]);
                 let g = half_to_f32([chunk[2], chunk[3]]);
                 let b = half_to_f32([chunk[4], chunk[5]]);

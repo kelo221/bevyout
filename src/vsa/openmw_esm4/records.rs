@@ -1,5 +1,7 @@
 //! ESM4 record-specific decoding.
 
+use bevyout_core::stats::GmstValue;
+
 use super::*;
 
 /// `LVLI`/`LVLN`/`LVLC` leveled-list body (issue #74): `LVLD` (chance-none
@@ -592,6 +594,45 @@ pub(crate) fn parse_sound(subs: &[Subrecord], form_id: u32, record_flags: u32) -
     }
 }
 
+/// Decoded `GMST` game setting (M9 wave 1 #308). OpenMW's
+/// `components/esm4/loadgmst.cpp` reads `EDID` (the setting name) plus one
+/// `DATA` value whose wire type follows the EditorID prefix: `f` f32, `i`
+/// i32, `b` u32 boolean, `s` null-terminated string.
+pub(crate) fn parse_gmst(subs: &[Subrecord], form_id: u32, record_flags: u32) -> GmstRecord {
+    let editor_id = sub(subs, "EDID").map(cstring);
+    let value = sub(subs, "DATA").and_then(|data| {
+        let prefix = editor_id.as_deref().and_then(|id| id.chars().next());
+        match prefix {
+            Some('f') => f32_at(data, 0).ok().map(GmstValue::Float),
+            Some('i') => i32_at(data, 0).map(GmstValue::Int),
+            Some('b') => (data.len() == 4)
+                .then(|| GmstValue::Bool(u32_at(data, 0).is_some_and(|value| value != 0))),
+            Some('s') => Some(GmstValue::Str(cstring(data))),
+            _ => None,
+        }
+    });
+    GmstRecord {
+        form_id,
+        record_flags,
+        editor_id,
+        value,
+        ignored_subrecords: ignored_signatures(subs, &["EDID", "DATA"]),
+    }
+}
+
+/// Decoded `AVIF` actor-value metadata (M9 wave 1 #308): `EDID` EditorID,
+/// `FULL` display name, `DESC` description.
+pub(crate) fn parse_avif(subs: &[Subrecord], form_id: u32, record_flags: u32) -> AvifRecord {
+    AvifRecord {
+        form_id,
+        record_flags,
+        editor_id: sub(subs, "EDID").map(cstring),
+        name: sub(subs, "FULL").map(cstring),
+        description: sub(subs, "DESC").map(cstring),
+        ignored_subrecords: ignored_signatures(subs, &["EDID", "FULL", "DESC"]),
+    }
+}
+
 pub(crate) fn parse_sound_parameters(data: &[u8]) -> Option<SoundParameters> {
     if data.len() < 8 {
         return None;
@@ -852,21 +893,19 @@ pub(crate) fn parse_land(
         }
     }
     if let Some(data) = sub(subs, "VNML") {
-        for sample in data.chunks_exact(3).take(count) {
+        for sample in data.as_chunks::<3>().0.iter().take(count) {
             land.normals
                 .push([sample[0] as i8, sample[1] as i8, sample[2] as i8]);
         }
     }
     if let Some(data) = sub(subs, "VCLR") {
-        for sample in data.chunks_exact(3).take(count) {
+        for sample in data.as_chunks::<3>().0.iter().take(count) {
             land.colors.push([sample[0], sample[1], sample[2]]);
         }
     }
     for texture in subs.iter().filter(|texture| texture.signature == "VTEX") {
-        for raw_form_id in texture.data.chunks_exact(4) {
-            let form_id = resolver.adjust(u32::from_le_bytes(
-                raw_form_id.try_into().unwrap_or_default(),
-            ));
+        for raw_form_id in texture.data.as_chunks::<4>().0 {
+            let form_id = resolver.adjust(u32::from_le_bytes(*raw_form_id));
             if form_id != 0 && !land.texture_layers.contains(&form_id) {
                 land.texture_layers.push(form_id);
             }
@@ -900,7 +939,7 @@ pub(crate) fn parse_land(
         } else if texture.signature == "VTXT"
             && let Some(assignment_index) = active_assignment
         {
-            for entry in texture.data.chunks_exact(8) {
+            for entry in texture.data.as_chunks::<8>().0 {
                 let Some(position) = u16_at(entry, 0) else {
                     continue;
                 };
@@ -1346,7 +1385,7 @@ fn append_imad_time_curve(
         return;
     }
     let mut keyframes = Vec::new();
-    for chunk in data.chunks_exact(8) {
+    for chunk in data.as_chunks::<8>().0 {
         let (Some(time), Some(value)) = (f32_at_option(chunk, 0), f32_at_option(chunk, 4)) else {
             continue;
         };
@@ -1399,7 +1438,7 @@ fn append_imad_color_curve(
         ));
         return;
     }
-    for chunk in data.chunks_exact(20) {
+    for chunk in data.as_chunks::<20>().0 {
         let Some(time) = f32_at_option(chunk, 0) else {
             continue;
         };
@@ -1526,7 +1565,7 @@ pub(crate) fn parse_climate(
         .iter()
         .filter(|subrecord| subrecord.signature == "WLST")
         .filter(|subrecord| subrecord.data.len() % 12 == 0)
-        .flat_map(|subrecord| subrecord.data.chunks_exact(12))
+        .flat_map(|subrecord| subrecord.data.as_chunks::<12>().0)
         .filter_map(|entry| {
             Some(ClimateWeatherEntry {
                 weather_form_id: resolver.adjust(u32_at(entry, 0)?),

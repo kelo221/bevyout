@@ -117,7 +117,7 @@ fn miniature_surface_bake_produces_finite_ktx2() {
     let raw = fs::read(&page.raw_path).unwrap();
     assert_eq!(raw.len(), page.width as usize * page.height as usize * 8);
     let mut has_positive_radiance = false;
-    for pixel in raw.chunks_exact(8) {
+    for pixel in raw.as_chunks::<8>().0 {
         let channels = [
             f16::from_bits(u16::from_le_bytes([pixel[0], pixel[1]])).to_f32(),
             f16::from_bits(u16::from_le_bytes([pixel[2], pixel[3]])).to_f32(),

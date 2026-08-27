@@ -430,6 +430,30 @@ pub(crate) struct SoundRecord {
     ignored_subrecords: Vec<String>,
 }
 
+/// Decoded `GMST` game setting (M9 wave 1 #308). The EditorID is the
+/// setting name; the typed `DATA` value follows its prefix.
+#[allow(dead_code)]
+#[derive(Debug, Clone)]
+pub(crate) struct GmstRecord {
+    pub(crate) form_id: u32,
+    pub(crate) record_flags: u32,
+    pub(crate) editor_id: Option<String>,
+    pub(crate) value: Option<bevyout_core::stats::GmstValue>,
+    pub(crate) ignored_subrecords: Vec<String>,
+}
+
+/// Decoded `AVIF` actor-value metadata (M9 wave 1 #308).
+#[allow(dead_code)]
+#[derive(Debug, Clone)]
+pub(crate) struct AvifRecord {
+    pub(crate) form_id: u32,
+    pub(crate) record_flags: u32,
+    pub(crate) editor_id: Option<String>,
+    pub(crate) name: Option<String>,
+    pub(crate) description: Option<String>,
+    pub(crate) ignored_subrecords: Vec<String>,
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct SoundParameters {
     pub(crate) byte_len: u32,
@@ -674,6 +698,11 @@ pub(crate) struct ParsedPlugin {
     pub(crate) sound_references: SharedCatalog<u32, SoundReferenceRecord>,
     pub(crate) acoustic_spaces: SharedCatalog<u32, AcousticSpaceRecord>,
     pub(crate) music: SharedCatalog<u32, MusicRecord>,
+    // M9 wave 1 (#308): game settings and actor-value metadata feed the
+    // content-set-wide GMST catalog; last-loader-wins by FormID like the
+    // other shared catalogs.
+    pub(crate) gmsts: SharedCatalog<u32, GmstRecord>,
+    pub(crate) actor_values: SharedCatalog<u32, AvifRecord>,
     pub(crate) lighting_templates: SharedCatalog<u32, LightingTemplateRecord>,
     pub(crate) climates: SharedCatalog<u32, ClimateRecord>,
     pub(crate) weathers: SharedCatalog<u32, WeatherRecord>,
@@ -962,6 +991,8 @@ impl ParsedContentSet {
             sound_references: state.sound_references.clone(),
             acoustic_spaces: state.acoustic_spaces.clone(),
             music: state.music.clone(),
+            gmsts: state.gmsts.clone(),
+            actor_values: state.actor_values.clone(),
             lighting_templates: state.lighting_templates.clone(),
             climates: state.climates.clone(),
             weathers: state.weathers.clone(),
@@ -1010,6 +1041,8 @@ pub(crate) struct ParsedState {
     sound_references: SharedCatalog<u32, SoundReferenceRecord>,
     acoustic_spaces: SharedCatalog<u32, AcousticSpaceRecord>,
     music: SharedCatalog<u32, MusicRecord>,
+    gmsts: SharedCatalog<u32, GmstRecord>,
+    actor_values: SharedCatalog<u32, AvifRecord>,
     lighting_templates: SharedCatalog<u32, LightingTemplateRecord>,
     climates: SharedCatalog<u32, ClimateRecord>,
     weathers: SharedCatalog<u32, WeatherRecord>,

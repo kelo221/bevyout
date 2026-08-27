@@ -96,6 +96,7 @@ mod ragdoll_lab;
 mod realtime_shadow_policy;
 mod scene;
 mod screen_fx;
+mod stats;
 mod task_pools;
 
 pub use animation_zoo::animation_zoo;

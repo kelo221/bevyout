@@ -61,6 +61,7 @@ fn test_app() -> App {
         },
     ));
     install(&mut app);
+    app.add_plugins(super::super::stats::StatsPlugin);
     player::set_camera_mode(app.world_mut(), player::CameraMode::Fps).unwrap();
     app.update();
     app
@@ -2503,4 +2504,104 @@ fn playidle_is_registered_and_rejects_unknown_actor_deterministically() {
         error_code(&exec(&mut app, "playidle 00000010 00000001")),
         "unknown_actor"
     );
+}
+
+// ---------------------------------------------------------------------
+// M9 wave 1 (#310): player RPG stats console surface.
+// ---------------------------------------------------------------------
+
+#[test]
+fn getav_reads_derived_health_and_sheet_values_with_and_without_prefix() {
+    let mut app = test_app();
+    let output = exec(&mut app, "player.getav health");
+    assert!(output.ok, "player.getav health failed: {:?}", output.error);
+    assert_eq!(output.value["result"].as_f64(), Some(200.0));
+    let bare = exec(&mut app, "getav strength");
+    assert!(bare.ok, "bare getav failed: {:?}", bare.error);
+    assert_eq!(bare.value["result"].as_f64(), Some(5.0));
+    let skill = exec(&mut app, "getav small_guns");
+    assert!(skill.ok, "getav small_guns failed: {:?}", skill.error);
+    assert_eq!(skill.value["result"].as_f64(), Some(15.0));
+}
+
+#[test]
+fn getav_rejects_unknown_and_unsupported_values() {
+    let mut app = test_app();
+    let output = exec(&mut app, "player.getav nosuchvalue");
+    assert!(!output.ok);
+    assert_eq!(error_code(&output), "unknown_actor_value");
+    let derived = exec(&mut app, "player.setav health 500");
+    assert!(!derived.ok);
+    assert_eq!(error_code(&derived), "unsupported_actor_value");
+}
+
+#[test]
+fn modav_and_setav_clamp_special_into_one_to_ten() {
+    let mut app = test_app();
+    let raised = exec(&mut app, "player.modav strength 10");
+    assert!(raised.ok, "modav failed: {:?}", raised.error);
+    assert_eq!(raised.value["result"], 10);
+    let reduced = exec(&mut app, "player.modav strength -30");
+    assert!(reduced.ok);
+    assert_eq!(reduced.value["result"], 1);
+    let set = exec(&mut app, "player.setav strength 8");
+    assert!(set.ok);
+    assert_eq!(set.value["result"], 8);
+}
+
+#[test]
+fn skill_setav_and_modav_cover_the_full_effective_range() {
+    let mut app = test_app();
+    let awarded = exec(&mut app, "player.rewardxp 200");
+    assert!(awarded.ok);
+    let set_low = exec(&mut app, "player.setav small_guns 0");
+    assert_eq!(set_low.value["result"], 0);
+    assert_eq!(
+        exec(&mut app, "player.getav small_guns").value["result"].as_f64(),
+        Some(0.0)
+    );
+    assert_eq!(
+        exec(&mut app, "player.modav small_guns 20").value["result"],
+        20
+    );
+    assert_eq!(
+        exec(&mut app, "player.setav small_guns 200").value["result"],
+        100
+    );
+    assert_eq!(
+        exec(&mut app, "player.modav small_guns -500").value["result"],
+        0
+    );
+    let progression = app.world().resource::<super::stats::PlayerProgression>();
+    assert_eq!(progression.unspent_skill_points, 15);
+    assert_eq!(progression.total_skill_points, 15);
+}
+
+#[test]
+fn rewardxp_crosses_the_level_threshold_and_updates_derived_health() {
+    let mut app = test_app();
+    let output = exec(&mut app, "player.rewardxp 200");
+    assert!(output.ok, "rewardxp failed: {:?}", output.error);
+    assert_eq!(output.value["level"], 2);
+    assert_eq!(output.value["levels_gained"], 1);
+    assert_eq!(output.value["skill_points_gained"], 15);
+    // Derived max health is computed synchronously: 100 + 5*20 + 1*10.
+    let health = exec(&mut app, "player.getav health");
+    assert_eq!(health.value["result"].as_f64(), Some(210.0));
+}
+
+#[test]
+fn advlevel_advances_one_level_and_respects_the_cap() {
+    let mut app = test_app();
+    let output = exec(&mut app, "player.advlevel");
+    assert!(output.ok, "advlevel failed: {:?}", output.error);
+    assert_eq!(output.value["level"], 2);
+    assert_eq!(output.value["skill_points_gained"], 15);
+    // Dump enough XP to hit the default cap, then expect rejection.
+    let capped = exec(&mut app, "player.rewardxp 999999");
+    assert!(capped.ok);
+    assert_eq!(capped.value["level"], 30);
+    let beyond = exec(&mut app, "player.advlevel");
+    assert!(!beyond.ok);
+    assert_eq!(error_code(&beyond), "at_level_cap");
 }

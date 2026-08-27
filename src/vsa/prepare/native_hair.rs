@@ -287,7 +287,7 @@ fn recompute_hair_basis(mesh: &mut SceneMesh) {
     let mut normals = vec![Vec3::ZERO; vertex_count];
     let mut tangents = vec![Vec3::ZERO; vertex_count];
     let mut bitangents = vec![Vec3::ZERO; vertex_count];
-    for triangle in mesh.indices.chunks_exact(3) {
+    for triangle in mesh.indices.as_chunks::<3>().0 {
         let [i0, i1, i2] = [
             usize::from(triangle[0]),
             usize::from(triangle[1]),

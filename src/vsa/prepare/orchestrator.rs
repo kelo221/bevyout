@@ -1688,6 +1688,25 @@ fn prepare_cell(
         message: package_catalog_summary.clone(),
     });
     output.push(package_catalog_summary);
+    // M9 wave 1 (#308): content-set-wide GMST/AVIF catalog, the same
+    // fingerprint-keyed deterministic-path contract as packages.ron above.
+    let gmst_catalog_inputs = build_gmst_catalog_inputs(&parsed);
+    let gmst_catalog = build_gmst_catalog(&gmst_catalog_inputs, &source_fingerprint);
+    let (gmst_catalog_path_relative, _gmst_catalog_hash) =
+        write_gmst_catalog(&cache_dir, &gmst_catalog)?;
+    let gmst_catalog_summary = format!(
+        "gmst catalog: {} settings, {} consumed, {} undecoded, {} actor values -> {}",
+        gmst_catalog.counters.total,
+        gmst_catalog.counters.consumed,
+        gmst_catalog.counters.undecoded,
+        gmst_catalog.counters.actor_values,
+        gmst_catalog_path_relative
+    );
+    diagnostics.push(Diagnostic {
+        severity: "info".into(),
+        message: gmst_catalog_summary.clone(),
+    });
+    output.push(gmst_catalog_summary);
     // Per-cell artifact next to `scene.ron` -- the actor catalog embeds this
     // cell's ACHR/ACRE placements, so unlike the content-set-wide item/
     // recipe catalogs it must not share one fingerprint-keyed file across
@@ -3035,6 +3054,43 @@ fn actor_catalog_package_lists(catalog: &PreparedActorCatalog) -> Vec<Vec<u32>> 
 // ---------------------------------------------------------------------
 
 /// Assembles the pure `PackageCatalogInputs` for this prepare pass: every
+/// Boundary conversion for the content-set-wide GMST/AVIF catalog (M9 wave 1
+/// #308): typed `GMST` values keyed by setting name plus `AVIF` metadata.
+/// Both lists are sorted for deterministic serialization; the shared catalog
+/// is keyed by FormID so patch-plugin overrides already collapsed
+/// last-loader-wins during parsing.
+fn build_gmst_catalog_inputs(parsed: &ParsedPlugin) -> GmstCatalogInputs {
+    let mut settings_pairs = Vec::new();
+    let mut undecoded = 0usize;
+    for record in parsed.gmsts.values() {
+        let Some(editor_id) = record.editor_id.as_deref().filter(|id| !id.is_empty()) else {
+            undecoded += 1;
+            continue;
+        };
+        match &record.value {
+            Some(value) => settings_pairs.push((editor_id.to_string(), value.clone())),
+            None => undecoded += 1,
+        }
+    }
+    settings_pairs.sort_by(|a, b| a.0.cmp(&b.0));
+    let mut actor_values = parsed
+        .actor_values
+        .values()
+        .map(|record| PreparedActorValueInfo {
+            form_id: record.form_id,
+            editor_id: record.editor_id.clone().unwrap_or_default(),
+            name: record.name.clone(),
+            description: record.description.clone(),
+        })
+        .collect::<Vec<_>>();
+    actor_values.sort_by_key(|entry| entry.form_id);
+    GmstCatalogInputs {
+        settings_pairs,
+        actor_values,
+        undecoded,
+    }
+}
+
 /// decoded `PACK` record (content-set-wide, like `parsed.recipes`/
 /// `parsed.bases`, not scoped to one cell) plus every FormID this pass
 /// decoded (bases and placed references), used only to diagnose an

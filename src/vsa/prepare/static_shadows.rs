@@ -415,16 +415,8 @@ fn collect_node_triangles(
                 || (0..positions.len() as u32).collect::<Vec<_>>(),
                 |indices| indices.into_u32().collect::<Vec<_>>(),
             );
-            for indices in indices.chunks_exact(3) {
-                let Some((&a, rest)) = indices.split_first() else {
-                    continue;
-                };
-                let Some((&b, rest)) = rest.split_first() else {
-                    continue;
-                };
-                let Some(&c) = rest.first() else {
-                    continue;
-                };
+            for indices in indices.as_chunks::<3>().0 {
+                let [a, b, c] = *indices;
                 let triangle = [
                     *positions
                         .get(a as usize)

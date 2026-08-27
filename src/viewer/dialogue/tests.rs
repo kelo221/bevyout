@@ -1,7 +1,6 @@
 use bevy::asset::AssetLoader;
 use bevy::audio::PlaybackMode;
 use bevy::ecs::system::SystemState;
-use bevy::prelude::*;
 use bevy::state::app::StatesPlugin;
 
 use bevyout_core::dialogue::{

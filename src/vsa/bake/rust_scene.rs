@@ -492,7 +492,7 @@ fn local_thickness_map(fragment: &ComposedPrimitive) -> Option<RgbaImage> {
     let resolution = usize::try_from(LOCAL_THICKNESS_RESOLUTION).ok()?;
     let mut samples = vec![None; resolution * resolution];
     let mut occupied = 0;
-    for (triangle, indices) in fragment.indices.chunks_exact(3).enumerate() {
+    for (triangle, indices) in fragment.indices.as_chunks::<3>().0.iter().enumerate() {
         let [a, b, c] = [
             indices[0] as usize,
             indices[1] as usize,
@@ -569,7 +569,7 @@ fn local_thickness_map(fragment: &ComposedPrimitive) -> Option<RgbaImage> {
             let origin = sample.position + sample.normal * 0.0001;
             let direction = -sample.normal;
             let mut closest = None;
-            for (triangle, indices) in fragment.indices.chunks_exact(3).enumerate() {
+            for (triangle, indices) in fragment.indices.as_chunks::<3>().0.iter().enumerate() {
                 if triangle == sample.triangle {
                     continue;
                 }
@@ -1395,7 +1395,7 @@ fn generated_normals(
         |values| values.into_u32().collect(),
     );
     let mut normals = vec![Vec3::ZERO; positions.len()];
-    for triangle in indices.chunks_exact(3) {
+    for triangle in indices.as_chunks::<3>().0 {
         let [a, b, c] = [
             triangle[0] as usize,
             triangle[1] as usize,
@@ -1761,7 +1761,7 @@ fn collect_boundary_edges(
         return;
     };
     let mut edge_occurrences = HashMap::<(u32, u32), Option<(u32, u32, Vec3)>>::new();
-    for triangle in fragment.indices.chunks_exact(3) {
+    for triangle in fragment.indices.as_chunks::<3>().0 {
         let [a, b, c] = [triangle[0], triangle[1], triangle[2]];
         let [a_index, b_index, c_index] = [a as usize, b as usize, c as usize];
         if a_index >= fragment.positions.len()
