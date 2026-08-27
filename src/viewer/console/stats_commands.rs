@@ -2,14 +2,14 @@
 //!
 //! All five commands are player-scoped like `additem` (issue #84): the
 //! Bethesda `player.` prefix is accepted via `.reference_callable(false)`
-//! but the target is always the FPS player's `ActorStats`. NPC actor values
-//! keep their existing surface (`actorstate`/`setactorvalue`) because NPCs
-//! resolve through persisted save state, not this sheet.
+//! but the target is always the persistent player progression resource. NPC
+//! actor values keep their existing surface (`actorstate`/`setactorvalue`)
+//! because NPCs resolve through persisted save state, not this sheet.
 
 use bevyout_core::actor_state::ActorValue;
 use bevyout_core::stats as core_stats;
 
-use super::stats::{ActorStats, Experience, StatsSettings};
+use super::stats::{PlayerProgression, StatsSettings};
 use super::*;
 
 pub(super) struct StatsCommandProvider;
@@ -63,28 +63,16 @@ impl ConsoleCommandProvider for StatsCommandProvider {
     }
 }
 
-/// Resolves the stats-carrying player entity: the resolved reference when it
-/// carries `ActorStats`, otherwise the single spawned FPS player.
-pub(super) fn player_stats_entity(
-    world: &mut World,
-    invocation: &ConsoleInvocation,
-) -> Result<Entity, ConsoleError> {
-    if let Some(entity) = invocation.target
-        && world.get::<ActorStats>(entity).is_some()
-    {
-        return Ok(entity);
-    }
-    let mut query = world.query_filtered::<Entity, With<player::FpsPlayer>>();
-    let entity = query
-        .single(world)
-        .map_err(|_| ConsoleError::new("player_unavailable", "the FPS player does not exist"))?;
-    if world.get::<ActorStats>(entity).is_none() {
-        return Err(ConsoleError::new(
-            "player_unavailable",
-            "the FPS player has no stats sheet",
-        ));
-    }
-    Ok(entity)
+fn player_progression(world: &World) -> Result<&PlayerProgression, ConsoleError> {
+    world
+        .get_resource::<PlayerProgression>()
+        .ok_or_else(|| ConsoleError::new("player_unavailable", "player progression is unavailable"))
+}
+
+fn player_progression_mut(world: &mut World) -> Result<Mut<'_, PlayerProgression>, ConsoleError> {
+    world
+        .get_resource_mut::<PlayerProgression>()
+        .ok_or_else(|| ConsoleError::new("player_unavailable", "player progression is unavailable"))
 }
 
 fn parse_actor_value(raw: &str) -> Result<ActorValue, ConsoleError> {
@@ -100,15 +88,13 @@ fn parse_actor_value(raw: &str) -> Result<ActorValue, ConsoleError> {
 /// synchronously from the sheet plus active settings (not the possibly
 /// one-frame-stale `DerivedAttributes` component) so console batches read
 /// exactly what earlier commands wrote.
-fn read_actor_value(world: &World, entity: Entity, value: ActorValue) -> Result<f64, ConsoleError> {
-    let stats = world.get::<ActorStats>(entity).ok_or_else(|| {
-        ConsoleError::new("player_unavailable", "the FPS player has no stats sheet")
-    })?;
+fn read_actor_value(world: &World, value: ActorValue) -> Result<f64, ConsoleError> {
+    let progression = player_progression(world)?;
     let settings = world.resource::<StatsSettings>().0;
     let resolved = match value {
-        ActorValue::Health => stats.0.derived(&settings).max_health,
-        ActorValue::Special(attribute) => f32::from(stats.0.effective_special(attribute)),
-        ActorValue::Skill(skill) => f32::from(stats.0.skill_value(skill)),
+        ActorValue::Health => progression.stats.derived(&settings).max_health,
+        ActorValue::Special(attribute) => f32::from(progression.stats.effective_special(attribute)),
+        ActorValue::Skill(skill) => f32::from(progression.stats.skill_value(skill)),
         other => {
             return Err(ConsoleError::new(
                 "unsupported_actor_value",
@@ -130,8 +116,7 @@ pub(super) fn get_actor_value(
         ));
     }
     let value = parse_actor_value(&invocation.args[0])?;
-    let entity = player_stats_entity(world, invocation)?;
-    let resolved = read_actor_value(world, entity, value)?;
+    let resolved = read_actor_value(world, value)?;
     Ok(ConsoleCommandResult::new(
         json!({ "value": value.label(), "result": resolved }),
         vec![format!("{} = {}", value.label(), resolved)],
@@ -159,27 +144,21 @@ pub(super) fn set_actor_value(
     }
     let value = parse_actor_value(&invocation.args[0])?;
     let amount = parse_amount(&invocation.args[1], "setav")?;
-    let entity = player_stats_entity(world, invocation)?;
-    let mut entity_mut = world
-        .get_entity_mut(entity)
-        .map_err(|_| ConsoleError::new("player_unavailable", "the FPS player does not exist"))?;
-    let mut stats = entity_mut
-        .get_mut::<ActorStats>()
-        .expect("player_stats_entity verified the sheet");
+    let mut progression = player_progression_mut(world)?;
     let applied = match value {
         ActorValue::Special(attribute) => {
             let clamped = amount.clamp(
                 i16::from(core_stats::SPECIAL_MIN),
                 i16::from(core_stats::SPECIAL_MAX),
             );
-            i16::from(stats.0.set_special(attribute, clamped as u8))
+            i16::from(progression.stats.set_special(attribute, clamped as u8))
         }
         ActorValue::Skill(skill) => {
             let target = amount.clamp(
                 i16::from(core_stats::SKILL_MIN),
                 i16::from(core_stats::SKILL_MAX),
             );
-            i16::from(stats.0.set_skill_value(skill, target))
+            i16::from(progression.stats.set_skill_value(skill, target))
         }
         ActorValue::Health => {
             return Err(ConsoleError::new(
@@ -212,16 +191,12 @@ pub(super) fn mod_actor_value(
     }
     let value = parse_actor_value(&invocation.args[0])?;
     let delta = parse_amount(&invocation.args[1], "modav")?;
-    let entity = player_stats_entity(world, invocation)?;
-    let mut entity_mut = world
-        .get_entity_mut(entity)
-        .map_err(|_| ConsoleError::new("player_unavailable", "the FPS player does not exist"))?;
-    let mut stats = entity_mut
-        .get_mut::<ActorStats>()
-        .expect("player_stats_entity verified the sheet");
+    let mut progression = player_progression_mut(world)?;
     let applied = match value {
-        ActorValue::Special(attribute) => i16::from(stats.0.mod_special(attribute, delta)),
-        ActorValue::Skill(skill) => i16::from(stats.0.mod_skill_value(skill, delta)),
+        ActorValue::Special(attribute) => {
+            i16::from(progression.stats.mod_special(attribute, delta))
+        }
+        ActorValue::Skill(skill) => i16::from(progression.stats.mod_skill_value(skill, delta)),
         ActorValue::Health => {
             return Err(ConsoleError::new(
                 "unsupported_actor_value",
@@ -251,22 +226,17 @@ pub(super) fn advance_level(
             "advlevel takes no arguments",
         ));
     }
-    let entity = player_stats_entity(world, invocation)?;
+    let progression = player_progression(world)?;
     let settings = world.resource::<StatsSettings>().0;
-    let amount = {
-        let stats = world
-            .get::<ActorStats>(entity)
-            .expect("player_stats_entity verified the sheet");
-        if stats.0.level >= settings.max_player_level {
-            return Err(ConsoleError::new(
-                "at_level_cap",
-                format!("player is at the level cap {}", settings.max_player_level),
-            ));
-        }
-        core_stats::xp_threshold(stats.0.level.saturating_add(1), &settings)
-            .saturating_sub(stats.0.xp)
-    };
-    apply_award(world, entity, amount, "advlevel")
+    if progression.stats.level >= settings.max_player_level {
+        return Err(ConsoleError::new(
+            "at_level_cap",
+            format!("player is at the level cap {}", settings.max_player_level),
+        ));
+    }
+    let amount = core_stats::xp_threshold(progression.stats.level.saturating_add(1), &settings)
+        .saturating_sub(progression.stats.xp);
+    apply_award(world, amount, "advlevel")
 }
 
 pub(super) fn reward_xp(
@@ -282,50 +252,39 @@ pub(super) fn reward_xp(
     let amount = invocation.args[0].parse::<u32>().map_err(|_| {
         ConsoleError::new("bad_type", "rewardxp expects a non-negative whole number")
     })?;
-    let entity = player_stats_entity(world, invocation)?;
-    apply_award(world, entity, amount, "rewardxp")
+    apply_award(world, amount, "rewardxp")
 }
 
 /// Applies the award through the kernel and folds the granted skill points
-/// into the `Experience` projection (the recalc system owns the other
-/// fields and never touches these two). M9 wave 2 (#314): the player's
+/// into the persistent progression resource. M9 wave 2 (#314): the player's
 /// active perk modifiers scale the awarded XP (Swift Learner) and add
 /// bonus skill points per level gained (Educated).
 fn apply_award(
     world: &mut World,
-    entity: Entity,
     amount: u32,
     command: &str,
 ) -> Result<ConsoleCommandResult, ConsoleError> {
     let settings = world.resource::<StatsSettings>().0;
-    let modifiers = player_perk_modifiers(world, entity);
-    let outcome = {
-        let mut entity_mut = world.get_entity_mut(entity).map_err(|_| {
-            ConsoleError::new("player_unavailable", "the FPS player does not exist")
-        })?;
-        let mut stats = entity_mut
-            .get_mut::<ActorStats>()
-            .expect("player_stats_entity verified the sheet");
-        core_stats::award_xp(
-            &mut stats.0,
-            amount,
-            modifiers.xp_award_multiplier_bps,
-            &settings,
-        )
-    };
+    let modifiers = player_perk_modifiers(world);
+    let mut progression = player_progression_mut(world)?;
+    let outcome = core_stats::award_xp(
+        &mut progression.stats,
+        amount,
+        modifiers.xp_award_multiplier_bps,
+        &settings,
+    );
     // The kernel's per-level points exclude the perk bonus by design
     // (#313 keeps exactly one parameter per kernel), so the adapter adds
     // `bonus_skill_points` for every level the award crossed.
     let bonus_points =
         u16::from(outcome.levels_gained).saturating_mul(modifiers.bonus_skill_points);
     let skill_points_gained = outcome.skill_points_gained.saturating_add(bonus_points);
-    if skill_points_gained > 0
-        && let Ok(mut entity) = world.get_entity_mut(entity)
-        && let Some(mut experience) = entity.get_mut::<Experience>()
-    {
-        experience.unspent_skill_points += skill_points_gained;
-        experience.total_skill_points += skill_points_gained;
-    }
+    progression.unspent_skill_points = progression
+        .unspent_skill_points
+        .saturating_add(skill_points_gained);
+    progression.total_skill_points = progression
+        .total_skill_points
+        .saturating_add(skill_points_gained);
     Ok(ConsoleCommandResult::new(
         json!({
             "command": command,
@@ -344,17 +303,14 @@ fn apply_award(
 }
 
 /// Projects the player's owned perks onto the active leveling modifiers;
-/// players without the perk component (or an empty catalog) stay neutral.
-pub(super) fn player_perk_modifiers(
-    world: &World,
-    entity: Entity,
-) -> bevyout_core::perks::PerkModifiers {
+/// an empty catalog stays neutral.
+pub(super) fn player_perk_modifiers(world: &World) -> bevyout_core::perks::PerkModifiers {
     let catalog = world
         .get_resource::<super::stats::PerkCatalog>()
         .map(|catalog| catalog.0.clone())
         .unwrap_or_default();
-    let Some(perks) = world.get::<super::stats::ActorPerks>(entity) else {
+    let Some(progression) = world.get_resource::<PlayerProgression>() else {
         return bevyout_core::perks::PerkModifiers::default();
     };
-    bevyout_core::perks::active_perk_modifiers(&perks.0, &catalog)
+    bevyout_core::perks::active_perk_modifiers(&progression.perks, &catalog)
 }

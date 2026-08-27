@@ -2130,6 +2130,26 @@ fn gmst_decodes_typed_values_by_editor_id_prefix() {
         Some(bevyout_core::stats::GmstValue::Bool(true))
     );
 
+    let short_boolean = parse_gmst(
+        &[
+            direct_subrecord("EDID", b"bActorWithdrawn ".to_vec()),
+            direct_subrecord("DATA", vec![1, 0, 0]),
+        ],
+        0x2d,
+        0,
+    );
+    assert_eq!(short_boolean.value, None);
+
+    let oversized_boolean = parse_gmst(
+        &[
+            direct_subrecord("EDID", b"bActorWithdrawn ".to_vec()),
+            direct_subrecord("DATA", vec![1, 0, 0, 0, 0]),
+        ],
+        0x2e,
+        0,
+    );
+    assert_eq!(oversized_boolean.value, None);
+
     let text = parse_gmst(
         &[
             direct_subrecord("EDID", b"sDefaultPlayerName\0".to_vec()),

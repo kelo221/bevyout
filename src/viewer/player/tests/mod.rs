@@ -74,35 +74,41 @@ fn fps_transition_round_trips_hierarchy_and_player_reference() {
     assert_eq!(world.resource::<CameraModeState>().player, Some(player));
     assert!(!world.resource::<PlayerNoClip>().0);
     let session = crate::console::ConsoleSessionId::new("ui");
+    let mut progression = world.resource_mut::<crate::viewer::stats::PlayerProgression>();
+    progression
+        .stats
+        .set_special(bevyout_core::actor_state::SpecialAttribute::Strength, 9);
+    progression
+        .stats
+        .set_skill_value(bevyout_core::actor_state::ActorSkill::SmallGuns, 0);
+    progression.stats.level = 3;
+    progression.stats.xp = 700;
+    progression.perks.set_rank(0x31dd3, 2);
+    progression.unspent_skill_points = 12;
+    progression.total_skill_points = 27;
     world
         .resource_mut::<crate::console::ConsoleSessionStore>()
         .select(session.clone(), player);
     let mut cameras = world.query_filtered::<&ChildOf, With<Camera3d>>();
     assert_eq!(cameras.single(&world).unwrap().parent(), player);
 
-    world
-        .entity_mut(player)
-        .insert(crate::viewer::stats::ActorStats({
-            let mut stats = bevyout_core::stats::CharacterSheet::default();
-            stats.set_special(bevyout_core::actor_state::SpecialAttribute::Strength, 9);
-            stats.set_skill_value(bevyout_core::actor_state::ActorSkill::SmallGuns, 0);
-            stats.xp = 700;
-            stats.level = 3;
-            stats
-        }))
-        .insert(crate::viewer::stats::ActorPerks({
-            let mut perks = bevyout_core::perks::PerkProgression::default();
-            perks.set_rank(0x31dd3, 2);
-            perks
-        }))
-        .insert(crate::viewer::stats::Experience {
-            unspent_skill_points: 12,
-            total_skill_points: 27,
-            ..default()
-        });
     assert_eq!(
         set_camera_mode(&mut world, CameraMode::Free),
         Ok(CameraMode::Free)
+    );
+    assert_eq!(
+        world
+            .resource::<crate::viewer::stats::PlayerProgression>()
+            .stats
+            .level,
+        3
+    );
+    assert_eq!(
+        world
+            .resource::<crate::viewer::stats::PlayerProgression>()
+            .stats
+            .xp,
+        700
     );
     assert!(!world.entities().contains(player));
     assert!(crate::console::resolve_reference(&world, "player").is_err());
@@ -127,9 +133,8 @@ fn fps_transition_round_trips_hierarchy_and_player_reference() {
     );
     assert_eq!(
         world
-            .get::<crate::viewer::stats::ActorPerks>(restored)
-            .unwrap()
-            .0
+            .resource::<crate::viewer::stats::PlayerProgression>()
+            .perks
             .rank(0x31dd3),
         2
     );

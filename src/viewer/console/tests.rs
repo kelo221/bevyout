@@ -2552,22 +2552,29 @@ fn modav_and_setav_clamp_special_into_one_to_ten() {
 #[test]
 fn skill_setav_and_modav_cover_the_full_effective_range() {
     let mut app = test_app();
-    let lowered = exec(&mut app, "player.setav small_guns 0");
-    assert!(lowered.ok, "setav failed: {:?}", lowered.error);
-    assert_eq!(lowered.value["result"].as_f64(), Some(0.0));
+    let awarded = exec(&mut app, "player.rewardxp 200");
+    assert!(awarded.ok);
+    let set_low = exec(&mut app, "player.setav small_guns 0");
+    assert_eq!(set_low.value["result"], 0);
     assert_eq!(
         exec(&mut app, "player.getav small_guns").value["result"].as_f64(),
         Some(0.0)
     );
-    let raised = exec(&mut app, "player.modav small_guns 20");
-    assert!(raised.ok, "modav failed: {:?}", raised.error);
-    assert_eq!(raised.value["result"].as_f64(), Some(20.0));
-    let clamped = exec(&mut app, "player.setav small_guns 200");
-    assert!(clamped.ok, "setav failed: {:?}", clamped.error);
-    assert_eq!(clamped.value["result"].as_f64(), Some(100.0));
-    let reduced = exec(&mut app, "player.modav small_guns -500");
-    assert!(reduced.ok, "modav failed: {:?}", reduced.error);
-    assert_eq!(reduced.value["result"].as_f64(), Some(0.0));
+    assert_eq!(
+        exec(&mut app, "player.modav small_guns 20").value["result"],
+        20
+    );
+    assert_eq!(
+        exec(&mut app, "player.setav small_guns 200").value["result"],
+        100
+    );
+    assert_eq!(
+        exec(&mut app, "player.modav small_guns -500").value["result"],
+        0
+    );
+    let progression = app.world().resource::<super::stats::PlayerProgression>();
+    assert_eq!(progression.unspent_skill_points, 15);
+    assert_eq!(progression.total_skill_points, 15);
 }
 
 #[test]

@@ -754,7 +754,6 @@ pub(crate) fn set_camera_mode(
                 fly.yaw = yaw;
                 fly.pitch = pitch;
             }
-            super::stats::capture_player_progression(world, player);
             world.resource_mut::<RefRegistry>().clear_player(player);
             world
                 .resource_mut::<ConsoleSessionStore>()

@@ -605,7 +605,8 @@ pub(crate) fn parse_gmst(subs: &[Subrecord], form_id: u32, record_flags: u32) ->
         match prefix {
             Some('f') => f32_at(data, 0).ok().map(GmstValue::Float),
             Some('i') => i32_at(data, 0).map(GmstValue::Int),
-            Some('b') => Some(GmstValue::Bool(u32_at(data, 0).unwrap_or(0) != 0)),
+            Some('b') => (data.len() == 4)
+                .then(|| GmstValue::Bool(u32_at(data, 0).is_some_and(|value| value != 0))),
             Some('s') => Some(GmstValue::Str(cstring(data))),
             _ => None,
         }
