@@ -256,33 +256,61 @@ pub(super) fn reward_xp(
 }
 
 /// Applies the award through the kernel and folds the granted skill points
-/// into the `Experience` projection (the recalc system owns the other
-/// fields and never touches these two).
+/// into the persistent progression resource. M9 wave 2 (#314): the player's
+/// active perk modifiers scale the awarded XP (Swift Learner) and add
+/// bonus skill points per level gained (Educated).
 fn apply_award(
     world: &mut World,
     amount: u32,
     command: &str,
 ) -> Result<ConsoleCommandResult, ConsoleError> {
     let settings = world.resource::<StatsSettings>().0;
+    let modifiers = player_perk_modifiers(world);
     let mut progression = player_progression_mut(world)?;
-    let outcome = core_stats::award_xp(&mut progression.stats, amount, &settings);
+    let outcome = core_stats::award_xp(
+        &mut progression.stats,
+        amount,
+        modifiers.xp_award_multiplier_bps,
+        &settings,
+    );
+    // The kernel's per-level points exclude the perk bonus by design
+    // (#313 keeps exactly one parameter per kernel), so the adapter adds
+    // `bonus_skill_points` for every level the award crossed.
+    let bonus_points =
+        u16::from(outcome.levels_gained).saturating_mul(modifiers.bonus_skill_points);
+    let skill_points_gained = outcome.skill_points_gained.saturating_add(bonus_points);
     progression.unspent_skill_points = progression
         .unspent_skill_points
-        .saturating_add(outcome.skill_points_gained);
+        .saturating_add(skill_points_gained);
     progression.total_skill_points = progression
         .total_skill_points
-        .saturating_add(outcome.skill_points_gained);
+        .saturating_add(skill_points_gained);
     Ok(ConsoleCommandResult::new(
         json!({
             "command": command,
             "xp": outcome.xp,
             "level": outcome.level,
             "levels_gained": outcome.levels_gained,
-            "skill_points_gained": outcome.skill_points_gained,
+            "skill_points_gained": skill_points_gained,
+            "xp_multiplier_bps": modifiers.xp_award_multiplier_bps,
+            "bonus_skill_points_per_level": modifiers.bonus_skill_points,
         }),
         vec![format!(
             "{command}: level {} ({} XP, +{} skill points)",
-            outcome.level, outcome.xp, outcome.skill_points_gained
+            outcome.level, outcome.xp, skill_points_gained
         )],
     ))
+}
+
+/// Projects the player's owned perks onto the active leveling modifiers;
+/// an empty catalog stays neutral.
+pub(super) fn player_perk_modifiers(world: &World) -> bevyout_core::perks::PerkModifiers {
+    let catalog = world
+        .get_resource::<super::stats::PerkCatalog>()
+        .map(|catalog| catalog.0.clone())
+        .unwrap_or_default();
+    let Some(progression) = world.get_resource::<PlayerProgression>() else {
+        return bevyout_core::perks::PerkModifiers::default();
+    };
+    bevyout_core::perks::active_perk_modifiers(&progression.perks, &catalog)
 }

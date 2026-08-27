@@ -35,6 +35,7 @@ mod nav_doors;
 mod nav_graph;
 mod navmesh;
 mod package_catalog;
+mod perk_catalog;
 mod placements;
 mod plugins;
 mod recipes;
@@ -74,6 +75,7 @@ pub(crate) use nav_doors::*;
 pub(crate) use nav_graph::*;
 pub(crate) use navmesh::*;
 pub(crate) use package_catalog::*;
+pub(crate) use perk_catalog::*;
 pub(crate) use placements::*;
 pub(crate) use plugins::*;
 pub(crate) use recipes::*;
@@ -116,7 +118,8 @@ use super::manifest::{
     REFLECTION_PROBE_REVISION, STATIC_POINT_SHADOW_REVISION,
 };
 use super::openmw_esm4::{
-    ClimateRecord, LightingData, OpenMwItemStats, ParsedContentSet, WeatherRecord, WorldspaceRecord,
+    ClimateRecord, LightingData, OpenMwItemStats, ParsedContentSet, PerkConditionWire,
+    PerkEntryWire, WeatherRecord, WorldspaceRecord,
 };
 use super::paths::{
     FO3_SCALE, absolutize, fingerprint, is_editor_marker, is_non_rendering_effect,

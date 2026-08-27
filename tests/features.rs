@@ -56,6 +56,12 @@ mod actor_state {
 mod stats {
     pub use bevyout_core::stats::*;
 }
+// M9 wave 2/#313 pure perk eligibility and active-modifier kernels live in
+// the same engine-independent core boundary.
+#[allow(dead_code, unused_imports)]
+mod perks {
+    pub use bevyout_core::perks::*;
+}
 // M6 wave 3's actor-residency policy is pure and dependency-light. Include
 // the production seam verbatim so the executable feature coverage exercises
 // the same canonical identity and handoff decisions as the viewer.
@@ -1276,6 +1282,12 @@ struct BevyoutWorld {
     rpg_settings: stats::GmstSettings,
     rpg_last_award: Option<stats::AwardXpOutcome>,
     rpg_clamped_resistance_bps: u32,
+
+    // -- rpg_perks.feature (M9 W2 #313 pure perk kernels) --
+    rpg_perk_defs: std::collections::BTreeMap<u32, perks::PerkDefinition>,
+    rpg_perk_progression: perks::PerkProgression,
+    rpg_perk_modifiers: perks::PerkModifiers,
+    rpg_perk_eligibility: Option<(u32, perks::PerkEligibility)>,
 }
 
 fn synthetic_dialogue_source() -> dialogue::DialogueSource {
@@ -17985,6 +17997,11 @@ async fn given_rpg_player_sheet(world: &mut BevyoutWorld, luck: String) {
     world.rpg_sheet = stats::CharacterSheet::default();
     world.rpg_settings = stats::GmstSettings::default();
     world.rpg_last_award = None;
+    // Also starts every rpg_perks scenario from a clean perk state.
+    world.rpg_perk_defs = std::collections::BTreeMap::new();
+    world.rpg_perk_progression = perks::PerkProgression::default();
+    world.rpg_perk_modifiers = perks::PerkModifiers::default();
+    world.rpg_perk_eligibility = None;
     world.rpg_sheet.set_special(
         actor_state::SpecialAttribute::Luck,
         luck.parse::<u8>().unwrap(),
@@ -18019,6 +18036,7 @@ async fn when_rpg_award_xp(world: &mut BevyoutWorld, amount: String) {
     let outcome = stats::award_xp(
         &mut world.rpg_sheet,
         amount.parse::<u32>().unwrap(),
+        perks::NEUTRAL_XP_MULTIPLIER_BPS,
         &world.rpg_settings,
     );
     world.rpg_last_award = Some(outcome);
@@ -18167,5 +18185,198 @@ async fn then_rpg_base_poison_resistance(
     assert_eq!(
         stats::base_poison_rad_resistance_bps(endurance.parse::<u8>().unwrap()),
         expected.parse::<u32>().unwrap()
+    );
+}
+
+// ---------------------------------------------------------------------
+// rpg_perks.feature -- M9 W2 pure perk eligibility and modifier kernels.
+// ---------------------------------------------------------------------
+
+/// Parses an 8-digit hex FormID step argument.
+fn perk_form_id(raw: &str) -> u32 {
+    u32::from_str_radix(raw, 16).expect("step provides 8-digit hex form ids")
+}
+
+/// Creates the perk definition if absent, or returns it for amendment.
+fn perk_def_or_create(
+    world: &mut BevyoutWorld,
+    form_id: u32,
+    min_level: u8,
+    ranks: u8,
+) -> &mut perks::PerkDefinition {
+    world
+        .rpg_perk_defs
+        .entry(form_id)
+        .or_insert_with(|| perks::PerkDefinition {
+            form_id,
+            editor_id: format!("Perk{form_id:08x}"),
+            min_level,
+            ranks,
+            playable: true,
+            ..perks::PerkDefinition::default()
+        })
+}
+
+#[given(regex = r"^a perk ([0-9a-f]{8}) requiring level (\d+) with (\d+) ranks?$")]
+async fn given_rpg_perk(world: &mut BevyoutWorld, form_id: String, level: String, ranks: String) {
+    let def = perk_def_or_create(
+        world,
+        perk_form_id(&form_id),
+        level.parse::<u8>().unwrap(),
+        ranks.parse::<u8>().unwrap(),
+    );
+    def.editor_id = format!("Perk{}", form_id);
+}
+
+#[given(regex = r"^a perk ([0-9a-f]{8}) gated on condition index (\d+) at (\d+)$")]
+async fn given_rpg_perk_condition(
+    world: &mut BevyoutWorld,
+    form_id: String,
+    index: String,
+    threshold: String,
+) {
+    // Resolve through the same probed engine-enum mapping the prepare
+    // boundary conversion uses; an unmapped index fails the step loudly.
+    let index = index.parse::<u32>().unwrap();
+    let actor_value = perks::actor_value_from_condition_index(index)
+        .unwrap_or_else(|| panic!("condition index {index} has no mapped actor value"));
+    let def = perk_def_or_create(world, perk_form_id(&form_id), 1, 1);
+    def.conditions.push(perks::PerkCondition {
+        actor_value,
+        threshold: threshold.parse::<u8>().unwrap(),
+    });
+}
+
+#[given(regex = r"^a perk ([0-9a-f]{8}) with an unknown condition$")]
+async fn given_rpg_perk_unknown_condition(world: &mut BevyoutWorld, form_id: String) {
+    let def = perk_def_or_create(world, perk_form_id(&form_id), 1, 1);
+    def.unknown_conditions += 1;
+}
+
+#[given(regex = r"^a perk ([0-9a-f]{8}) entry rank (\d+) with XP multiplier (\d+\.\d+)$")]
+async fn given_rpg_perk_xp_entry(
+    world: &mut BevyoutWorld,
+    form_id: String,
+    rank: String,
+    multiplier: String,
+) {
+    let def = perk_def_or_create(world, perk_form_id(&form_id), 1, 3);
+    def.entries.push(perks::PerkEntry::EntryPoint {
+        rank: rank.parse::<u8>().unwrap(),
+        code: perks::ENTRY_CODE_XP_AWARD_MULTIPLIER,
+        param_count: 0,
+        priority: 0,
+        payload: perks::EntryPointPayload::Value(multiplier.parse::<f32>().unwrap()),
+    });
+}
+
+#[given(regex = r"^a perk ([0-9a-f]{8}) entry rank (\d+) granting (\d+) bonus skill points$")]
+async fn given_rpg_perk_skill_entry(
+    world: &mut BevyoutWorld,
+    form_id: String,
+    rank: String,
+    bonus: String,
+) {
+    let def = perk_def_or_create(world, perk_form_id(&form_id), 1, 1);
+    def.entries.push(perks::PerkEntry::EntryPoint {
+        rank: rank.parse::<u8>().unwrap(),
+        code: perks::ENTRY_CODE_BONUS_SKILL_POINTS,
+        param_count: 0,
+        priority: 0,
+        payload: perks::EntryPointPayload::Value(f32::from(bonus.parse::<u16>().unwrap())),
+    });
+}
+
+#[given(regex = r"^the player owns perk ([0-9a-f]{8}) at rank (\d+)$")]
+async fn given_rpg_perk_owned(world: &mut BevyoutWorld, form_id: String, rank: String) {
+    world
+        .rpg_perk_progression
+        .set_rank(perk_form_id(&form_id), rank.parse::<u8>().unwrap());
+}
+
+#[when(regex = r"^the perk eligibility for ([0-9a-f]{8}) is evaluated$")]
+async fn when_rpg_perk_eligibility(world: &mut BevyoutWorld, form_id: String) {
+    let form_id = perk_form_id(&form_id);
+    let def = world
+        .rpg_perk_defs
+        .get(&form_id)
+        .unwrap_or_else(|| panic!("perk {form_id:08x} was not declared by the scenario"));
+    let eligibility = perks::can_take_perk(&world.rpg_sheet, def, &world.rpg_perk_progression);
+    world.rpg_perk_eligibility = Some((form_id, eligibility));
+}
+
+#[when(regex = r"^the active perk modifiers are recomputed$")]
+async fn when_rpg_perk_modifiers(world: &mut BevyoutWorld) {
+    world.rpg_perk_modifiers =
+        perks::active_perk_modifiers(&world.rpg_perk_progression, &world.rpg_perk_defs);
+}
+
+#[when(regex = r"^the player is awarded (\d+) XP with active perk modifiers$")]
+async fn when_rpg_award_xp_with_perks(world: &mut BevyoutWorld, amount: String) {
+    let modifiers = perks::active_perk_modifiers(&world.rpg_perk_progression, &world.rpg_perk_defs);
+    let mut outcome = stats::award_xp(
+        &mut world.rpg_sheet,
+        amount.parse::<u32>().unwrap(),
+        modifiers.xp_award_multiplier_bps,
+        &world.rpg_settings,
+    );
+    // The kernel keeps exactly one parameter each (#313), so the adapter
+    // adds the per-level perk bonus exactly like the console's apply_award.
+    let bonus = u16::from(outcome.levels_gained).saturating_mul(modifiers.bonus_skill_points);
+    outcome.skill_points_gained = outcome.skill_points_gained.saturating_add(bonus);
+    world.rpg_last_award = Some(outcome);
+}
+
+#[then(regex = r"^the perk ([0-9a-f]{8}) is eligible$")]
+async fn then_rpg_perk_eligible(world: &mut BevyoutWorld, form_id: String) {
+    let (evaluated, eligibility) = world
+        .rpg_perk_eligibility
+        .as_ref()
+        .expect("an eligibility evaluation must have happened");
+    assert_eq!(
+        *evaluated,
+        perk_form_id(&form_id),
+        "evaluated the right perk"
+    );
+    assert!(
+        eligibility.is_eligible(),
+        "expected eligible, blocked by {:?}",
+        eligibility.reasons()
+    );
+}
+
+#[then(
+    regex = r"^the perk ([0-9a-f]{8}) is blocked with reason (min_level|max_ranks|condition|unknown_condition)$"
+)]
+async fn then_rpg_perk_blocked(world: &mut BevyoutWorld, form_id: String, reason: String) {
+    let (evaluated, eligibility) = world
+        .rpg_perk_eligibility
+        .as_ref()
+        .expect("an eligibility evaluation must have happened");
+    assert_eq!(
+        *evaluated,
+        perk_form_id(&form_id),
+        "evaluated the right perk"
+    );
+    let kinds: Vec<&str> = eligibility.reasons().iter().map(|r| r.kind()).collect();
+    assert!(
+        kinds.contains(&reason.as_str()),
+        "expected a {reason} block, reasons were {kinds:?}"
+    );
+}
+
+#[then(regex = r"^the XP award multiplier is (\d+) basis points$")]
+async fn then_rpg_xp_multiplier(world: &mut BevyoutWorld, expected: String) {
+    assert_eq!(
+        world.rpg_perk_modifiers.xp_award_multiplier_bps,
+        expected.parse::<u32>().unwrap()
+    );
+}
+
+#[then(regex = r"^the perk skill point bonus is (\d+)$")]
+async fn then_rpg_skill_bonus(world: &mut BevyoutWorld, expected: String) {
+    assert_eq!(
+        world.rpg_perk_modifiers.bonus_skill_points,
+        expected.parse::<u16>().unwrap()
     );
 }

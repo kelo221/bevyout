@@ -150,7 +150,7 @@ fn xp_thresholds_follow_the_quadratic_curve() {
 #[test]
 fn awarding_threshold_xp_levels_up_once_with_skill_points() {
     let mut world = sheet();
-    let outcome = award_xp(&mut world, 200, &settings());
+    let outcome = award_xp(&mut world, 200, 10_000, &settings());
     assert_eq!(outcome.levels_gained, 1);
     assert_eq!(outcome.level, 2);
     assert_eq!(outcome.xp, 200);
@@ -163,7 +163,7 @@ fn awarding_threshold_xp_levels_up_once_with_skill_points() {
 #[test]
 fn one_award_can_cross_several_thresholds() {
     let mut world = sheet();
-    let outcome = award_xp(&mut world, 700, &settings());
+    let outcome = award_xp(&mut world, 700, 10_000, &settings());
     assert_eq!(outcome.level, 3);
     assert_eq!(outcome.levels_gained, 2);
     assert_eq!(world.xp_into_level(&settings()), 150);
@@ -173,12 +173,12 @@ fn one_award_can_cross_several_thresholds() {
 #[test]
 fn xp_accumulation_stops_at_the_level_cap() {
     let mut world = sheet();
-    let outcome = award_xp(&mut world, 999_999, &settings());
+    let outcome = award_xp(&mut world, 999_999, 10_000, &settings());
     assert_eq!(outcome.level, 30);
     assert_eq!(outcome.xp, 66_700);
     assert!(world.xp <= xp_threshold(30, &settings()));
     // Further awards are inert.
-    let more = award_xp(&mut world, 5_000, &settings());
+    let more = award_xp(&mut world, 5_000, 10_000, &settings());
     assert_eq!(more.level, 30);
     assert_eq!(more.xp, 66_700);
 }
@@ -188,7 +188,7 @@ fn a_lower_level_cap_stops_progression_early() {
     let mut world = sheet();
     let mut low_cap = settings();
     low_cap.max_player_level = 2;
-    let outcome = award_xp(&mut world, 5_000, &low_cap);
+    let outcome = award_xp(&mut world, 5_000, 10_000, &low_cap);
     assert_eq!(outcome.level, 2);
     assert_eq!(outcome.xp, 200);
 }
@@ -252,11 +252,29 @@ fn skill_gates_compare_against_the_requirement() {
 fn skill_points_per_level_follow_base_plus_intelligence_minus_one() {
     let mut world = sheet();
     world.set_special(SpecialAttribute::Intelligence, 1);
-    assert_eq!(skill_points_per_level(&world, &settings()), 11);
+    assert_eq!(skill_points_per_level(&world, &settings(), 0), 11);
     world.set_special(SpecialAttribute::Intelligence, 5);
-    assert_eq!(skill_points_per_level(&world, &settings()), 15);
+    assert_eq!(skill_points_per_level(&world, &settings(), 0), 15);
     world.set_special(SpecialAttribute::Intelligence, 10);
-    assert_eq!(skill_points_per_level(&world, &settings()), 20);
+    assert_eq!(skill_points_per_level(&world, &settings(), 0), 20);
+}
+
+#[test]
+fn perk_modifiers_scale_award_xp_and_bonus_skill_points() {
+    // M9 wave 2 (#313): the two perk hook points into the kernels. Swift
+    // Learner rank 1 multiplies awarded XP by 1.1 (11 000 bps): 1000 XP
+    // becomes 1100, and the level clamp still applies afterwards.
+    let mut world = sheet();
+    let outcome = award_xp(&mut world, 1_000, 11_000, &settings());
+    assert_eq!(world.xp, 1_100);
+    assert_eq!(outcome.level, 4);
+    // Educated adds three points per level on top of the sheet math.
+    assert_eq!(skill_points_per_level(&world, &settings(), 3), 18);
+    // The multiplier saturates rather than wrapping on absurd values.
+    let mut huge = sheet();
+    let huge_outcome = award_xp(&mut huge, u32::MAX, u32::MAX, &settings());
+    assert_eq!(huge.xp, xp_threshold(30, &settings()));
+    assert_eq!(huge_outcome.level, 30);
 }
 
 #[test]
@@ -266,7 +284,7 @@ fn character_sheet_round_trips_through_serde() {
     world.tagged_skills.insert(ActorSkill::SmallGuns);
     world.add_skill_points(ActorSkill::Sneak, 12);
     world.set_skill_value(ActorSkill::SmallGuns, 7);
-    award_xp(&mut world, 700, &settings());
+    award_xp(&mut world, 700, 10_000, &settings());
     let encoded = ron::to_string(&world).expect("serialize sheet");
     let decoded: CharacterSheet = ron::from_str(&encoded).expect("deserialize sheet");
     assert_eq!(decoded, world);

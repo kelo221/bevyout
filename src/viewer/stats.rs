@@ -4,21 +4,34 @@
 //! `PlayerProgression` is the authoritative state that survives transient FPS
 //! player entities. `ActorStats`, `DerivedAttributes`, and `Experience` are
 //! entity projections, and `StatsSettings` carries the prepared GMST settings
-//! (GOTY defaults until a catalog overrides them).
+//! (GOTY defaults until a catalog overrides them). `PerkCatalog` is the
+//! prepared perk definitions for console commands (M9 wave 2, #314).
 
 use bevy::prelude::*;
+use bevyout_core::perks::{PerkDefinition, PerkProgression};
 use bevyout_core::stats::{
     CharacterSheet, DerivedAttributes as CoreDerivedAttributes, GmstSettings, xp_threshold,
 };
+use std::collections::BTreeMap;
 use std::path::Path;
 
 use super::player::FpsPlayer;
 use super::plugins::ViewerSet;
-use crate::vsa::{GMST_CATALOG_REVISION, PreparedGmstCatalog, PreparedSceneManifest};
+use crate::vsa::{
+    GMST_CATALOG_REVISION, PERK_CATALOG_REVISION, PreparedGmstCatalog, PreparedPerkCatalog,
+    PreparedSceneManifest,
+};
 
 /// GMST settings resolved at startup; kernels read them from here.
 #[derive(Resource, Debug, Clone, Copy, Default, PartialEq)]
 pub(crate) struct StatsSettings(pub(crate) GmstSettings);
+
+/// Prepared perk definitions keyed by FormID (M9 wave 2, #314), loaded
+/// from `catalogs/<source_fingerprint>/perks.ron` at startup. An absent
+/// catalog degrades to "no perks known": the console's `addperk` errors
+/// with `unknown_perk` rather than crashing startup.
+#[derive(Resource, Debug, Clone, Default, PartialEq)]
+pub(crate) struct PerkCatalog(pub(crate) BTreeMap<u32, PerkDefinition>);
 
 /// Persistent player-authored progression state. The FPS player entity is
 /// transient across camera-mode changes, so console and gameplay systems
@@ -26,6 +39,7 @@ pub(crate) struct StatsSettings(pub(crate) GmstSettings);
 #[derive(Resource, Debug, Clone, Default, PartialEq)]
 pub(crate) struct PlayerProgression {
     pub(crate) stats: CharacterSheet,
+    pub(crate) perks: PerkProgression,
     pub(crate) unspent_skill_points: u16,
     pub(crate) total_skill_points: u16,
 }
@@ -55,6 +69,7 @@ pub(crate) struct StatsPlugin;
 impl Plugin for StatsPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<StatsSettings>()
+            .init_resource::<PerkCatalog>()
             .init_resource::<PlayerProgression>()
             .add_systems(
                 Update,
@@ -171,4 +186,53 @@ pub(crate) fn load_settings_for_manifest(
         catalog.counters.total, catalog.counters.consumed
     );
     StatsSettings(catalog.settings)
+}
+
+/// Loads the perk catalog for a manifest's content set from the
+/// deterministic `catalogs/<source_fingerprint>/perks.ron` path (M9 wave 2,
+/// #312/#314). Like the gmst catalog -- and unlike the item catalog -- a
+/// missing, stale, or unreadable perk catalog degrades to an empty catalog
+/// with a warning: perk commands report `unknown_perk` instead of failing
+/// viewer startup.
+pub(crate) fn load_perk_catalog_for_manifest(
+    manifest: &PreparedSceneManifest,
+    asset_root: &Path,
+) -> PerkCatalog {
+    let path = asset_root
+        .join("catalogs")
+        .join(&manifest.source_fingerprint)
+        .join("perks.ron");
+    let Some(text) = std::fs::read_to_string(&path).ok() else {
+        warn!("perks: no perk catalog for this content set, perk commands disabled");
+        return PerkCatalog::default();
+    };
+    let catalog: PreparedPerkCatalog = match ron::from_str(&text) {
+        Ok(catalog) => catalog,
+        Err(error) => {
+            warn!("perks: perk catalog unreadable ({error}), perk commands disabled");
+            return PerkCatalog::default();
+        }
+    };
+    if catalog.revision != PERK_CATALOG_REVISION {
+        warn!(
+            "perks: perk catalog revision {} is stale, expected {PERK_CATALOG_REVISION}; run `prepare` again (perk commands disabled)",
+            catalog.revision
+        );
+        return PerkCatalog::default();
+    }
+    if catalog.source_fingerprint != manifest.source_fingerprint {
+        warn!("perks: perk catalog fingerprint mismatch, perk commands disabled");
+        return PerkCatalog::default();
+    }
+    info!(
+        "perks: loaded {} perks ({} playable) from perk catalog",
+        catalog.counters.total, catalog.counters.playable
+    );
+    PerkCatalog(
+        catalog
+            .entries
+            .into_iter()
+            .map(|perk| (perk.form_id, perk))
+            .collect(),
+    )
 }

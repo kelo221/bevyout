@@ -35,9 +35,8 @@ use super::{
 };
 
 mod actor_state_commands;
-// pub(crate): issue #218's autonomous package driver (`viewer::ai::autonomous`)
-// calls `start_package` directly -- one select-resolve-start implementation
-// shared with the console `runpackage` command, not two.
+// pub(crate): issue #218's autonomous package driver calls `start_package`
+// directly -- one implementation shared with the console `runpackage`.
 pub(crate) mod ai_package_commands;
 mod cinema_commands;
 mod common;
@@ -45,6 +44,7 @@ mod dialogue_commands;
 mod item_commands;
 mod navigation_commands;
 mod perception_commands;
+mod perk_commands;
 mod persistence_commands;
 mod player_commands;
 mod render_commands;
@@ -120,7 +120,7 @@ fn install(app: &mut App) {
         hooks.register_angle_adapter(player::console_get_angles, player::console_set_angles);
     }
     let mut registry = app.world_mut().resource_mut::<ConsoleRegistry>();
-    let providers: [&dyn ConsoleCommandProvider; 15] = [
+    let providers: [&dyn ConsoleCommandProvider; 16] = [
         &player_commands::PlayerCommandProvider,
         &navigation_commands::NavigationCommandProvider,
         &world_commands::WorldCommandProvider,
@@ -136,6 +136,7 @@ fn install(app: &mut App) {
         &weapon_commands::WeaponCommandProvider,
         &screen_fx_commands::ScreenFxCommandProvider,
         &stats_commands::StatsCommandProvider,
+        &perk_commands::PerkCommandProvider,
     ];
     for provider in providers {
         registry

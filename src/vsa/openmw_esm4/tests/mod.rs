@@ -2195,3 +2195,161 @@ fn avif_decodes_actor_value_metadata() {
         Some("The art of bypassing locks.")
     );
 }
+
+// ---------------------------------------------------------------------
+// M9 wave 2 (#312): PERK decode, probed against real Fallout3.esm data.
+// ---------------------------------------------------------------------
+
+fn perk_ctda(value: f32, function: u32, param1: u32) -> Vec<u8> {
+    let mut data = vec![0x60_u8, 0, 0, 0];
+    data.extend_from_slice(&value.to_le_bytes());
+    data.extend_from_slice(&function.to_le_bytes());
+    data.extend_from_slice(&param1.to_le_bytes());
+    data.extend_from_slice(&[0_u8; 12]);
+    data
+}
+
+#[test]
+fn perk_decodes_gates_conditions_and_entry_point_entries() {
+    // Swift Learner (00031DD3) ground truth: INT 4 gate (AV index 9,
+    // oper 0x60, function 0x1EF GetActorValue), level 2, 3 ranks, and an
+    // XP-multiplier entry point (code 0x09) whose EPFD floats step
+    // 1.1/1.2/1.3 by 0-based rank.
+    let mut subs = vec![
+        direct_subrecord("EDID", b"SwiftLearner\0".to_vec()),
+        direct_subrecord("FULL", b"Swift Learner\0".to_vec()),
+        direct_subrecord(
+            "ICON",
+            b"Interface\\Icons\\Perk_Swift Learner.dds\0".to_vec(),
+        ),
+        direct_subrecord("CTDA", perk_ctda(4.0, 0x1EF, 9)),
+        direct_subrecord("DATA", vec![0, 2, 3, 1, 0]),
+    ];
+    for (rank, multiplier) in [(0_u8, 1.1_f32), (1, 1.2), (2, 1.3)] {
+        subs.push(direct_subrecord("PRKE", vec![2, rank, 0]));
+        subs.push(direct_subrecord("DATA", vec![0x09, 3, 1]));
+        subs.push(direct_subrecord("EPFT", vec![1]));
+        subs.push(direct_subrecord("EPFD", multiplier.to_le_bytes().to_vec()));
+        subs.push(direct_subrecord("PRKF", Vec::new()));
+    }
+    let perk = parse_perk(&subs, 0x0003_1dd3, 0);
+    assert_eq!(perk.editor_id.as_deref(), Some("SwiftLearner"));
+    assert_eq!(perk.min_level, 2);
+    assert_eq!(perk.ranks, 3);
+    assert!(perk.playable);
+    assert!(!perk.hidden);
+    assert_eq!(
+        perk.conditions,
+        vec![PerkConditionWire {
+            oper: 0x60,
+            comparison_value: 4.0,
+            function: 0x1EF,
+            param1: 9,
+        }]
+    );
+    assert_eq!(perk.entries.len(), 3);
+    for (rank, multiplier) in [(0_u8, 1.1_f32), (1, 1.2), (2, 1.3)] {
+        assert_eq!(
+            perk.entries[usize::from(rank)],
+            PerkEntryWire::EntryPoint {
+                rank,
+                priority: 0,
+                code: 0x09,
+                param_count: 3,
+                entry_priority: 1,
+                function: Some(1),
+                data: Some(multiplier.to_bits()),
+            }
+        );
+    }
+    assert!(perk.ignored_subrecords.is_empty());
+}
+
+#[test]
+fn perk_decodes_quest_and_ability_entries() {
+    // Intense Training (00044CB1): ten quest entries at ranks 0..9, quest
+    // FormID 0x000038B2 with an undecoded second word.
+    let mut subs = vec![
+        direct_subrecord("EDID", b"IntenseTraining\0".to_vec()),
+        direct_subrecord("DATA", vec![0, 2, 10, 1, 0]),
+    ];
+    for rank in 0..10_u8 {
+        subs.push(direct_subrecord("PRKE", vec![0, rank, 0]));
+        let mut data = 0x0000_38b2_u32.to_le_bytes().to_vec();
+        data.extend_from_slice(&0xcdcd_cd65_u32.to_le_bytes());
+        subs.push(direct_subrecord("DATA", data));
+        subs.push(direct_subrecord("PRKF", Vec::new()));
+    }
+    // Night Person (00094EBD): one ability entry, SPEL 0x00094EBE.
+    let night_subs = vec![
+        direct_subrecord("EDID", b"NightPerson\0".to_vec()),
+        direct_subrecord("DATA", vec![0, 10, 1, 1, 0]),
+        direct_subrecord("PRKE", vec![1, 0, 0]),
+        direct_subrecord("DATA", 0x0009_4ebe_u32.to_le_bytes().to_vec()),
+        direct_subrecord("PRKF", Vec::new()),
+    ];
+    let training = parse_perk(&subs, 0x0004_4cb1, 0);
+    assert_eq!(training.ranks, 10);
+    assert_eq!(training.entries.len(), 10);
+    for rank in 0..10_u8 {
+        assert_eq!(
+            training.entries[usize::from(rank)],
+            PerkEntryWire::Quest {
+                rank,
+                priority: 0,
+                quest_form_id: 0x0000_38b2,
+                unknown: 0xcdcd_cd65,
+            }
+        );
+    }
+    let night = parse_perk(&night_subs, 0x0009_4ebd, 0);
+    assert_eq!(night.min_level, 10);
+    assert_eq!(
+        night.entries,
+        vec![PerkEntryWire::Ability {
+            rank: 0,
+            priority: 0,
+            spell_form_id: 0x0009_4ebe,
+        }]
+    );
+}
+
+#[test]
+fn perk_decodes_bonus_skill_point_entry_and_short_ctda_safely() {
+    // Educated (00031DD8): entry code 0x0A with EPFD 3.0; a truncated CTDA
+    // is retained as an unknown condition rather than guessed into a partial
+    // condition.
+    let perk = parse_perk(
+        &[
+            direct_subrecord("EDID", b"Educated\0".to_vec()),
+            direct_subrecord("CTDA", vec![0x60, 0, 0, 0, 4]),
+            direct_subrecord("DATA", vec![0, 4, 1, 1, 0]),
+            direct_subrecord("PRKE", vec![2, 0, 0]),
+            direct_subrecord("DATA", vec![0x0a, 2, 1]),
+            direct_subrecord("EPFT", vec![1]),
+            direct_subrecord("EPFD", 3.0_f32.to_le_bytes().to_vec()),
+            direct_subrecord("PRKF", Vec::new()),
+        ],
+        0x0003_1dd8,
+        0,
+    );
+    assert_eq!(
+        perk.entries,
+        vec![PerkEntryWire::EntryPoint {
+            rank: 0,
+            priority: 0,
+            code: 0x0a,
+            param_count: 2,
+            entry_priority: 1,
+            function: Some(1),
+            data: Some(3.0_f32.to_bits()),
+        }]
+    );
+    assert!(perk.conditions.is_empty());
+    assert_eq!(perk.malformed_conditions, 1);
+    let mut oversized_ctda = perk_ctda(4.0, 0x1ef, 9);
+    oversized_ctda.push(0);
+    let oversized = parse_perk(&[direct_subrecord("CTDA", oversized_ctda)], 0x0003_1dd8, 0);
+    assert!(oversized.conditions.is_empty());
+    assert_eq!(oversized.malformed_conditions, 1);
+}
