@@ -83,6 +83,7 @@ pub(crate) mod dialogue;
 mod effects;
 mod fallout_ui;
 mod glow_card_policy;
+mod gpu_validation;
 mod hud;
 #[cfg(test)]
 mod hybrid_shadow_policy;
@@ -130,6 +131,7 @@ pub fn view(args: ViewArgs) -> Result<()> {
             agent_port: args.agent_bridge.then_some(args.agent_port),
             unfocused: args.unfocused,
             save_slot: args.save_slot,
+            wgpu_validation: args.wgpu_validation,
         },
     )
 }
@@ -308,6 +310,7 @@ pub fn render(args: RenderArgs) -> Result<()> {
             // unfocused automatically via `run_view`'s own agent_port check.
             unfocused: false,
             save_slot: None,
+            wgpu_validation: args.wgpu_validation,
         },
     )
 }

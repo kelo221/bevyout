@@ -87,11 +87,16 @@ Use dynamic linking for iterative desktop development:
 cargo check-dev
 cargo test-dev
 cargo run-dev -- prepare --cell 000151e3
+cargo run-play -- render SuperDuperMart
 ```
 
-These aliases expand to Bevy's `dynamic_linking` feature. Keep that feature
-development-only; release builds must not depend on the Bevy DLLs unless they
-are intentionally bundled and tested.
+`run-dev` / `check-dev` / `test-dev` expand to Bevy's `dynamic_linking` feature
+with the `dev` profile (`opt-level = 1` on this crate, `3` on deps, incremental
+on). `run-play` is the same features on `dev-opt` (`opt-level = 3` everywhere)
+when you need playable FPS. Viewer GPU validation is off by default;
+`--wgpu-validation` (or `WGPU_VALIDATION=1`) enables the wgpu/Vulkan layers.
+Keep `dynamic_linking` development-only; release builds must not depend on the
+Bevy DLLs unless they are intentionally bundled and tested.
 
 Before handing off changes, run `cargo fmt --check`, `cargo clippy --all-targets
 -- -D warnings`, `cargo test`, and a representative `cargo run-dev` command.

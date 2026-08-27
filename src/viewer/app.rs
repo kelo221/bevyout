@@ -9,6 +9,7 @@ pub(crate) struct RunViewOptions {
     pub(crate) agent_port: Option<u16>,
     pub(crate) unfocused: bool,
     pub(crate) save_slot: Option<String>,
+    pub(crate) wgpu_validation: bool,
 }
 
 pub(crate) fn run_view(manifest_path: PathBuf, options: RunViewOptions) -> Result<()> {
@@ -21,6 +22,7 @@ pub(crate) fn run_view(manifest_path: PathBuf, options: RunViewOptions) -> Resul
         agent_port,
         unfocused,
         save_slot,
+        wgpu_validation,
     } = options;
     let manifest_path = fs::canonicalize(&manifest_path).context("manifest does not exist")?;
     let text = fs::read_to_string(&manifest_path)?;
@@ -130,7 +132,10 @@ pub(crate) fn run_view(manifest_path: PathBuf, options: RunViewOptions) -> Resul
             .set(AssetPlugin {
                 file_path: asset_root.to_string_lossy().to_string(),
                 ..default()
-            }),
+            })
+            .set(super::gpu_validation::viewer_render_plugin(
+                super::gpu_validation::gpu_validation_enabled_from_env(wgpu_validation),
+            )),
         FrameTimeDiagnosticsPlugin::new(RENDER_REPORT_HISTORY),
         RenderDiagnosticsPlugin,
         AutoExposurePlugin,

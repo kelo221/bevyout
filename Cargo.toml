@@ -116,11 +116,20 @@ name = "yarn_smoke"
 path = "examples/yarn_smoke.rs"
 required-features = ["dialogue-yarn"]
 
-# Enable a small amount of optimization in the dev profile.
+# Fast iteration: incremental rebuilds, no debuginfo dumps, light opt on our
+# crates. Dynamic linking stays a cargo alias, not a default feature.
 [profile.dev]
-incremental = false # Stops frequent tiny writes of incremental compilation
-debug = 0           # Disables debug symbols, massively reducing target/ size
+incremental = true
+debug = 0
 opt-level = 1
-# Enable a large amount of optimization in the dev profile for dependencies.
+
+# Dependencies (including workspace crates used as deps) stay fast at runtime.
 [profile.dev.package."*"]
+opt-level = 3
+
+# Playable dev: same as `dev` (incremental, no debuginfo, dynamic_linking via
+# `run-play`) but opt-level 3 on the app crate too. Use when FPS matters more
+# than the extra compile of your own code.
+[profile.dev-opt]
+inherits = "dev"
 opt-level = 3

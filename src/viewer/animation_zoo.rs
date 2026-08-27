@@ -144,7 +144,10 @@ pub fn animation_zoo(args: AnimationZooArgs) -> Result<()> {
                     ..default()
                 }),
                 ..default()
-            }),
+            })
+            .set(super::gpu_validation::viewer_render_plugin(
+                super::gpu_validation::gpu_validation_enabled_from_env(args.wgpu_validation),
+            )),
     );
     if args.agent_bridge {
         app.add_plugins(AnimationZooAgentBridgePlugin {
