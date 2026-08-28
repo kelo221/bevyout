@@ -32,13 +32,13 @@ use bevyout_core::crime::WitnessEvidence;
 use bevyout_core::items::OwnershipClaim;
 
 use super::super::actor::ActorRuntime;
-use super::super::actor_state::ActorDefinitionCatalogs;
+use super::super::actor_state::{ActorDefinitionCatalogs, ActorStateRuntime};
 use super::super::crime;
 use super::super::perception::ActorAwareness;
 use super::super::stats::PlayerProgression;
 use super::{
-    ActiveContainerTarget, CanonicalItemLedger, ContainerStates, InteractionState, PlaySound,
-    PlayerEquipment, PlayerInventory, container_policy, item_rules,
+    ActiveContainerTarget, CanonicalItemLedger, ContainerStates, InteractionState, PlacementRoot,
+    PlaySound, PlayerEquipment, PlayerInventory, container_policy, item_rules,
 };
 
 /// Which side of the transfer a [`TransferQuantityPicker`] is acting on --
@@ -238,7 +238,12 @@ fn handle_action_buttons(
     mut requests: MessageWriter<RequestStateTransition>,
     catalogs: Option<Res<ActorDefinitionCatalogs>>,
     mut progression: Option<ResMut<PlayerProgression>>,
-    actors: Query<(&ActorRuntime, &ActorAwareness)>,
+    actors: Query<(
+        &ActorRuntime,
+        &ActorAwareness,
+        Option<&ActorStateRuntime>,
+        Option<&PlacementRoot>,
+    )>,
 ) {
     for (interaction, action) in &buttons {
         if *interaction != Interaction::Pressed {
@@ -410,7 +415,12 @@ fn handle_container_rows(
     picker: Option<Res<TransferQuantityPicker>>,
     catalogs: Option<Res<ActorDefinitionCatalogs>>,
     mut progression: Option<ResMut<PlayerProgression>>,
-    actors: Query<(&ActorRuntime, &ActorAwareness)>,
+    actors: Query<(
+        &ActorRuntime,
+        &ActorAwareness,
+        Option<&ActorStateRuntime>,
+        Option<&PlacementRoot>,
+    )>,
 ) {
     let Some(active_container) = active.0.as_ref() else {
         return;
@@ -581,7 +591,12 @@ fn handle_quantity_buttons(
     mut sounds: MessageWriter<PlaySound>,
     catalogs: Option<Res<ActorDefinitionCatalogs>>,
     mut progression: Option<ResMut<PlayerProgression>>,
-    actors: Query<(&ActorRuntime, &ActorAwareness)>,
+    actors: Query<(
+        &ActorRuntime,
+        &ActorAwareness,
+        Option<&ActorStateRuntime>,
+        Option<&PlacementRoot>,
+    )>,
 ) {
     let Some(ref mut picker) = picker else {
         return;

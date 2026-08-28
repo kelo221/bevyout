@@ -111,16 +111,7 @@ fn cripple_limb(
         .ok_or_else(|| {
             ConsoleError::new("player_unavailable", "player progression is unavailable")
         })?;
-    let shot = ShotId(
-        progression
-            .limbs
-            .applied_shots
-            .iter()
-            .map(|shot| shot.0)
-            .max()
-            .unwrap_or(0)
-            .saturating_add(1),
-    );
+    let shot = ShotId::next_debug(&progression.limbs.applied_shots);
     let outcome = apply_limb_impact(
         &mut progression.limbs,
         LimbImpact {

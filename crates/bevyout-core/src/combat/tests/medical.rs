@@ -8,7 +8,7 @@ fn cripple(state: &mut LimbState, part: BodyPartId, shot: u64) {
     apply_limb_impact(
         state,
         LimbImpact {
-            shot_id: ShotId(shot),
+            shot_id: ShotId::from_sequence(shot),
             target: TargetId {
                 class: TargetClass::Player,
                 form_id: 0,
@@ -25,7 +25,7 @@ fn targeted_stimpak_restores_one_limb() {
     apply_limb_impact(
         &mut state,
         LimbImpact {
-            shot_id: ShotId(1),
+            shot_id: ShotId::from_sequence(1),
             target: TargetId::player(),
             part: BodyPartId::LeftArm,
             final_damage_milli: 80_000,

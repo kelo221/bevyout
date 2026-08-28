@@ -18884,7 +18884,7 @@ async fn when_rpg_limb_impact(world: &mut BevyoutWorld, shot: String, part: Stri
     world.rpg_last_limb_impact = Some(bevyout_core::combat::apply_limb_impact(
         &mut world.rpg_limbs,
         bevyout_core::combat::LimbImpact {
-            shot_id: bevyout_core::combat::ShotId(shot.parse::<u64>().unwrap()),
+            shot_id: bevyout_core::combat::ShotId::from_sequence(shot.parse::<u64>().unwrap()),
             target: perception::TargetId::player(),
             part: rpg_body_part(&part),
             final_damage_milli: milli.parse::<u32>().unwrap(),
@@ -18957,7 +18957,9 @@ async fn when_rpg_weapon_impact(
     let evidence = weapon::ImpactEvidence {
         distance_meters: distance.parse::<f32>().unwrap(),
         body_part: Some(rpg_body_part(&part)),
-        shot_id: Some(bevyout_core::combat::ShotId(shot.parse::<u64>().unwrap())),
+        shot_id: Some(bevyout_core::combat::ShotId::from_sequence(
+            shot.parse::<u64>().unwrap(),
+        )),
         target: Some(perception::TargetId {
             class: perception::TargetClass::Actor,
             form_id: world.rpg_actor_state.reference_form_id,
@@ -20831,12 +20833,14 @@ async fn then_rpg_container_preserved(world: &mut BevyoutWorld, hex: String) {
 #[then(regex = r"^container (0x[0-9a-fA-F]+) was restored$")]
 async fn then_rpg_container_restored(world: &mut BevyoutWorld, hex: String) {
     let reference = u32::from_str_radix(hex.trim_start_matches("0x"), 16).expect("ref");
-    assert!(
+    assert_eq!(
         world.rpg_time_items.holders()[&item_transaction::HolderId::FixtureContainer {
             reference_form_id: reference
         }]
             .items
-            .is_empty()
+            .len(),
+        1,
+        "restored means counted on the receipt; contents stay until templates exist"
     );
 }
 

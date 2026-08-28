@@ -162,7 +162,10 @@ impl ItemLedger {
                 .quantity
                 .checked_mul(request.count)
                 .ok_or(TransactionError::CapsOverflow)?;
-            *needed.entry(ingredient.item_form_id).or_insert(0) += quantity;
+            let entry = needed.entry(ingredient.item_form_id).or_insert(0);
+            *entry = entry
+                .checked_add(quantity)
+                .ok_or(TransactionError::CapsOverflow)?;
         }
 
         let mut consumed = Vec::new();

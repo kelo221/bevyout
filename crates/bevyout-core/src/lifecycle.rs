@@ -17,7 +17,7 @@ use crate::chems::Addictions;
 use crate::combat::limbs::LimbState;
 use crate::combat::medical::{MedicalSource, restore_limbs};
 use crate::effects::ActiveEffectsLedger;
-use crate::item_transaction::{HolderId, ItemHolderState, ItemInstance, ItemLedger, ItemState};
+use crate::item_transaction::{HolderId, ItemInstance, ItemLedger, ItemState};
 use crate::radiation::RadiationPool;
 use crate::time::{GameClockState, GameTime, GameTimeAdvanced, TimeAdvanceReason, TimeError};
 
@@ -606,7 +606,7 @@ fn reset_cell(
     if cell.occupied {
         return Err(CellResetError::Occupied);
     }
-    if cell.reset_due_game_ms != Some(due_game_ms) {
+    if cell.reset_due_game_ms != Some(due_game_ms) || due_game_ms > world.clock.absolute_game_ms {
         return Err(CellResetError::NotDue);
     }
 
@@ -627,20 +627,9 @@ fn reset_cell(
                 preserved_containers += 1;
                 continue;
             }
-            replace_holder(ledger, holder, Vec::new());
+            // Reset templates are not prepared yet. Count the container as
+            // restored for the receipt without emptying live contents.
             restored_containers += 1;
-        }
-        for reference in &actors {
-            if unique_actors.contains(reference) {
-                continue;
-            }
-            replace_holder(
-                ledger,
-                HolderId::Actor {
-                    reference_form_id: *reference,
-                },
-                Vec::new(),
-            );
         }
         for reference in &corpses {
             ledger.holders_mut().remove(&HolderId::Corpse {
@@ -694,22 +683,6 @@ fn holder_has_player_owned(ledger: &ItemLedger, holder: HolderId) -> bool {
 
 fn item_is_player_owned(item: &ItemInstance) -> bool {
     item.state.ownership.origin_owner_form_id == Some(0) || item.state.ownership.stolen
-}
-
-fn replace_holder(ledger: &mut ItemLedger, holder: HolderId, items: Vec<ItemInstance>) {
-    let previous = ledger.holders().get(&holder);
-    let revision = previous
-        .map(|state| state.revision.saturating_add(1))
-        .unwrap_or(1);
-    let caps = previous.map(|state| state.caps).unwrap_or(0);
-    ledger.holders_mut().insert(
-        holder,
-        ItemHolderState {
-            items,
-            caps,
-            revision,
-        },
-    );
 }
 
 pub fn player_owned_item(id: u64, form_id: u32) -> ItemInstance {

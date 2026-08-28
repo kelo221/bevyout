@@ -116,3 +116,47 @@ fn failed_crafting_does_not_consume_the_next_item_id() {
     );
     assert_eq!(ledger.next_item_id(), next);
 }
+
+#[test]
+fn ingredient_quantity_overflow_is_rejected() {
+    let mut ledger = ItemLedger::new();
+    ledger
+        .insert_holder(HolderId::Player, holder(vec![item(1, 0x30, 5)]))
+        .unwrap();
+    let recipe = RecipeDefinition {
+        form_id: 0x20,
+        skill: 0,
+        level: 0,
+        ingredients: vec![
+            RecipeItem {
+                item_form_id: 0x30,
+                quantity: u32::MAX,
+                order: 0,
+            },
+            RecipeItem {
+                item_form_id: 0x30,
+                quantity: 1,
+                order: 1,
+            },
+        ],
+        outputs: vec![RecipeItem {
+            item_form_id: 0x40,
+            quantity: 1,
+            order: 0,
+        }],
+        has_conditions: false,
+    };
+    let request = CraftRequest {
+        transaction_id: TransactionId(1),
+        holder: HolderId::Player,
+        recipe: &recipe,
+        count: 1,
+        expected_holder_revision: 0,
+        actor: CraftingActorSnapshot { skill_value: 50 },
+        schematic_tier: SchematicTier::V1,
+    };
+    assert_eq!(
+        craft(&mut ledger, request).unwrap_err(),
+        CraftError::Transaction(TransactionError::CapsOverflow)
+    );
+}

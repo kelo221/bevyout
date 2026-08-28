@@ -105,6 +105,7 @@ struct PlayerStatus {
     radiation_line: String,
     effect_lines: Vec<String>,
     world_clock_line: String,
+    limbs: bevyout_core::combat::LimbState,
 }
 
 impl Default for PlayerStatus {
@@ -121,6 +122,7 @@ impl Default for PlayerStatus {
             radiation_line: String::new(),
             effect_lines: Vec::new(),
             world_clock_line: String::new(),
+            limbs: bevyout_core::combat::LimbState::healthy(),
         }
     }
 }
@@ -150,6 +152,15 @@ fn project_status_from_snapshot(
         })
         .collect();
     status.world_clock_line = bevyout_core::inspection::world_clock_line(snapshot);
+    let mut limbs = bevyout_core::combat::LimbState::healthy();
+    for part in &snapshot.limbs.parts {
+        *limbs.part_mut(part.part) = bevyout_core::combat::LimbCondition {
+            current_milli: part.current_milli,
+            max_milli: part.max_milli,
+            crippled: part.crippled,
+        };
+    }
+    status.limbs = limbs;
 }
 
 /// The header bar's four stat segments, in display order, as (label, value)
@@ -282,7 +293,6 @@ struct ScreenSources<'w> {
     figure_layout: Res<'w, StatusFigureLayout>,
     figure_editor: Res<'w, StatusFigureEditor>,
     presentation: Res<'w, presentation::PipBoyPresentation>,
-    progression: Option<Res<'w, PlayerProgression>>,
 }
 
 pub(crate) struct PipBoyPlugin;

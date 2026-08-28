@@ -2,6 +2,12 @@ use super::*;
 
 fn pins(count: u32) -> ItemLedger {
     let mut ledger = ItemLedger::new();
+    if count == 0 {
+        ledger
+            .insert_holder(HolderId::Player, Default::default())
+            .expect("player holder");
+        return ledger;
+    }
     grant_bobby_pins(&mut ledger, count).expect("pins");
     ledger
 }
@@ -147,6 +153,31 @@ fn pin_break_consumes_exactly_one_canonical_pin() {
     assert!(commit.pin_consumed);
     assert!(!commit.lock_unlocked);
     assert_eq!(bobby_pin_count(&items), 1);
+}
+
+#[test]
+fn pin_break_without_a_pin_leaves_the_session_unchanged() {
+    let mut session = LockpickSession::new(MinigameSessionId(1), cfg(75, 10, 0, 100));
+    let mut items = pins(0);
+    let mut rng = MinigameRngState::from_seed(0);
+    step(
+        &mut session,
+        LockpickInput::SetPickAngle(PickAngleMilliDegrees(80_000)),
+        &mut items,
+        &mut rng,
+    )
+    .unwrap();
+    let before = session.clone();
+    let error = step(
+        &mut session,
+        LockpickInput::ApplyTorque { delta_ms: 1_000 },
+        &mut items,
+        &mut rng,
+    )
+    .unwrap_err();
+    assert_eq!(error, MinigameError::NoBobbyPin);
+    assert_eq!(session, before);
+    assert_eq!(bobby_pin_count(&items), 0);
 }
 
 #[test]

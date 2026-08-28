@@ -541,50 +541,55 @@ fn apply_torque(
     if session.config.skill < session.config.required_skill() && session.config.difficulty >= 100 {
         return Err(MinigameError::SkillTooLow);
     }
-    session.torque_held = true;
-    session.sequence = session.sequence.saturating_add(1);
-    session.phase = LockpickPhase::Turning;
-    if session.config.in_sweet_spot(session.pick_angle) {
+    let mut next_session = session.clone();
+    next_session.torque_held = true;
+    next_session.sequence = next_session.sequence.saturating_add(1);
+    next_session.phase = LockpickPhase::Turning;
+    if next_session.config.in_sweet_spot(next_session.pick_angle) {
         let advance = delta_ms.saturating_mul(90);
-        session.cylinder = CylinderAngleMilliDegrees(
-            session
+        next_session.cylinder = CylinderAngleMilliDegrees(
+            next_session
                 .cylinder
                 .0
                 .saturating_add(advance)
                 .min(CYLINDER_MAX_MILLI),
         );
-        if session.cylinder.0 >= CYLINDER_MAX_MILLI {
-            session.phase = LockpickPhase::Succeeded;
-            session.torque_held = false;
-            let crime_report = session
+        if next_session.cylinder.0 >= CYLINDER_MAX_MILLI {
+            next_session.phase = LockpickPhase::Succeeded;
+            next_session.torque_held = false;
+            let crime_report = next_session
                 .config
                 .owner_form_id
                 .and_then(|owner| report_trespass(crime, owner, witnesses));
+            *session = next_session;
             return Ok(MinigameCommit {
                 lock_unlocked: true,
                 crime: crime_report,
                 ..MinigameCommit::default()
             });
         }
+        *session = next_session;
         return Ok(MinigameCommit::default());
     }
-    let delta = (session.pick_angle.0 - session.config.sweet_spot().0).unsigned_abs();
+    let delta = (next_session.pick_angle.0 - next_session.config.sweet_spot().0).unsigned_abs();
     let gain = ((u64::from(delta.max(1)) * u64::from(delta_ms.max(1))) / 2_000)
         .min(u64::from(PIN_STRESS_MAX));
-    let next = u32::from(session.stress.0).saturating_add(gain as u32);
+    let next = u32::from(next_session.stress.0).saturating_add(gain as u32);
     if next >= u32::from(PIN_STRESS_MAX) {
         consume_one_pin(items)?;
-        session.stress = PinStress(0);
-        session.cylinder = CylinderAngleMilliDegrees(0);
-        session.phase = LockpickPhase::Failed;
-        session.pin_breaks = session.pin_breaks.saturating_add(1);
-        session.torque_held = false;
+        next_session.stress = PinStress(0);
+        next_session.cylinder = CylinderAngleMilliDegrees(0);
+        next_session.phase = LockpickPhase::Failed;
+        next_session.pin_breaks = next_session.pin_breaks.saturating_add(1);
+        next_session.torque_held = false;
+        *session = next_session;
         Ok(MinigameCommit {
             pin_consumed: true,
             ..MinigameCommit::default()
         })
     } else {
-        session.stress = PinStress(next as u16);
+        next_session.stress = PinStress(next as u16);
+        *session = next_session;
         Ok(MinigameCommit::default())
     }
 }

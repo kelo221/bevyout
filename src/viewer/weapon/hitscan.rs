@@ -65,7 +65,10 @@ pub(super) fn resolve_accepted_shots(
         let evidence = ImpactEvidence {
             distance_meters: hit.distance,
             body_part: Some(BodyPartId::from_node_name(node_name)),
-            shot_id: Some(ShotId(shot.shot_index)),
+            shot_id: Some(ShotId::from_weapon_shot(
+                shot.weapon_instance.0,
+                shot.shot_index,
+            )),
             target: None,
         };
         let weapon_definition = WeaponDefinition::new(shot.damage, shot.weapon.range_meters);

@@ -288,7 +288,7 @@ pub fn resolve_actor_impact(
     let health = apply_actor_damage(definition, state, weapon.damage)?;
     let part = evidence.body_part.unwrap_or(BodyPartId::Torso);
     let limb = evidence.shot_id.map(|shot_id| {
-        let milli = (weapon.damage.max(0.0) * 1_000.0).round() as u32;
+        let milli = (health.applied_damage.max(0.0) * 1_000.0).round() as u32;
         apply_limb_impact(
             &mut state.limbs,
             LimbImpact {

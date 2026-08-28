@@ -88,7 +88,7 @@ impl ConsoleCommandProvider for WorldCommandProvider {
             ConsoleCommand::new(
                 "resetcell",
                 "resetcell <cell-formid>",
-                "Apply a due cell reset if the cell is vacant and the receipt has not already run.",
+                "Apply a due cell reset if the cell is registered, vacant, and the due time has arrived.",
                 reset_cell,
             )
             .mutating(),
@@ -1599,15 +1599,17 @@ fn reset_cell(
         .ok_or_else(|| ConsoleError::new("bad_form_id", "resetcell FormID must be hexadecimal"))?;
     world.resource_scope(
         |world, mut runtime: Mut<crate::viewer::game_time::GameTimeRuntime>| {
-            if !runtime.world.cells.contains_key(&cell) {
-                runtime.world.register_cell(cell, false);
-            }
             let due = runtime
                 .world
                 .cells
                 .get(&cell)
                 .and_then(|state| state.reset_due_game_ms)
-                .unwrap_or(runtime.world.clock.absolute_game_ms);
+                .ok_or_else(|| {
+                    ConsoleError::new(
+                        "reset_rejected",
+                        format!("resetcell {cell:08x} rejected: NotDue"),
+                    )
+                })?;
             let mut ledger = world.get_resource_mut::<interaction::CanonicalItemLedger>();
             let result = runtime.world.apply_cell_reset(
                 cell,
@@ -1635,6 +1637,67 @@ fn reset_cell(
     )
 }
 
+fn fast_travel_evidence(
+    world: &World,
+    destination_cell: u32,
+    travel_ms: u64,
+) -> Result<bevyout_core::lifecycle::FastTravelEvidence, ConsoleError> {
+    let asset_root = world
+        .get_resource::<crate::viewer::LoadedSceneManifest>()
+        .map(|manifest| PathBuf::from(&manifest.0.asset_root))
+        .ok_or_else(|| {
+            ConsoleError::new("cell_unavailable", "no active cell manifest is loaded")
+        })?;
+    let discovered = tp_scene_manifest_path(&asset_root, destination_cell).is_file();
+    let interior = world
+        .get_resource::<crate::viewer::LoadedSceneManifest>()
+        .is_some_and(|manifest| manifest.0.cell.interior);
+    let detection = world
+        .get_resource::<crate::viewer::hud::HudDetection>()
+        .map(|hud| hud.0)
+        .unwrap_or_default();
+    let danger = matches!(
+        detection,
+        bevyout_core::detection::DetectionHud::Caution
+            | bevyout_core::detection::DetectionHud::Danger
+    );
+    let combat = matches!(detection, bevyout_core::detection::DetectionHud::Danger);
+    let catalog = world.get_resource::<PreparedItemCatalog>();
+    let carried = world
+        .get_resource::<interaction::PlayerInventory>()
+        .map(|inventory| {
+            inventory.total_weight(|form_id| {
+                catalog.and_then(|catalog| {
+                    catalog
+                        .items
+                        .iter()
+                        .find(|item| item.base_form_id == form_id)
+                        .and_then(|item| item.weight)
+                })
+            })
+        })
+        .unwrap_or(0.0);
+    let carry_capacity = world
+        .get_resource::<super::stats::PlayerProgression>()
+        .zip(world.get_resource::<super::stats::StatsSettings>())
+        .map(|(progression, settings)| progression.stats.derived(&settings.0).carry_weight)
+        .unwrap_or(f32::MAX);
+    let encumbered = carried > carry_capacity;
+    let radiation = world
+        .get_resource::<super::stats::PlayerProgression>()
+        .is_some_and(|progression| progression.radiation.rads >= 200);
+    Ok(bevyout_core::lifecycle::FastTravelEvidence {
+        destination_cell,
+        travel_ms,
+        discovered,
+        danger,
+        interior,
+        encumbered,
+        combat,
+        radiation,
+    })
+}
+
 fn fast_travel(
     world: &mut World,
     invocation: &ConsoleInvocation,
@@ -1657,16 +1720,13 @@ fn fast_travel(
     let travel_ms = hours
         .checked_mul(bevyout_core::time::MS_PER_HOUR)
         .ok_or_else(|| ConsoleError::new("overflow", "fasttravel would overflow game time"))?;
-    let evidence = bevyout_core::lifecycle::FastTravelEvidence {
-        destination_cell: cell,
-        travel_ms,
-        discovered: true,
-        danger: false,
-        interior: false,
-        encumbered: false,
-        combat: false,
-        radiation: false,
-    };
+    let evidence = fast_travel_evidence(world, cell, travel_ms)?;
+    if !evidence.discovered {
+        return Err(ConsoleError::new(
+            "cell_not_found",
+            format!("cell {cell:08x} is not a prepared cell"),
+        ));
+    }
     world.resource_scope(
         |world, mut runtime: Mut<crate::viewer::game_time::GameTimeRuntime>| {
             let commit = {

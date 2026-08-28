@@ -11,6 +11,8 @@ use crate::perception::TargetId;
 pub const LIMB_MAX_MILLI: u32 = 100_000;
 /// A limb is crippled once current condition reaches this value.
 pub const LIMB_CRIPPLE_THRESHOLD_MILLI: u32 = 0;
+/// Remembered shot identities are bounded so re-equip cannot grow the set without bound.
+pub const APPLIED_SHOT_WINDOW: usize = 1_024;
 
 pub const LOCOMOTION_FULL_BPS: u32 = 10_000;
 pub const LOCOMOTION_ONE_LEG_BPS: u32 = 6_000;
@@ -21,8 +23,46 @@ pub const ARM_SPREAD_PER_CRIPPLE_BPS: u32 = 2_500;
 pub const HEAD_PERCEPTION_PENALTY: i8 = -4;
 
 /// Stable identity for one accepted weapon shot.
+///
+/// `weapon_instance` is the canonical equipped instance (0 for debug/console
+/// impacts). `shot_sequence` is that weapon state's fire count. Re-equipping a
+/// different instance cannot collide with a previous weapon's sequence 1.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct ShotId(pub u64);
+pub struct ShotId {
+    pub weapon_instance: u64,
+    pub shot_sequence: u64,
+}
+
+impl ShotId {
+    #[must_use]
+    pub const fn from_sequence(shot_sequence: u64) -> Self {
+        Self {
+            weapon_instance: 0,
+            shot_sequence,
+        }
+    }
+
+    #[must_use]
+    pub const fn from_weapon_shot(weapon_instance: u64, shot_sequence: u64) -> Self {
+        Self {
+            weapon_instance,
+            shot_sequence,
+        }
+    }
+
+    /// Next unused debug/console identity in the weapon-instance-0 namespace.
+    #[must_use]
+    pub fn next_debug(applied: &BTreeSet<Self>) -> Self {
+        let next = applied
+            .iter()
+            .filter(|shot| shot.weapon_instance == 0)
+            .map(|shot| shot.shot_sequence)
+            .max()
+            .unwrap_or(0)
+            .saturating_add(1);
+        Self::from_sequence(next)
+    }
+}
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub struct LimbCondition {
@@ -168,11 +208,24 @@ impl LimbImpactOutcome {
     }
 }
 
+fn remember_shot(state: &mut LimbState, shot_id: ShotId) -> bool {
+    if !state.applied_shots.insert(shot_id) {
+        return false;
+    }
+    while state.applied_shots.len() > APPLIED_SHOT_WINDOW {
+        let Some(oldest) = state.applied_shots.iter().next().copied() else {
+            break;
+        };
+        state.applied_shots.remove(&oldest);
+    }
+    true
+}
+
 /// Applies limb damage after health damage has already been resolved. Duplicate
 /// `ShotId`s are rejected without mutating condition.
 pub fn apply_limb_impact(state: &mut LimbState, impact: LimbImpact) -> LimbImpactOutcome {
     let existing = state.part(impact.part);
-    if !state.applied_shots.insert(impact.shot_id) {
+    if !remember_shot(state, impact.shot_id) {
         return LimbImpactOutcome::duplicate(impact.part, existing);
     }
     let previous_milli = existing.current_milli;

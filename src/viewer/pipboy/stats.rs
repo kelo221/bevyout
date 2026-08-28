@@ -540,10 +540,6 @@ pub(super) fn spawn_stats_body(
                             &sources.figure_layout,
                             &sources.figure_editor,
                         );
-                        let limbs = sources
-                            .progression
-                            .as_ref()
-                            .map(|progression| &progression.limbs);
                         for (left, top, width, part) in [
                             (169.0, 0.0, 82.0, bevyout_core::combat::BodyPartId::Head),
                             (8.0, 128.0, 94.0, bevyout_core::combat::BodyPartId::LeftArm),
@@ -562,7 +558,7 @@ pub(super) fn spawn_stats_body(
                                 bevyout_core::combat::BodyPartId::RightLeg,
                             ),
                         ] {
-                            let value = limbs.map_or(1.0, |state| state.part(part).fraction());
+                            let value = status.limbs.part(part).fraction();
                             condition_meter(body, left, top, width, value);
                         }
                     });

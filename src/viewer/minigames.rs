@@ -13,6 +13,7 @@ use bevyout_core::minigames::{
 use crate::app_state::{GameplayModal, RequestStateTransition};
 
 use super::actor::ActorRuntime;
+use super::actor_state::ActorStateRuntime;
 use super::crime::live_witnesses;
 use super::interaction::{CanonicalItemLedger, PlacementRoot, PlayerInventory};
 use super::nav;
@@ -219,7 +220,12 @@ pub(crate) fn apply_lockpick_input(
     input: LockpickInput,
 ) -> Result<MinigameCommit, MinigameError> {
     let witnesses = {
-        let mut query = world.query::<(&ActorRuntime, &ActorAwareness)>();
+        let mut query = world.query::<(
+            &ActorRuntime,
+            &ActorAwareness,
+            Option<&ActorStateRuntime>,
+            Option<&PlacementRoot>,
+        )>();
         live_witnesses(query.iter(world))
     };
     let mut witnesses = witnesses;

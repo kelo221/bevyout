@@ -1203,6 +1203,7 @@ fn stat_segments_format_level_vitals_and_xp() {
         radiation_line: String::new(),
         effect_lines: Vec::new(),
         world_clock_line: String::new(),
+        limbs: bevyout_core::combat::LimbState::healthy(),
     };
     assert_eq!(
         stat_segments(&status),
@@ -1225,6 +1226,7 @@ fn stat_segments_format_level_vitals_and_xp() {
         radiation_line: String::new(),
         effect_lines: Vec::new(),
         world_clock_line: String::new(),
+        limbs: bevyout_core::combat::LimbState::healthy(),
     };
     assert_eq!(stat_segments(&unavailable)[2], ("AP", "—/75".to_string()));
 }

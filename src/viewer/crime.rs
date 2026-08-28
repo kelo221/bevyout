@@ -8,8 +8,8 @@ use bevyout_core::items::{OwnershipClaim, TakeClassification, TakerFactions, cla
 use bevyout_core::perception::{TargetClass, TargetId};
 
 use super::actor::ActorRuntime;
-use super::actor_state::ActorDefinitionCatalogs;
-use super::interaction::CanonicalItemLedger;
+use super::actor_state::{ActorDefinitionCatalogs, ActorStateRuntime};
+use super::interaction::{CanonicalItemLedger, PlacementRoot};
 use super::perception::ActorAwareness;
 use super::stats::PlayerProgression;
 
@@ -127,7 +127,12 @@ pub(crate) fn report_theft_in_world(
     steal_form_id: u32,
 ) {
     let witnesses = {
-        let mut query = world.query::<(&ActorRuntime, &ActorAwareness)>();
+        let mut query = world.query::<(
+            &ActorRuntime,
+            &ActorAwareness,
+            Option<&ActorStateRuntime>,
+            Option<&PlacementRoot>,
+        )>();
         live_witnesses(query.iter(world))
     };
     let TakeClassification::Steal { owner_form_id } =
@@ -155,10 +160,17 @@ pub(crate) fn report_theft_in_world(
 
 #[must_use]
 pub(crate) fn live_witnesses<'a>(
-    actors: impl Iterator<Item = (&'a ActorRuntime, &'a ActorAwareness)>,
+    actors: impl Iterator<
+        Item = (
+            &'a ActorRuntime,
+            &'a ActorAwareness,
+            Option<&'a ActorStateRuntime>,
+            Option<&'a PlacementRoot>,
+        ),
+    >,
 ) -> Vec<WitnessEvidence> {
     actors
-        .map(|(runtime, awareness)| {
+        .map(|(runtime, awareness, state, root)| {
             let inputs = awareness.last_player;
             WitnessEvidence {
                 witness: TargetId {
@@ -169,10 +181,16 @@ pub(crate) fn live_witnesses<'a>(
                 distance_mm: inputs
                     .map(|inputs| (inputs.distance.max(0.0) * 1_000.0).round() as u32)
                     .unwrap_or(u32::MAX),
-                alive: true,
-                enabled: true,
+                alive: state.is_none_or(|state| {
+                    state.life_state == bevyout_core::actor_state::ActorLifeState::Alive
+                }),
+                enabled: root.is_none_or(|root| root.placement().initially_enabled),
                 hostile_to_victim: false,
             }
         })
         .collect()
 }
+
+#[cfg(test)]
+#[path = "crime/tests.rs"]
+mod tests;

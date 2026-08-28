@@ -38,7 +38,7 @@ use openmw::{read_records, read_subrecords, tag, write_record, write_subrecord};
 pub const CURRENT_SAVE_FORMAT_VERSION: u32 = 9;
 pub const MIN_SUPPORTED_SAVE_FORMAT_VERSION: u32 = 1;
 /// RPGS envelope revision introduced with save format v9.
-pub const RPG_SAVE_REVISION: u32 = 1;
+pub const RPG_SAVE_REVISION: u32 = 2;
 
 #[derive(Debug, Clone)]
 pub struct SaveGame {
@@ -1412,18 +1412,18 @@ fn encode_rpg(rpg: &RpgSaveState) -> Result<Vec<u8>> {
 
 fn decode_rpg(payload: &[u8]) -> Result<RpgSaveState> {
     let mut rpg = RpgSaveState::default();
-    let mut saw_head = false;
+    let mut seen = BTreeSet::new();
     for subrecord in read_subrecords(payload)? {
+        let tag_name = std::str::from_utf8(&subrecord.tag).unwrap_or("????");
+        if !seen.insert(subrecord.tag) {
+            bail!("RPGS contains duplicate {tag_name}");
+        }
         match &subrecord.tag {
             record_tag if *record_tag == tag("HEAD") => {
-                if saw_head {
-                    bail!("RPGS contains duplicate HEAD");
-                }
                 let revision = read_u32(&subrecord.payload, "RPGS.HEAD")?;
-                if revision == 0 || revision > RPG_SAVE_REVISION {
+                if revision != RPG_SAVE_REVISION {
                     bail!("RPGS.HEAD revision {revision} is unsupported");
                 }
-                saw_head = true;
             }
             record_tag if *record_tag == tag("STAT") => {
                 let (stats, unspent, total, health): (CharacterSheet, u16, u16, Option<f32>) =
@@ -1473,8 +1473,13 @@ fn decode_rpg(payload: &[u8]) -> Result<RpgSaveState> {
             _ => {}
         }
     }
-    if !saw_head {
+    if !seen.contains(&tag("HEAD")) {
         bail!("RPGS is missing HEAD");
+    }
+    for required in ["STAT", "PERK", "EFCT", "RADS", "ADDI", "LIMB", "RNG0"] {
+        if !seen.contains(&tag(required)) {
+            bail!("RPGS is missing {required}");
+        }
     }
     Ok(rpg)
 }

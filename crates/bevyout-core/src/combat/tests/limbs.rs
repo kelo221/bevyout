@@ -4,7 +4,7 @@ use crate::perception::{TargetClass, TargetId};
 
 fn impact(shot: u64, part: BodyPartId, milli: u32) -> LimbImpact {
     LimbImpact {
-        shot_id: ShotId(shot),
+        shot_id: ShotId::from_sequence(shot),
         target: TargetId {
             class: TargetClass::Actor,
             form_id: 0x20,
@@ -93,6 +93,38 @@ fn leg_and_arm_penalties_are_pinned() {
     apply_limb_impact(&mut state, impact(4, BodyPartId::LeftArm, LIMB_MAX_MILLI));
     assert_eq!(state.arm_reload_multiplier_bps(), 20_000);
     assert_eq!(state.arm_spread_penalty_bps(), 5_000);
+}
+
+#[test]
+fn reequip_weapon_instances_do_not_collide() {
+    let mut state = LimbState::healthy();
+    let first = apply_limb_impact(
+        &mut state,
+        LimbImpact {
+            shot_id: ShotId::from_weapon_shot(11, 1),
+            target: TargetId {
+                class: TargetClass::Actor,
+                form_id: 0x20,
+            },
+            part: BodyPartId::Torso,
+            final_damage_milli: 10_000,
+        },
+    );
+    let second = apply_limb_impact(
+        &mut state,
+        LimbImpact {
+            shot_id: ShotId::from_weapon_shot(12, 1),
+            target: TargetId {
+                class: TargetClass::Actor,
+                form_id: 0x20,
+            },
+            part: BodyPartId::Torso,
+            final_damage_milli: 10_000,
+        },
+    );
+    assert!(!first.duplicate);
+    assert!(!second.duplicate);
+    assert_eq!(state.part(BodyPartId::Torso).current_milli, 80_000);
 }
 
 #[test]

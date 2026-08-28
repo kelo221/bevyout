@@ -143,12 +143,14 @@ fn unique_and_player_owned_holders_survive_reset() {
             .len(),
         1
     );
-    assert!(
+    assert_eq!(
         ledger.holders()[&HolderId::FixtureContainer {
             reference_form_id: 0x21
         }]
             .items
-            .is_empty()
+            .len(),
+        1,
+        "unowned containers keep contents until reset templates exist"
     );
     assert!(!ledger.holders().contains_key(&HolderId::Corpse {
         actor_reference_form_id: 0x40
@@ -157,6 +159,20 @@ fn unique_and_player_owned_holders_survive_reset() {
         world
             .apply_cell_reset(0x0001_51e3, MERCHANT_RESTOCK_INTERVAL_MS, Some(&mut ledger))
             .is_err()
+    );
+}
+
+#[test]
+fn future_due_reset_is_not_due() {
+    let mut world = world();
+    world.register_cell(0x0001_51e3, false);
+    let due = world.cells[&0x0001_51e3]
+        .reset_due_game_ms
+        .expect("vacant cells schedule a due");
+    assert!(due > world.clock.absolute_game_ms);
+    assert_eq!(
+        world.apply_cell_reset(0x0001_51e3, due, None),
+        Err(crate::lifecycle::CellResetError::NotDue)
     );
 }
 

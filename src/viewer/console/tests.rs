@@ -1709,6 +1709,159 @@ fn resetcell_and_fasttravel_reject_bad_form_ids() {
     );
 }
 
+#[test]
+fn resetcell_unregistered_cell_is_not_due() {
+    let mut app = test_app();
+    let output = exec(&mut app, "resetcell 000151e3");
+    assert_eq!(error_code(&output), "reset_rejected");
+    assert!(
+        output.error.as_ref().unwrap().message.contains("NotDue"),
+        "{:?}",
+        output.error
+    );
+}
+
+fn insert_fast_travel_manifest(app: &mut App, interior: bool, asset_root: String) {
+    let mut manifest = fixture_manifest();
+    manifest.cell.interior = interior;
+    manifest.asset_root = asset_root;
+    app.world_mut()
+        .insert_resource(crate::viewer::LoadedSceneManifest(manifest));
+}
+
+fn write_prepared_destination(test_name: &str, cell: u32) -> std::path::PathBuf {
+    let temp_root = std::env::temp_dir().join(format!(
+        "bevyout-console-{test_name}-{}-{cell:08x}",
+        std::process::id()
+    ));
+    let scene_dir = temp_root.join("scenes").join(format!("{cell:08x}"));
+    std::fs::create_dir_all(&scene_dir).expect("create synthetic prepared-cell fixture dir");
+    std::fs::write(scene_dir.join("scene.ron"), "()").expect("write scene fixture");
+    temp_root
+}
+
+fn heavy_misc_item(base_form_id: u32, weight: f32) -> PreparedItemDefinition {
+    PreparedItemDefinition {
+        base_form_id,
+        record_kind: "MISC".into(),
+        category: PreparedItemCategory::Misc,
+        editor_id: None,
+        display_name: None,
+        source_model_path: None,
+        icon_asset_path: None,
+        world_asset_path: None,
+        physics_asset_path: None,
+        drop_collider: Default::default(),
+        value: None,
+        weight: Some(weight),
+        quest_item: false,
+        stats: PreparedItemStats::default(),
+        audio: Default::default(),
+    }
+}
+
+#[test]
+fn fasttravel_unprepared_destination_does_not_advance_time() {
+    let mut app = test_app();
+    app.add_message::<interaction::DoorTravelRequested>();
+    insert_fast_travel_manifest(&mut app, false, "cache/00017f37".into());
+    let before = app
+        .world()
+        .resource::<super::super::game_time::GameTimeRuntime>()
+        .world
+        .clock
+        .absolute_game_ms;
+    let output = exec(&mut app, "fasttravel 000badd0");
+    assert_eq!(error_code(&output), "cell_not_found");
+    assert_eq!(
+        app.world()
+            .resource::<super::super::game_time::GameTimeRuntime>()
+            .world
+            .clock
+            .absolute_game_ms,
+        before
+    );
+    let requests = app
+        .world()
+        .resource::<Messages<interaction::DoorTravelRequested>>();
+    assert_eq!(requests.iter_current_update_messages().count(), 0);
+}
+
+#[test]
+fn fasttravel_from_an_interior_is_blocked_without_advancing_time() {
+    let mut app = test_app();
+    app.add_message::<interaction::DoorTravelRequested>();
+    let destination = 0x0002_0002u32;
+    let temp_root = write_prepared_destination("fasttravel-interior", destination);
+    insert_fast_travel_manifest(&mut app, true, temp_root.to_string_lossy().into_owned());
+    let before = app
+        .world()
+        .resource::<super::super::game_time::GameTimeRuntime>()
+        .world
+        .clock
+        .absolute_game_ms;
+    let output = exec(&mut app, "fasttravel 00020002");
+    let cleanup = std::fs::remove_dir_all(&temp_root);
+    assert_eq!(error_code(&output), "fast_travel_blocked");
+    assert!(
+        output.error.as_ref().unwrap().message.contains("Interior"),
+        "{:?}",
+        output.error
+    );
+    assert_eq!(
+        app.world()
+            .resource::<super::super::game_time::GameTimeRuntime>()
+            .world
+            .clock
+            .absolute_game_ms,
+        before
+    );
+    cleanup.expect("remove synthetic prepared-cell fixture dir");
+}
+
+#[test]
+fn fasttravel_encumbered_player_is_blocked_without_advancing_time() {
+    let mut app = test_app();
+    app.add_message::<interaction::DoorTravelRequested>();
+    let destination = 0x0002_0002u32;
+    let temp_root = write_prepared_destination("fasttravel-encumbered", destination);
+    insert_fast_travel_manifest(&mut app, false, temp_root.to_string_lossy().into_owned());
+    app.insert_resource(PreparedItemCatalog {
+        revision: "test".into(),
+        source_fingerprint: "test".into(),
+        items: vec![heavy_misc_item(0x42, 400.0)],
+    });
+    exec(&mut app, "additem 00000042");
+    let before = app
+        .world()
+        .resource::<super::super::game_time::GameTimeRuntime>()
+        .world
+        .clock
+        .absolute_game_ms;
+    let output = exec(&mut app, "fasttravel 00020002");
+    let cleanup = std::fs::remove_dir_all(&temp_root);
+    assert_eq!(error_code(&output), "fast_travel_blocked");
+    assert!(
+        output
+            .error
+            .as_ref()
+            .unwrap()
+            .message
+            .contains("Encumbered"),
+        "{:?}",
+        output.error
+    );
+    assert_eq!(
+        app.world()
+            .resource::<super::super::game_time::GameTimeRuntime>()
+            .world
+            .clock
+            .absolute_game_ms,
+        before
+    );
+    cleanup.expect("remove synthetic prepared-cell fixture dir");
+}
+
 // -- save (issue #60, F60.3) ------------------------------------------
 
 #[test]

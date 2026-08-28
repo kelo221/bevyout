@@ -258,13 +258,36 @@ fn decode_rpg_rejects_missing_head() {
 #[test]
 fn decode_rpg_rejects_unsupported_head_revision() {
     let mut payload = Vec::new();
-    write_subrecord(&mut payload, tag("HEAD"), &0u32.to_le_bytes()).unwrap();
-    let zero = decode_rpg(&payload).unwrap_err().to_string();
-    assert!(zero.contains("unsupported"), "{zero}");
+    write_subrecord(&mut payload, tag("HEAD"), &1u32.to_le_bytes()).unwrap();
+    let previous = decode_rpg(&payload).unwrap_err().to_string();
+    assert!(previous.contains("unsupported"), "{previous}");
     let mut payload = Vec::new();
-    write_subrecord(&mut payload, tag("HEAD"), &2u32.to_le_bytes()).unwrap();
+    write_subrecord(&mut payload, tag("HEAD"), &3u32.to_le_bytes()).unwrap();
     let future = decode_rpg(&payload).unwrap_err().to_string();
     assert!(future.contains("unsupported"), "{future}");
+}
+
+#[test]
+fn decode_rpg_rejects_missing_required_subrecords() {
+    let mut payload = Vec::new();
+    write_subrecord(&mut payload, tag("HEAD"), &RPG_SAVE_REVISION.to_le_bytes()).unwrap();
+    let error = decode_rpg(&payload).unwrap_err().to_string();
+    assert!(error.contains("RPGS is missing STAT"), "{error}");
+}
+
+#[test]
+fn decode_rpg_rejects_duplicate_non_head_subrecords() {
+    let mut payload = encode_rpg(&RpgSaveState::default()).unwrap();
+    write_subrecord(
+        &mut payload,
+        tag("STAT"),
+        ron::ser::to_string(&(CharacterSheet::default(), 0u16, 0u16, None::<f32>))
+            .unwrap()
+            .as_bytes(),
+    )
+    .unwrap();
+    let error = decode_rpg(&payload).unwrap_err().to_string();
+    assert!(error.contains("duplicate STAT"), "{error}");
 }
 
 #[test]
