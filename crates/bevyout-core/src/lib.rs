@@ -24,6 +24,7 @@ pub mod geometry;
 pub mod image_space;
 pub mod item_transaction;
 pub mod items;
+pub mod lifecycle;
 pub mod lighting;
 pub mod local_light_policy;
 pub mod manifest;

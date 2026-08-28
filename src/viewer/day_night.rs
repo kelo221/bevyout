@@ -119,7 +119,11 @@ fn advance_clock(
     real_time: Res<Time<Real>>,
     virtual_time: Res<Time<Virtual>>,
     mut clock: ResMut<GameClock>,
+    runtime: Option<Res<super::game_time::GameTimeRuntime>>,
 ) {
+    if runtime.is_some() {
+        return;
+    }
     advance_clock_by(&mut clock, real_time.delta_secs(), virtual_time.is_paused());
 }
 

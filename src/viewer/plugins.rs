@@ -11,7 +11,7 @@ use crate::app_state::AppStatePlugin;
 
 use super::{
     actor, actor_animation, actor_state, agent_bridge, ai, animation, audio, bindings, cinema,
-    console, console_ui, day_night, dialogue, effects, hud, interaction, minigames, nav,
+    console, console_ui, day_night, dialogue, effects, game_time, hud, interaction, minigames, nav,
     pause_menu, perception, pipboy, pipboy_reader, player, screen_fx, stats, weapon, world,
     world_items,
 };
@@ -74,6 +74,7 @@ impl PluginGroup for ViewerPlugins {
             })
             .add(bindings::BindingsPlugin)
             .add(audio::ViewerAudioPlugin)
+            .add(game_time::GameTimePlugin)
             .add(day_night::DayNightPlugin {
                 cycle_seconds: self.day_night_cycle_seconds,
             })

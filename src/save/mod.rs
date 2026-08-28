@@ -23,11 +23,13 @@ use bevyout_core::combat::rng::CombatRngState;
 use bevyout_core::crime::CrimeLedger;
 use bevyout_core::dialogue::DialogueSnapshot;
 use bevyout_core::effects::ActiveEffectsLedger;
+use bevyout_core::lifecycle::LifecycleSnapshot;
 use bevyout_core::manifest::exterior::WorldLocation;
 use bevyout_core::perception::AwarenessState;
 use bevyout_core::perks::PerkProgression;
 use bevyout_core::radiation::RadiationPool;
 use bevyout_core::stats::CharacterSheet;
+use bevyout_core::time::GameClockState;
 
 mod openmw;
 
@@ -83,6 +85,8 @@ pub struct RpgSaveState {
     pub limbs: LimbState,
     pub rng: RpgRngState,
     pub crime: CrimeLedger,
+    pub clock: GameClockState,
+    pub lifecycle: LifecycleSnapshot,
 }
 
 impl PartialEq for SaveGame {
@@ -1385,6 +1389,24 @@ fn encode_rpg(rpg: &RpgSaveState) -> Result<Vec<u8>> {
                 .as_bytes(),
         )?;
     }
+    if rpg.clock != GameClockState::default() {
+        write_subrecord(
+            &mut payload,
+            tag("TIME"),
+            ron::ser::to_string(&rpg.clock)
+                .context("encoding RPGS TIME")?
+                .as_bytes(),
+        )?;
+    }
+    if rpg.lifecycle != LifecycleSnapshot::default() {
+        write_subrecord(
+            &mut payload,
+            tag("LIFE"),
+            ron::ser::to_string(&rpg.lifecycle)
+                .context("encoding RPGS LIFE")?
+                .as_bytes(),
+        )?;
+    }
     Ok(payload)
 }
 
@@ -1439,6 +1461,14 @@ fn decode_rpg(payload: &[u8]) -> Result<RpgSaveState> {
             record_tag if *record_tag == tag("CRIM") => {
                 rpg.crime =
                     ron::de::from_bytes(&subrecord.payload).context("decoding RPGS CRIM")?;
+            }
+            record_tag if *record_tag == tag("TIME") => {
+                rpg.clock =
+                    ron::de::from_bytes(&subrecord.payload).context("decoding RPGS TIME")?;
+            }
+            record_tag if *record_tag == tag("LIFE") => {
+                rpg.lifecycle =
+                    ron::de::from_bytes(&subrecord.payload).context("decoding RPGS LIFE")?;
             }
             _ => {}
         }

@@ -259,10 +259,17 @@ pub(crate) fn apply_player_radiation(
 /// dose publishes `ExpiredChemDose` for the withdrawal transition below.
 fn tick_active_effects_and_doses(
     time: Res<Time>,
+    runtime: Option<Res<super::game_time::GameTimeRuntime>>,
     mut players: Query<&mut ActiveEffectsList>,
     mut expired: MessageWriter<ExpiredChemDose>,
 ) {
-    let delta_ms = u32::try_from((time.delta_secs() * 1000.0).round() as u64).unwrap_or(u32::MAX);
+    let delta_ms = if runtime.is_some() {
+        // Integer advances already ticked the ledger inside LifecycleWorld.
+        // Isolated tests without GameTimeRuntime keep the frame fallback.
+        return;
+    } else {
+        u32::try_from((time.delta_secs() * 1000.0).round() as u64).unwrap_or(u32::MAX)
+    };
     if delta_ms == 0 {
         return;
     }

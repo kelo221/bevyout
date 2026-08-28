@@ -1371,6 +1371,14 @@ struct BevyoutWorld {
     rpg_hacking_password: String,
     rpg_lockpick_snapshot: Option<bevyout_core::minigames::LockpickSession>,
     rpg_hacking_snapshot: Option<bevyout_core::minigames::HackingSession>,
+
+    // -- rpg_time.feature (M9 W9 integer clock and lifecycle) --
+    rpg_time: bevyout_core::lifecycle::LifecycleWorld,
+    rpg_time_items: item_transaction::ItemLedger,
+    rpg_time_error: Option<bevyout_core::time::TimeError>,
+    rpg_time_hour_before: Option<f32>,
+    rpg_fast_evidence: Option<bevyout_core::lifecycle::FastTravelEvidence>,
+    rpg_zone_bounds: Option<(u32, u8, u8)>,
 }
 
 fn synthetic_dialogue_source() -> dialogue::DialogueSource {
@@ -20493,4 +20501,520 @@ async fn then_rpg_save_allowed(world: &mut BevyoutWorld) {
         world.rpg_lockpick.as_ref(),
         world.rpg_hacking.as_ref()
     ));
+}
+
+// rpg_time.feature (M9 wave 9)
+
+fn rpg_calendar_label(clock: bevyout_core::time::GameClockState) -> String {
+    let date = clock.calendar();
+    format!(
+        "{:04}-{:02}-{:02} {:02}:{:02}",
+        date.year, date.month, date.day, date.hour, date.minute
+    )
+}
+
+#[given(regex = r"^the game clock is (\d+) ms with timescale (\d+)$")]
+async fn given_rpg_clock(world: &mut BevyoutWorld, ms: u64, timescale: u32) {
+    world.rpg_time = bevyout_core::lifecycle::LifecycleWorld::default();
+    world.rpg_time.clock.absolute_game_ms = ms;
+    world.rpg_time.clock.timescale = timescale;
+    world.rpg_time.clock.fractional_timescale_remainder = 0;
+    world.rpg_time.schedule_defaults();
+    world.rpg_time_error = None;
+}
+
+#[then(regex = r"^the calendar is (\d{4}-\d{2}-\d{2} \d{2}:\d{2})$")]
+async fn then_rpg_calendar(world: &mut BevyoutWorld, label: String) {
+    assert_eq!(rpg_calendar_label(world.rpg_time.clock), label);
+}
+
+#[then(regex = r"^the lighting hour projection is (\d+)$")]
+async fn then_rpg_lighting_hour(world: &mut BevyoutWorld, hour: u32) {
+    world.rpg_time_hour_before = Some(world.rpg_time.clock.hour_as_f32());
+    assert!((world.rpg_time.clock.hour_as_f32() - hour as f32).abs() < f32::EPSILON);
+}
+
+#[then("the lighting hour projection does not change the clock")]
+async fn then_rpg_lighting_no_feedback(world: &mut BevyoutWorld) {
+    let before = world.rpg_time.clock.absolute_game_ms;
+    let _ = world.rpg_time.clock.hour_as_f32();
+    assert_eq!(world.rpg_time.clock.absolute_game_ms, before);
+}
+
+#[when(regex = r"^the game clock advances (\d+) ms for (console|wait|sleep|fast travel)$")]
+async fn when_rpg_advance_ms(world: &mut BevyoutWorld, delta: u64, reason: String) {
+    let reason = match reason.as_str() {
+        "console" => bevyout_core::time::TimeAdvanceReason::Console,
+        "wait" => bevyout_core::time::TimeAdvanceReason::Wait,
+        "sleep" => bevyout_core::time::TimeAdvanceReason::Sleep,
+        _ => bevyout_core::time::TimeAdvanceReason::FastTravel,
+    };
+    match world
+        .rpg_time
+        .advance(delta, reason, Some(&mut world.rpg_time_items))
+    {
+        Ok(_) => world.rpg_time_error = None,
+        Err(error) => world.rpg_time_error = Some(error),
+    }
+}
+
+#[when(regex = r"^the game clock advances (\d+) real microseconds$")]
+async fn when_rpg_advance_realtime(world: &mut BevyoutWorld, us: u64) {
+    match world
+        .rpg_time
+        .advance_realtime(us, Some(&mut world.rpg_time_items))
+    {
+        Ok(_) => world.rpg_time_error = None,
+        Err(error) => world.rpg_time_error = Some(error),
+    }
+}
+
+#[then(regex = r"^the game clock is (\d+) ms$")]
+async fn then_rpg_clock_ms(world: &mut BevyoutWorld, ms: u64) {
+    assert_eq!(world.rpg_time.clock.absolute_game_ms, ms);
+}
+
+#[then(regex = r"^the timescale remainder is (\d+)$")]
+async fn then_rpg_remainder(world: &mut BevyoutWorld, remainder: u32) {
+    assert_eq!(
+        world.rpg_time.clock.fractional_timescale_remainder,
+        remainder
+    );
+}
+
+#[then("the time advance is rejected as overflow")]
+async fn then_rpg_overflow(world: &mut BevyoutWorld) {
+    assert_eq!(
+        world.rpg_time_error,
+        Some(bevyout_core::time::TimeError::Overflow)
+    );
+}
+
+#[given(regex = r"^a scheduled merchant restock owner (\d+) due at (\d+) ms$")]
+async fn given_rpg_scheduled_restock(world: &mut BevyoutWorld, owner: u32, due: u64) {
+    world.rpg_time.schedule_restock(owner, due);
+}
+
+#[given(regex = r"^a scheduled cell reset owner (\d+) due at (\d+) ms$")]
+async fn given_rpg_scheduled_cell_reset(world: &mut BevyoutWorld, owner: u32, due: u64) {
+    world
+        .rpg_time
+        .scheduler
+        .schedule(bevyout_core::lifecycle::LifecycleTask {
+            kind: bevyout_core::lifecycle::LifecycleKind::CellReset,
+            owner,
+            due_game_ms: due,
+        });
+}
+
+#[then("restock did not run")]
+async fn then_rpg_restock_did_not_run(world: &mut BevyoutWorld) {
+    assert!(
+        world
+            .rpg_time
+            .restocks
+            .values()
+            .all(|state| state.generation == 0)
+    );
+}
+
+#[then(regex = r"^restock ran with generation (\d+)$")]
+async fn then_rpg_restock_ran(world: &mut BevyoutWorld, generation: u32) {
+    assert!(
+        world
+            .rpg_time
+            .restocks
+            .values()
+            .any(|state| state.generation == generation)
+    );
+}
+
+#[then(regex = r"^the executed lifecycle kinds are (.+)$")]
+async fn then_rpg_kinds(world: &mut BevyoutWorld, kinds: String) {
+    let expected: Vec<_> = kinds
+        .split(", ")
+        .map(|kind| match kind {
+            "effects" => bevyout_core::lifecycle::LifecycleKind::Effects,
+            "radiation" => bevyout_core::lifecycle::LifecycleKind::Radiation,
+            "death" => bevyout_core::lifecycle::LifecycleKind::Death,
+            "restock" => bevyout_core::lifecycle::LifecycleKind::Restock,
+            "cell reset" => bevyout_core::lifecycle::LifecycleKind::CellReset,
+            "arrival" => bevyout_core::lifecycle::LifecycleKind::Arrival,
+            other => panic!("unknown kind {other}"),
+        })
+        .collect();
+    let actual: Vec<_> = world
+        .rpg_time
+        .last_kinds
+        .iter()
+        .copied()
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    let expected: Vec<_> = expected
+        .into_iter()
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    assert_eq!(actual, expected);
+}
+
+#[then(regex = r"^the due task owners are (.+)$")]
+async fn then_rpg_owners(world: &mut BevyoutWorld, owners: String) {
+    let expected: Vec<u32> = owners
+        .split(", ")
+        .map(|value| value.parse().expect("owner"))
+        .collect();
+    let actual: Vec<u32> = world
+        .rpg_time
+        .last_owners
+        .iter()
+        .copied()
+        .zip(world.rpg_time.last_kinds.iter().copied())
+        .filter(|(_, kind)| {
+            matches!(
+                kind,
+                bevyout_core::lifecycle::LifecycleKind::Restock
+                    | bevyout_core::lifecycle::LifecycleKind::CellReset
+            )
+        })
+        .map(|(owner, _)| owner)
+        .collect();
+    assert_eq!(actual, expected);
+}
+
+#[given(regex = r"^cell (0x[0-9a-fA-F]+) last visited at (\d+) ms (occupied|vacant)$")]
+async fn given_rpg_cell(world: &mut BevyoutWorld, hex: String, _visited: u64, occupancy: String) {
+    let cell = u32::from_str_radix(hex.trim_start_matches("0x"), 16).expect("cell");
+    world.rpg_time.register_cell(cell, occupancy == "occupied");
+}
+
+#[when(regex = r"^cell (0x[0-9a-fA-F]+) is vacated at (\d+) ms$")]
+async fn when_rpg_vacate(world: &mut BevyoutWorld, hex: String, at: u64) {
+    let cell = u32::from_str_radix(hex.trim_start_matches("0x"), 16).expect("cell");
+    world.rpg_time.vacate_cell(cell, at);
+}
+
+#[then(regex = r"^cell (0x[0-9a-fA-F]+) did not reset$")]
+async fn then_rpg_cell_no_reset(world: &mut BevyoutWorld, hex: String) {
+    let cell = u32::from_str_radix(hex.trim_start_matches("0x"), 16).expect("cell");
+    assert_eq!(world.rpg_time.cells[&cell].reset_generation, 0);
+}
+
+#[then(regex = r"^cell (0x[0-9a-fA-F]+) reset generation is (\d+)$")]
+async fn then_rpg_cell_reset_gen(world: &mut BevyoutWorld, hex: String, generation: u32) {
+    let cell = u32::from_str_radix(hex.trim_start_matches("0x"), 16).expect("cell");
+    assert_eq!(world.rpg_time.cells[&cell].reset_generation, generation);
+}
+
+#[given(regex = r"^cell (0x[0-9a-fA-F]+) unique ref (0x[0-9a-fA-F]+)$")]
+async fn given_rpg_unique_ref(world: &mut BevyoutWorld, cell: String, reference: String) {
+    let cell = u32::from_str_radix(cell.trim_start_matches("0x"), 16).expect("cell");
+    let reference = u32::from_str_radix(reference.trim_start_matches("0x"), 16).expect("ref");
+    world
+        .rpg_time
+        .cells
+        .get_mut(&cell)
+        .expect("cell")
+        .unique_refs
+        .insert(reference);
+}
+
+#[given(regex = r"^cell (0x[0-9a-fA-F]+) container (0x[0-9a-fA-F]+) with a player-owned item$")]
+async fn given_rpg_owned_container(world: &mut BevyoutWorld, cell: String, reference: String) {
+    let cell = u32::from_str_radix(cell.trim_start_matches("0x"), 16).expect("cell");
+    let reference = u32::from_str_radix(reference.trim_start_matches("0x"), 16).expect("ref");
+    world
+        .rpg_time
+        .cells
+        .get_mut(&cell)
+        .expect("cell")
+        .containers
+        .insert(reference);
+    world.rpg_time_items.holders_mut().insert(
+        item_transaction::HolderId::FixtureContainer {
+            reference_form_id: reference,
+        },
+        item_transaction::ItemHolderState {
+            items: vec![bevyout_core::lifecycle::player_owned_item(1, 0x51)],
+            caps: 0,
+            revision: 1,
+        },
+    );
+}
+
+#[given(regex = r"^cell (0x[0-9a-fA-F]+) container (0x[0-9a-fA-F]+) with only unowned items$")]
+async fn given_rpg_unowned_container(world: &mut BevyoutWorld, cell: String, reference: String) {
+    let cell = u32::from_str_radix(cell.trim_start_matches("0x"), 16).expect("cell");
+    let reference = u32::from_str_radix(reference.trim_start_matches("0x"), 16).expect("ref");
+    world
+        .rpg_time
+        .cells
+        .get_mut(&cell)
+        .expect("cell")
+        .containers
+        .insert(reference);
+    world.rpg_time_items.holders_mut().insert(
+        item_transaction::HolderId::FixtureContainer {
+            reference_form_id: reference,
+        },
+        item_transaction::ItemHolderState {
+            items: vec![bevyout_core::lifecycle::unowned_item(2, 0x52)],
+            caps: 0,
+            revision: 1,
+        },
+    );
+}
+
+#[given(regex = r"^cell (0x[0-9a-fA-F]+) non-unique actor (0x[0-9a-fA-F]+)$")]
+async fn given_rpg_actor(world: &mut BevyoutWorld, cell: String, reference: String) {
+    let cell = u32::from_str_radix(cell.trim_start_matches("0x"), 16).expect("cell");
+    let reference = u32::from_str_radix(reference.trim_start_matches("0x"), 16).expect("ref");
+    world
+        .rpg_time
+        .cells
+        .get_mut(&cell)
+        .expect("cell")
+        .actors
+        .insert(reference);
+}
+
+#[given(regex = r"^cell (0x[0-9a-fA-F]+) unique actor (0x[0-9a-fA-F]+)$")]
+async fn given_rpg_unique_actor(world: &mut BevyoutWorld, cell: String, reference: String) {
+    let cell = u32::from_str_radix(cell.trim_start_matches("0x"), 16).expect("cell");
+    let reference = u32::from_str_radix(reference.trim_start_matches("0x"), 16).expect("ref");
+    let cell_state = world.rpg_time.cells.get_mut(&cell).expect("cell");
+    cell_state.actors.insert(reference);
+    cell_state.unique_actors.insert(reference);
+}
+
+#[given(regex = r"^cell (0x[0-9a-fA-F]+) corpse (0x[0-9a-fA-F]+)$")]
+async fn given_rpg_corpse(world: &mut BevyoutWorld, cell: String, reference: String) {
+    let cell = u32::from_str_radix(cell.trim_start_matches("0x"), 16).expect("cell");
+    let reference = u32::from_str_radix(reference.trim_start_matches("0x"), 16).expect("ref");
+    world
+        .rpg_time
+        .cells
+        .get_mut(&cell)
+        .expect("cell")
+        .corpses
+        .insert(reference);
+    world.rpg_time_items.holders_mut().insert(
+        item_transaction::HolderId::Corpse {
+            actor_reference_form_id: reference,
+        },
+        item_transaction::ItemHolderState::default(),
+    );
+}
+
+#[then(regex = r"^container (0x[0-9a-fA-F]+) was preserved$")]
+async fn then_rpg_container_preserved(world: &mut BevyoutWorld, hex: String) {
+    let reference = u32::from_str_radix(hex.trim_start_matches("0x"), 16).expect("ref");
+    assert_eq!(
+        world.rpg_time_items.holders()[&item_transaction::HolderId::FixtureContainer {
+            reference_form_id: reference
+        }]
+            .items
+            .len(),
+        1
+    );
+}
+
+#[then(regex = r"^container (0x[0-9a-fA-F]+) was restored$")]
+async fn then_rpg_container_restored(world: &mut BevyoutWorld, hex: String) {
+    let reference = u32::from_str_radix(hex.trim_start_matches("0x"), 16).expect("ref");
+    assert!(
+        world.rpg_time_items.holders()[&item_transaction::HolderId::FixtureContainer {
+            reference_form_id: reference
+        }]
+            .items
+            .is_empty()
+    );
+}
+
+#[then(regex = r"^actor (0x[0-9a-fA-F]+) was respawned$")]
+async fn then_rpg_actor_respawned(world: &mut BevyoutWorld, hex: String) {
+    let reference = u32::from_str_radix(hex.trim_start_matches("0x"), 16).expect("ref");
+    assert!(
+        world.rpg_time.cells.values().any(
+            |cell| cell.actors.contains(&reference) && !cell.unique_actors.contains(&reference)
+        )
+    );
+}
+
+#[then(regex = r"^actor (0x[0-9a-fA-F]+) survived$")]
+async fn then_rpg_actor_survived(world: &mut BevyoutWorld, hex: String) {
+    let reference = u32::from_str_radix(hex.trim_start_matches("0x"), 16).expect("ref");
+    assert!(
+        world
+            .rpg_time
+            .cells
+            .values()
+            .any(|cell| cell.unique_actors.contains(&reference))
+    );
+}
+
+#[then(regex = r"^corpse (0x[0-9a-fA-F]+) was removed$")]
+async fn then_rpg_corpse_removed(world: &mut BevyoutWorld, hex: String) {
+    let reference = u32::from_str_radix(hex.trim_start_matches("0x"), 16).expect("ref");
+    assert!(
+        !world
+            .rpg_time_items
+            .holders()
+            .contains_key(&item_transaction::HolderId::Corpse {
+                actor_reference_form_id: reference
+            })
+    );
+}
+
+#[when("the same cell reset is applied again")]
+async fn when_rpg_reset_again(world: &mut BevyoutWorld) {
+    let (cell, due) = world
+        .rpg_time
+        .reset_receipts
+        .iter()
+        .next()
+        .copied()
+        .expect("receipt");
+    let _ = world
+        .rpg_time
+        .apply_cell_reset(cell, due, Some(&mut world.rpg_time_items));
+}
+
+#[then("the cell reset is rejected as already applied")]
+async fn then_rpg_reset_rejected(world: &mut BevyoutWorld) {
+    assert!(matches!(
+        world.rpg_time.last_reset,
+        Some(Err(bevyout_core::lifecycle::CellResetError::AlreadyApplied))
+    ));
+}
+
+#[given(regex = r"^encounter zone (0x[0-9a-fA-F]+) min (\d+) max (\d+)$")]
+async fn given_rpg_zone(world: &mut BevyoutWorld, hex: String, min: u8, max: u8) {
+    let zone = u32::from_str_radix(hex.trim_start_matches("0x"), 16).expect("zone");
+    world.rpg_zone_bounds = Some((zone, min, max));
+}
+
+#[when(regex = r"^the player at level (\d+) enters zone (0x[0-9a-fA-F]+)$")]
+async fn when_rpg_enter_zone(world: &mut BevyoutWorld, level: u8, hex: String) {
+    let zone = u32::from_str_radix(hex.trim_start_matches("0x"), 16).expect("zone");
+    let (min, max) = world
+        .rpg_zone_bounds
+        .filter(|(id, _, _)| *id == zone)
+        .map(|(_, min, max)| (min, max))
+        .or_else(|| {
+            world
+                .rpg_time
+                .encounter_zones
+                .get(&zone)
+                .map(|state| (state.min_level, state.max_level))
+        })
+        .unwrap_or((2, 10));
+    world.rpg_time.enter_encounter_zone(zone, level, min, max);
+}
+
+#[then(regex = r"^the locked encounter level is (\d+)$")]
+async fn then_rpg_zone_level(world: &mut BevyoutWorld, level: u8) {
+    assert!(
+        world
+            .rpg_time
+            .encounter_zones
+            .values()
+            .any(|state| state.locked_level == level)
+    );
+}
+
+#[given(regex = r"^an? (discovered|undiscovered) destination (0x[0-9a-fA-F]+) travel (\d+) ms$")]
+async fn given_rpg_destination(
+    world: &mut BevyoutWorld,
+    discovered: String,
+    hex: String,
+    travel: u64,
+) {
+    let cell = u32::from_str_radix(hex.trim_start_matches("0x"), 16).expect("cell");
+    world.rpg_time.last_fast_travel = None;
+    world.rpg_time.player_cell = None;
+    world.rpg_time.last_arrival = None;
+    world.rpg_fast_evidence = Some(bevyout_core::lifecycle::FastTravelEvidence {
+        destination_cell: cell,
+        travel_ms: travel,
+        discovered: discovered == "discovered",
+        danger: false,
+        interior: false,
+        encumbered: false,
+        combat: false,
+        radiation: false,
+    });
+}
+
+#[given(regex = r"^fast travel evidence (danger|interior|encumbered|combat|radiation)$")]
+async fn given_rpg_travel_block(world: &mut BevyoutWorld, block: String) {
+    let evidence = world.rpg_fast_evidence.as_mut().expect("evidence");
+    match block.as_str() {
+        "danger" => evidence.danger = true,
+        "interior" => evidence.interior = true,
+        "encumbered" => evidence.encumbered = true,
+        "combat" => evidence.combat = true,
+        "radiation" => evidence.radiation = true,
+        _ => {}
+    }
+}
+
+#[when("fast travel is committed")]
+async fn when_rpg_fast_travel(world: &mut BevyoutWorld) {
+    let evidence = world.rpg_fast_evidence.expect("evidence");
+    let result = world
+        .rpg_time
+        .commit_fast_travel(evidence, Some(&mut world.rpg_time_items));
+    world.rpg_time.last_fast_travel = Some(result);
+}
+
+#[then(
+    regex = r"^fast travel is blocked by (danger|interior|encumbered|combat|radiation|undiscovered)$"
+)]
+async fn then_rpg_travel_blocked(world: &mut BevyoutWorld, block: String) {
+    let expected = match block.as_str() {
+        "danger" => bevyout_core::lifecycle::FastTravelBlock::Danger,
+        "interior" => bevyout_core::lifecycle::FastTravelBlock::Interior,
+        "encumbered" => bevyout_core::lifecycle::FastTravelBlock::Encumbered,
+        "combat" => bevyout_core::lifecycle::FastTravelBlock::Combat,
+        "radiation" => bevyout_core::lifecycle::FastTravelBlock::Radiation,
+        _ => bevyout_core::lifecycle::FastTravelBlock::Undiscovered,
+    };
+    assert_eq!(world.rpg_time.last_fast_travel, Some(Err(expected)));
+}
+
+#[then(regex = r"^the player location is (0x[0-9a-fA-F]+)$")]
+async fn then_rpg_player_cell(world: &mut BevyoutWorld, hex: String) {
+    let cell = u32::from_str_radix(hex.trim_start_matches("0x"), 16).expect("cell");
+    assert_eq!(world.rpg_time.player_cell, Some(cell));
+}
+
+#[then(regex = r"^arrival was requested for (0x[0-9a-fA-F]+)$")]
+async fn then_rpg_arrival(world: &mut BevyoutWorld, hex: String) {
+    let cell = u32::from_str_radix(hex.trim_start_matches("0x"), 16).expect("cell");
+    assert_eq!(world.rpg_time.last_arrival, Some(cell));
+}
+
+#[given(regex = r"^a timed effect remaining (\d+) ms$")]
+async fn given_rpg_timed_effect(world: &mut BevyoutWorld, remaining: u32) {
+    world
+        .rpg_time
+        .effects
+        .apply(bevyout_core::effects::ActiveEffect {
+            source: bevyout_core::effects::EffectSource::Chem,
+            actor_value: bevyout_core::actor_state::ActorValue::ActionPoints,
+            magnitude: 1.0,
+            remaining_ms: remaining,
+        });
+}
+
+#[then("the timed effect expired")]
+async fn then_rpg_effect_expired(world: &mut BevyoutWorld) {
+    assert!(world.rpg_time.effects.is_empty());
+}
+
+#[then("the timed effect remains")]
+async fn then_rpg_effect_remains(world: &mut BevyoutWorld) {
+    assert!(!world.rpg_time.effects.is_empty());
 }

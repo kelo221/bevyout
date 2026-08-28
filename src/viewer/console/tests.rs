@@ -36,6 +36,7 @@ fn test_app() -> App {
         .insert_resource(interaction::PlayerEquipment::default());
     app.insert_resource(super::super::day_night::GameClock::default())
         .insert_resource(super::super::day_night::DayNightPreview::default());
+    app.init_resource::<super::super::game_time::GameTimeRuntime>();
     app.init_resource::<interaction::CanonicalItemLedger>();
     app.init_resource::<super::super::recipes::RecipeCatalog>();
     app.init_resource::<Assets<StandardMaterial>>();
@@ -1658,6 +1659,54 @@ fn save_is_blocked_while_a_lockpick_session_is_active() {
             .contains("minigame save deferred")
     );
     assert!(exec(&mut app, "lockpick cancel").ok);
+}
+
+#[test]
+fn showgametime_and_passtime_use_the_integer_clock() {
+    let mut app = test_app();
+    let shown = exec(&mut app, "showgametime");
+    assert!(shown.ok, "{shown:?}");
+    assert_eq!(shown.value["game_ms"], 0);
+    assert_eq!(shown.value["timescale"], 0);
+    assert!(exec(&mut app, "settime 8").ok);
+    assert_eq!(
+        app.world()
+            .resource::<super::super::day_night::GameClock>()
+            .hour,
+        8.0
+    );
+    assert_eq!(
+        app.world()
+            .resource::<super::super::game_time::GameTimeRuntime>()
+            .world
+            .clock
+            .absolute_game_ms,
+        0,
+        "settime must not write the integer clock"
+    );
+    let passed = exec(&mut app, "passtime 1");
+    assert!(passed.ok, "{passed:?}");
+    assert_eq!(passed.value["game_ms"], 3_600_000);
+    assert_eq!(
+        app.world()
+            .resource::<super::super::day_night::GameClock>()
+            .hour,
+        1.0
+    );
+    assert_eq!(exec(&mut app, "passtime").error.unwrap().code, "bad_arity");
+}
+
+#[test]
+fn resetcell_and_fasttravel_reject_bad_form_ids() {
+    let mut app = test_app();
+    assert_eq!(
+        exec(&mut app, "resetcell zz").error.unwrap().code,
+        "bad_form_id"
+    );
+    assert_eq!(
+        exec(&mut app, "fasttravel zz").error.unwrap().code,
+        "bad_form_id"
+    );
 }
 
 // -- save (issue #60, F60.3) ------------------------------------------

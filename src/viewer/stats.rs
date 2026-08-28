@@ -80,6 +80,10 @@ pub(crate) fn restore_targeted_stimpak(progression: &mut PlayerProgression, part
     );
 }
 
+pub(crate) fn restore_owned_bed(progression: &mut PlayerProgression, now: GameTime) {
+    restore_limbs(&mut progression.limbs, MedicalSource::OwnedBed, None, now);
+}
+
 /// Player-authored progression sheet projected onto the transient FPS entity.
 #[derive(Component, Debug, Clone, Default, PartialEq)]
 pub(crate) struct ActorStats(pub(crate) CharacterSheet);

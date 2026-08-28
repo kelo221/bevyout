@@ -196,6 +196,33 @@ fn v9_round_trip_preserves_player_limbs_and_rpg() {
 }
 
 #[test]
+fn v9_round_trip_preserves_optional_time_and_lifecycle() {
+    let mut save = sample_save();
+    save.rpg.clock.absolute_game_ms = 3_600_000;
+    save.rpg.clock.timescale = 30;
+    save.rpg.lifecycle.revision = bevyout_core::lifecycle::LIFECYCLE_SNAPSHOT_REVISION;
+    save.rpg.lifecycle.clock = save.rpg.clock;
+    save.rpg.lifecycle.encounter_zones.insert(
+        0x0002_a4a0,
+        bevyout_core::lifecycle::EncounterZoneState {
+            zone_form_id: 0x0002_a4a0,
+            first_entered_game_ms: 0,
+            locked_level: 6,
+            min_level: 2,
+            max_level: 10,
+        },
+    );
+    let bytes = encode_save(&save).unwrap();
+    let decoded = decode_save(&bytes).unwrap();
+    assert_eq!(decoded.rpg.clock.absolute_game_ms, 3_600_000);
+    assert_eq!(
+        decoded.rpg.lifecycle.encounter_zones[&0x0002_a4a0].locked_level,
+        6
+    );
+    assert_eq!(decoded.rpg, save.rpg);
+}
+
+#[test]
 fn v8_decode_defaults_missing_rpg_and_actor_limbs() {
     let mut save = sample_save();
     save.header.format_version = 8;

@@ -345,6 +345,18 @@ pub(crate) fn run_view(manifest_path: PathBuf, options: RunViewOptions) -> Resul
             crime: save.rpg.crime.clone(),
         });
         app.insert_resource(effects::RngResource(save.rpg.rng));
+        {
+            let mut runtime = crate::viewer::game_time::GameTimeRuntime::default();
+            runtime.world.restore_snapshot(save.rpg.lifecycle.clone());
+            runtime.world.clock = save.rpg.clock;
+            runtime.world.effects = save.rpg.effects.clone();
+            runtime.world.chem_doses_ms = save.rpg.chem_doses_ms.clone();
+            runtime.world.addictions = save.rpg.addictions.clone();
+            runtime.world.radiation = save.rpg.radiation;
+            runtime.world.current_health = save.rpg.current_health;
+            runtime.world.limbs = save.rpg.limbs.clone();
+            app.insert_resource(runtime);
+        }
         app.world_mut()
             .resource_mut::<dialogue::DialogueRuntime>()
             .restore_snapshot(save.dialogue);

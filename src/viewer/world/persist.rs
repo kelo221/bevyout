@@ -1096,6 +1096,14 @@ fn capture_rpg(world: &World) -> RpgSaveState {
         limbs: progression.limbs,
         rng,
         crime: progression.crime,
+        clock: world
+            .get_resource::<crate::viewer::game_time::GameTimeRuntime>()
+            .map(|runtime| runtime.world.clock)
+            .unwrap_or_default(),
+        lifecycle: world
+            .get_resource::<crate::viewer::game_time::GameTimeRuntime>()
+            .map(|runtime| runtime.world.snapshot())
+            .unwrap_or_default(),
     }
 }
 

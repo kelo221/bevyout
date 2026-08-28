@@ -72,6 +72,33 @@ impl ConsoleCommandProvider for WorldCommandProvider {
                 "Report every exterior-resident gameplay actor: owning cell generation, nav binding, running package, and last residency rejection.",
                 actor_residency,
             ),
+            ConsoleCommand::new(
+                "showgametime",
+                "showgametime",
+                "Report the integer game clock, calendar, remainder, and lighting-hour projection.",
+                show_game_time,
+            ),
+            ConsoleCommand::new(
+                "passtime",
+                "passtime <hours>",
+                "Advance the integer game clock by whole hours and process due lifecycle tasks.",
+                pass_time,
+            )
+            .mutating(),
+            ConsoleCommand::new(
+                "resetcell",
+                "resetcell <cell-formid>",
+                "Apply a due cell reset if the cell is vacant and the receipt has not already run.",
+                reset_cell,
+            )
+            .mutating(),
+            ConsoleCommand::new(
+                "fasttravel",
+                "fasttravel <cell-formid> [hours]",
+                "Validate then commit fast travel: advance time, process due tasks, then request arrival.",
+                fast_travel,
+            )
+            .mutating(),
         ] {
             registry.register(command)?;
         }
@@ -1452,4 +1479,247 @@ pub(super) fn teleport_player(
             position.x, position.y, position.z
         )],
     ))
+}
+
+fn show_game_time(
+    world: &mut World,
+    invocation: &ConsoleInvocation,
+) -> Result<ConsoleCommandResult, ConsoleError> {
+    no_args(invocation)?;
+    let runtime = world
+        .get_resource::<crate::viewer::game_time::GameTimeRuntime>()
+        .ok_or_else(|| ConsoleError::new("time_unavailable", "game clock is unavailable"))?;
+    let clock = runtime.world.clock;
+    let date = clock.calendar();
+    let lighting = world
+        .get_resource::<super::super::day_night::GameClock>()
+        .map(|clock| clock.hour);
+    Ok(ConsoleCommandResult::new(
+        json!({
+            "game_ms": clock.absolute_game_ms,
+            "remainder": clock.fractional_timescale_remainder,
+            "timescale": clock.timescale,
+            "year": date.year,
+            "month": date.month,
+            "day": date.day,
+            "hour": date.hour,
+            "minute": date.minute,
+            "lighting_hour": clock.hour_as_f32(),
+            "projected_lighting_hour": lighting,
+        }),
+        vec![format!(
+            "Game time {:04}-{:02}-{:02} {:02}:{:02}; {} ms; timescale {}.",
+            date.year,
+            date.month,
+            date.day,
+            date.hour,
+            date.minute,
+            clock.absolute_game_ms,
+            clock.timescale
+        )],
+    ))
+}
+
+fn pass_time(
+    world: &mut World,
+    invocation: &ConsoleInvocation,
+) -> Result<ConsoleCommandResult, ConsoleError> {
+    let [hours] = invocation.args.as_slice() else {
+        return Err(ConsoleError::new(
+            "bad_arity",
+            "passtime expects exactly one hour count",
+        ));
+    };
+    let hours = hours
+        .parse::<u64>()
+        .map_err(|_| ConsoleError::new("bad_type", "hours must be a whole number"))?;
+    let delta_ms = hours
+        .checked_mul(bevyout_core::time::MS_PER_HOUR)
+        .ok_or_else(|| ConsoleError::new("overflow", "passtime would overflow game time"))?;
+    world.resource_scope(
+        |world, mut runtime: Mut<crate::viewer::game_time::GameTimeRuntime>| {
+            {
+                let mut ledger = world
+                    .get_resource_mut::<interaction::CanonicalItemLedger>()
+                    .map(|mut canonical| std::mem::take(&mut canonical.ledger));
+                let mut progression = world
+                    .get_resource_mut::<super::stats::PlayerProgression>()
+                    .map(|progression| progression.clone());
+                crate::viewer::game_time::passtime_ms(
+                    &mut runtime,
+                    delta_ms,
+                    bevyout_core::time::TimeAdvanceReason::Wait,
+                    ledger.as_mut(),
+                    progression.as_mut(),
+                )
+                .map_err(|_| ConsoleError::new("overflow", "passtime would overflow game time"))?;
+                if let Some(updated) = ledger
+                    && let Some(mut canonical) =
+                        world.get_resource_mut::<interaction::CanonicalItemLedger>()
+                {
+                    canonical.ledger = updated;
+                }
+                if let Some(updated) = progression
+                    && let Some(mut stored) =
+                        world.get_resource_mut::<super::stats::PlayerProgression>()
+                {
+                    *stored = updated;
+                }
+            }
+            crate::viewer::game_time::project_runtime_to_world(world, &runtime);
+            if let Some(mut clock) = world.get_resource_mut::<super::super::day_night::GameClock>()
+            {
+                clock.hour = runtime.world.clock.hour_as_f32();
+            }
+            Ok(ConsoleCommandResult::new(
+                json!({
+                    "game_ms": runtime.world.clock.absolute_game_ms,
+                    "hours": hours,
+                }),
+                vec![format!(
+                    "passtime {hours} hours; now {} ms.",
+                    runtime.world.clock.absolute_game_ms
+                )],
+            ))
+        },
+    )
+}
+
+fn reset_cell(
+    world: &mut World,
+    invocation: &ConsoleInvocation,
+) -> Result<ConsoleCommandResult, ConsoleError> {
+    let [cell] = invocation.args.as_slice() else {
+        return Err(ConsoleError::new(
+            "bad_arity",
+            "resetcell expects exactly one cell FormID",
+        ));
+    };
+    let cell = parse_item_form_id(cell)
+        .ok_or_else(|| ConsoleError::new("bad_form_id", "resetcell FormID must be hexadecimal"))?;
+    world.resource_scope(
+        |world, mut runtime: Mut<crate::viewer::game_time::GameTimeRuntime>| {
+            if !runtime.world.cells.contains_key(&cell) {
+                runtime.world.register_cell(cell, false);
+            }
+            let due = runtime
+                .world
+                .cells
+                .get(&cell)
+                .and_then(|state| state.reset_due_game_ms)
+                .unwrap_or(runtime.world.clock.absolute_game_ms);
+            let mut ledger = world.get_resource_mut::<interaction::CanonicalItemLedger>();
+            let result = runtime.world.apply_cell_reset(
+                cell,
+                due,
+                ledger.as_mut().map(|canonical| &mut canonical.ledger),
+            );
+            match result {
+                Ok(receipt) => Ok(ConsoleCommandResult::new(
+                    json!({
+                        "cell_form_id": cell,
+                        "generation": receipt.generation,
+                        "due_game_ms": receipt.due_game_ms,
+                    }),
+                    vec![format!(
+                        "resetcell {cell:08x} generation {}.",
+                        receipt.generation
+                    )],
+                )),
+                Err(error) => Err(ConsoleError::new(
+                    "reset_rejected",
+                    format!("resetcell {cell:08x} rejected: {error:?}"),
+                )),
+            }
+        },
+    )
+}
+
+fn fast_travel(
+    world: &mut World,
+    invocation: &ConsoleInvocation,
+) -> Result<ConsoleCommandResult, ConsoleError> {
+    if invocation.args.is_empty() || invocation.args.len() > 2 {
+        return Err(ConsoleError::new(
+            "bad_arity",
+            "fasttravel expects a cell FormID and optional hours",
+        ));
+    }
+    let cell = parse_item_form_id(&invocation.args[0])
+        .ok_or_else(|| ConsoleError::new("bad_form_id", "fasttravel FormID must be hexadecimal"))?;
+    let hours = if invocation.args.len() == 2 {
+        invocation.args[1]
+            .parse::<u64>()
+            .map_err(|_| ConsoleError::new("bad_type", "hours must be a whole number"))?
+    } else {
+        1
+    };
+    let travel_ms = hours
+        .checked_mul(bevyout_core::time::MS_PER_HOUR)
+        .ok_or_else(|| ConsoleError::new("overflow", "fasttravel would overflow game time"))?;
+    let evidence = bevyout_core::lifecycle::FastTravelEvidence {
+        destination_cell: cell,
+        travel_ms,
+        discovered: true,
+        danger: false,
+        interior: false,
+        encumbered: false,
+        combat: false,
+        radiation: false,
+    };
+    world.resource_scope(
+        |world, mut runtime: Mut<crate::viewer::game_time::GameTimeRuntime>| {
+            let commit = {
+                let mut ledger = world
+                    .get_resource_mut::<interaction::CanonicalItemLedger>()
+                    .map(|mut canonical| std::mem::take(&mut canonical.ledger));
+                let mut progression = world
+                    .get_resource_mut::<super::stats::PlayerProgression>()
+                    .map(|progression| progression.clone());
+                let commit = crate::viewer::game_time::commit_fast_travel(
+                    &mut runtime,
+                    evidence,
+                    ledger.as_mut(),
+                    progression.as_mut(),
+                )
+                .map_err(|block| ConsoleError::new("fast_travel_blocked", format!("{block:?}")))?;
+                if let Some(updated) = ledger
+                    && let Some(mut canonical) =
+                        world.get_resource_mut::<interaction::CanonicalItemLedger>()
+                {
+                    canonical.ledger = updated;
+                }
+                if let Some(updated) = progression
+                    && let Some(mut stored) =
+                        world.get_resource_mut::<super::stats::PlayerProgression>()
+                {
+                    *stored = updated;
+                }
+                commit
+            };
+            crate::viewer::game_time::project_runtime_to_world(world, &runtime);
+            if let Some(mut clock) = world.get_resource_mut::<super::super::day_night::GameClock>()
+            {
+                clock.hour = runtime.world.clock.hour_as_f32();
+            }
+            world.write_message(interaction::DoorTravelRequested {
+                destination_cell_form_id: cell,
+                translation: Vec3::ZERO,
+                rotation_xyzw: [0.0, 0.0, 0.0, 1.0],
+                door_form_id: 0,
+            });
+            Ok(ConsoleCommandResult::new(
+                json!({
+                    "cell_form_id": cell,
+                    "travel_ms": commit.travel_ms,
+                    "game_ms": runtime.world.clock.absolute_game_ms,
+                    "arrival_requested": commit.arrival_requested,
+                }),
+                vec![format!(
+                    "fasttravel {cell:08x}; now {} ms.",
+                    runtime.world.clock.absolute_game_ms
+                )],
+            ))
+        },
+    )
 }
