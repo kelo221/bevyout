@@ -96,6 +96,7 @@ mod perception;
 mod performance_policy;
 mod ragdoll_lab;
 mod realtime_shadow_policy;
+mod recipes;
 mod scene;
 mod screen_fx;
 mod stats;

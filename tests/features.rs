@@ -1325,6 +1325,23 @@ struct BevyoutWorld {
     rpg_last_impact_outcome: Option<weapon::ImpactOutcome>,
     rpg_actor_definition: actor_state::ActorDefinition,
     rpg_actor_state: actor_state::ActorInstanceState,
+
+    // -- rpg_repair_barter.feature (M9 W5 repair, craft, barter) --
+    rpg_repair_skill: u8,
+    rpg_repair_max_condition: u32,
+    rpg_repair_result:
+        Option<Result<bevyout_core::repair::RepairReceipt, bevyout_core::repair::RepairError>>,
+    rpg_craft_recipes: std::collections::BTreeMap<u32, bevyout_core::crafting::RecipeDefinition>,
+    rpg_craft_result:
+        Option<Result<bevyout_core::crafting::CraftReceipt, bevyout_core::crafting::CraftError>>,
+    rpg_next_item_id_before: Option<item_transaction::ItemInstanceId>,
+    rpg_barter_catalog_value: u64,
+    rpg_barter_skill: u8,
+    rpg_barter_quote: Option<bevyout_core::barter::BarterQuote>,
+    rpg_barter_commit:
+        Option<Result<item_transaction::TransactionReceipt, bevyout_core::barter::BarterError>>,
+    rpg_restock_state: bevyout_core::barter::MerchantRestockState,
+    rpg_restock_outcome: Option<bevyout_core::barter::RestockOutcome>,
 }
 
 fn synthetic_dialogue_source() -> dialogue::DialogueSource {
@@ -18984,4 +19001,538 @@ async fn then_rpg_bed_source(world: &mut BevyoutWorld, time: String) {
 async fn when_rpg_limbs_round_trip(world: &mut BevyoutWorld) {
     let encoded = serde_json::to_string(&world.rpg_limbs).expect("encode limbs");
     world.rpg_limbs = serde_json::from_str(&encoded).expect("decode limbs");
+}
+
+// ---------------------------------------------------------------------
+// rpg_repair_barter.feature (M9 W5 repair, craft, barter)
+// ---------------------------------------------------------------------
+
+fn rpg_player_item(world: &BevyoutWorld, id: ItemInstanceId) -> &ItemInstance {
+    world
+        .canonical_ledger
+        .holders()
+        .get(&HolderId::Player)
+        .and_then(|state| state.find(id))
+        .expect("canonical player item")
+}
+
+fn rpg_append_player_item(world: &mut BevyoutWorld, item: ItemInstance) {
+    let mut state = world
+        .canonical_ledger
+        .holders()
+        .get(&HolderId::Player)
+        .cloned()
+        .unwrap_or_default();
+    state.items.push(item);
+    world
+        .canonical_ledger
+        .insert_holder(HolderId::Player, state)
+        .unwrap();
+}
+
+#[given(
+    regex = r"^the canonical player also holds item 0x([0-9a-fA-F]+) form 0x([0-9a-fA-F]+) x(\d+) condition (none|\d+)$"
+)]
+async fn given_canonical_player_also_holds(
+    world: &mut BevyoutWorld,
+    item_hex: String,
+    form_hex: String,
+    count: u32,
+    condition: String,
+) {
+    let item = ItemInstance::new(
+        parse_item_instance_id(&item_hex),
+        parse_hex(&form_hex),
+        count,
+        ItemState {
+            condition: (condition != "none").then(|| condition.parse().unwrap()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    rpg_append_player_item(world, item);
+}
+
+#[given(regex = r"^the repair max condition is (\d+)$")]
+async fn given_rpg_repair_max_condition(world: &mut BevyoutWorld, max_condition: u32) {
+    world.rpg_repair_max_condition = max_condition;
+}
+
+#[given(regex = r"^the player repair skill is (\d+)$")]
+async fn given_rpg_repair_skill(world: &mut BevyoutWorld, skill: u8) {
+    world.rpg_repair_skill = skill;
+}
+
+#[given(regex = r"^the canonical player equips item 0x([0-9a-fA-F]+)$")]
+async fn given_canonical_player_equips(world: &mut BevyoutWorld, item_hex: String) {
+    world
+        .canonical_ledger
+        .equip(HolderId::Player, parse_item_instance_id(&item_hex))
+        .unwrap();
+}
+
+fn rpg_run_repair(
+    world: &mut BevyoutWorld,
+    target: ItemInstanceId,
+    donor: ItemInstanceId,
+    id: TransactionId,
+) {
+    let expected = world
+        .canonical_ledger
+        .holders()
+        .get(&HolderId::Player)
+        .map(|state| state.revision)
+        .unwrap_or(0);
+    world.rpg_repair_result = Some(bevyout_core::repair::repair(
+        &mut world.canonical_ledger,
+        bevyout_core::repair::RepairRequest {
+            transaction_id: id,
+            holder: HolderId::Player,
+            target,
+            donor,
+            repair_skill: world.rpg_repair_skill,
+            max_condition: world.rpg_repair_max_condition,
+            expected_holder_revision: expected,
+        },
+    ));
+}
+
+#[when(regex = r"^repairing target 0x([0-9a-fA-F]+) with donor 0x([0-9a-fA-F]+)$")]
+async fn when_rpg_repair(world: &mut BevyoutWorld, target: String, donor: String) {
+    let id = world.canonical_ledger.next_transaction_id();
+    rpg_run_repair(
+        world,
+        parse_item_instance_id(&target),
+        parse_item_instance_id(&donor),
+        id,
+    );
+}
+
+#[when(
+    regex = r"^repairing target 0x([0-9a-fA-F]+) with donor 0x([0-9a-fA-F]+) using transaction (\d+)$"
+)]
+async fn when_rpg_repair_with_id(
+    world: &mut BevyoutWorld,
+    target: String,
+    donor: String,
+    transaction: u64,
+) {
+    rpg_run_repair(
+        world,
+        parse_item_instance_id(&target),
+        parse_item_instance_id(&donor),
+        TransactionId(transaction),
+    );
+}
+
+#[then("the repair succeeds")]
+async fn then_rpg_repair_succeeds(world: &mut BevyoutWorld) {
+    world
+        .rpg_repair_result
+        .as_ref()
+        .expect("repair was not run")
+        .as_ref()
+        .expect("repair failed");
+}
+
+#[then("the repair is rejected as same item")]
+async fn then_rpg_repair_same_item(world: &mut BevyoutWorld) {
+    assert_eq!(
+        world
+            .rpg_repair_result
+            .as_ref()
+            .expect("repair was not run"),
+        &Err(bevyout_core::repair::RepairError::SameItem)
+    );
+}
+
+#[then("the repair is rejected as incompatible")]
+async fn then_rpg_repair_incompatible(world: &mut BevyoutWorld) {
+    assert_eq!(
+        world
+            .rpg_repair_result
+            .as_ref()
+            .expect("repair was not run"),
+        &Err(bevyout_core::repair::RepairError::Incompatible)
+    );
+}
+
+#[then("the repair is rejected as equipped donor")]
+async fn then_rpg_repair_equipped_donor(world: &mut BevyoutWorld) {
+    assert_eq!(
+        world
+            .rpg_repair_result
+            .as_ref()
+            .expect("repair was not run"),
+        &Err(bevyout_core::repair::RepairError::EquippedDonor)
+    );
+}
+
+#[then(regex = r"^the canonical player item 0x([0-9a-fA-F]+) has condition (\d+)$")]
+async fn then_canonical_player_item_condition(
+    world: &mut BevyoutWorld,
+    item_hex: String,
+    condition: u32,
+) {
+    assert_eq!(
+        rpg_player_item(world, parse_item_instance_id(&item_hex))
+            .state
+            .condition,
+        Some(condition)
+    );
+}
+
+#[given(
+    regex = r"^a known schematic 0x([0-9a-fA-F]+) requiring (\d+) of 0x([0-9a-fA-F]+) and producing (\d+) of 0x([0-9a-fA-F]+)$"
+)]
+async fn given_rpg_schematic(
+    world: &mut BevyoutWorld,
+    recipe_hex: String,
+    ingredient_count: u32,
+    ingredient_hex: String,
+    output_count: u32,
+    output_hex: String,
+) {
+    let form_id = parse_hex(&recipe_hex);
+    world.rpg_craft_recipes.insert(
+        form_id,
+        bevyout_core::crafting::RecipeDefinition {
+            form_id,
+            skill: 0,
+            level: 0,
+            ingredients: vec![bevyout_core::crafting::RecipeItem {
+                item_form_id: parse_hex(&ingredient_hex),
+                quantity: ingredient_count,
+                order: 0,
+            }],
+            outputs: vec![bevyout_core::crafting::RecipeItem {
+                item_form_id: parse_hex(&output_hex),
+                quantity: output_count,
+                order: 0,
+            }],
+            has_conditions: false,
+        },
+    );
+}
+
+#[given(
+    regex = r"^a known schematic 0x([0-9a-fA-F]+) with an opaque condition requiring (\d+) of 0x([0-9a-fA-F]+) and producing (\d+) of 0x([0-9a-fA-F]+)$"
+)]
+async fn given_rpg_schematic_opaque(
+    world: &mut BevyoutWorld,
+    recipe_hex: String,
+    ingredient_count: u32,
+    ingredient_hex: String,
+    output_count: u32,
+    output_hex: String,
+) {
+    let form_id = parse_hex(&recipe_hex);
+    world.rpg_craft_recipes.insert(
+        form_id,
+        bevyout_core::crafting::RecipeDefinition {
+            form_id,
+            skill: 0,
+            level: 0,
+            ingredients: vec![bevyout_core::crafting::RecipeItem {
+                item_form_id: parse_hex(&ingredient_hex),
+                quantity: ingredient_count,
+                order: 0,
+            }],
+            outputs: vec![bevyout_core::crafting::RecipeItem {
+                item_form_id: parse_hex(&output_hex),
+                quantity: output_count,
+                order: 0,
+            }],
+            has_conditions: true,
+        },
+    );
+}
+
+#[when(regex = r"^crafting recipe 0x([0-9a-fA-F]+) once$")]
+async fn when_rpg_craft(world: &mut BevyoutWorld, recipe_hex: String) {
+    world.rpg_next_item_id_before = Some(world.canonical_ledger.next_item_id());
+    let recipe = world
+        .rpg_craft_recipes
+        .get(&parse_hex(&recipe_hex))
+        .cloned()
+        .expect("unknown schematic");
+    let expected = world
+        .canonical_ledger
+        .holders()
+        .get(&HolderId::Player)
+        .map(|state| state.revision)
+        .unwrap_or(0);
+    let id = world.canonical_ledger.next_transaction_id();
+    world.rpg_craft_result = Some(bevyout_core::crafting::craft(
+        &mut world.canonical_ledger,
+        bevyout_core::crafting::CraftRequest {
+            transaction_id: id,
+            holder: HolderId::Player,
+            recipe: &recipe,
+            count: 1,
+            expected_holder_revision: expected,
+            actor: bevyout_core::crafting::CraftingActorSnapshot { skill_value: 100 },
+            schematic_tier: bevyout_core::crafting::SchematicTier::V1,
+        },
+    ));
+}
+
+#[then("the craft succeeds")]
+async fn then_rpg_craft_succeeds(world: &mut BevyoutWorld) {
+    world
+        .rpg_craft_result
+        .as_ref()
+        .expect("craft was not run")
+        .as_ref()
+        .expect("craft failed");
+}
+
+#[then("the craft is rejected as unsupported condition")]
+async fn then_rpg_craft_unsupported(world: &mut BevyoutWorld) {
+    assert_eq!(
+        world.rpg_craft_result.as_ref().expect("craft was not run"),
+        &Err(bevyout_core::crafting::CraftError::UnsupportedCondition)
+    );
+}
+
+#[then("the craft is rejected as missing ingredients")]
+async fn then_rpg_craft_missing(world: &mut BevyoutWorld) {
+    assert_eq!(
+        world.rpg_craft_result.as_ref().expect("craft was not run"),
+        &Err(bevyout_core::crafting::CraftError::MissingIngredients)
+    );
+}
+
+#[then(regex = r"^the canonical player holds (\d+) of form 0x([0-9a-fA-F]+)$")]
+async fn then_canonical_player_holds_form(world: &mut BevyoutWorld, count: u32, form_hex: String) {
+    let form = parse_hex(&form_hex);
+    let actual = world
+        .canonical_ledger
+        .holders()
+        .get(&HolderId::Player)
+        .map(|state| {
+            state
+                .items
+                .iter()
+                .filter(|item| item.base_form_id == form)
+                .map(|item| item.count)
+                .sum::<u32>()
+        })
+        .unwrap_or(0);
+    assert_eq!(actual, count);
+}
+
+#[then("the next canonical item id is unchanged")]
+async fn then_next_item_id_unchanged(world: &mut BevyoutWorld) {
+    assert_eq!(
+        world.canonical_ledger.next_item_id(),
+        world.rpg_next_item_id_before.expect("craft was not run")
+    );
+}
+
+#[given(regex = r"^a catalog item 0x([0-9a-fA-F]+) worth (\d+) caps$")]
+async fn given_rpg_catalog_value(world: &mut BevyoutWorld, _form_hex: String, value: u64) {
+    world.rpg_barter_catalog_value = value;
+}
+
+#[given(regex = r"^the player barter skill is (\d+)$")]
+async fn given_rpg_barter_skill(world: &mut BevyoutWorld, skill: u8) {
+    world.rpg_barter_skill = skill;
+}
+
+#[given(
+    regex = r"^the canonical merchant 0x([0-9a-fA-F]+) holds item 0x([0-9a-fA-F]+) form 0x([0-9a-fA-F]+) x(\d+) condition (none|\d+) with (\d+) caps$"
+)]
+async fn given_canonical_merchant_item(
+    world: &mut BevyoutWorld,
+    merchant_hex: String,
+    item_hex: String,
+    form_hex: String,
+    count: u32,
+    condition: String,
+    caps: u64,
+) {
+    let item = ItemInstance::new(
+        parse_item_instance_id(&item_hex),
+        parse_hex(&form_hex),
+        count,
+        ItemState {
+            condition: (condition != "none").then(|| condition.parse().unwrap()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    world
+        .canonical_ledger
+        .insert_holder(
+            HolderId::FixtureMerchant {
+                reference_form_id: parse_hex(&merchant_hex),
+            },
+            ItemHolderState {
+                items: vec![item],
+                caps,
+                revision: 0,
+            },
+        )
+        .unwrap();
+}
+
+#[given(regex = r"^the canonical player has (\d+) caps$")]
+async fn given_canonical_player_caps(world: &mut BevyoutWorld, caps: u64) {
+    world
+        .canonical_ledger
+        .holders_mut()
+        .entry(HolderId::Player)
+        .or_default()
+        .caps = caps;
+}
+
+#[when(regex = r"^quoting a (buy|sell) of (\d+) of item 0x([0-9a-fA-F]+)$")]
+async fn when_rpg_quote_catalog(
+    world: &mut BevyoutWorld,
+    direction: String,
+    count: u32,
+    item_hex: String,
+) {
+    world.rpg_barter_quote = Some(
+        bevyout_core::barter::quote_barter(bevyout_core::barter::BarterQuoteInput {
+            direction: if direction == "buy" {
+                bevyout_core::barter::BarterDirection::Buy
+            } else {
+                bevyout_core::barter::BarterDirection::Sell
+            },
+            merchant: HolderId::FixtureMerchant {
+                reference_form_id: 9,
+            },
+            player: HolderId::Player,
+            item_id: parse_item_instance_id(&item_hex),
+            count,
+            base_value: world.rpg_barter_catalog_value,
+            player_barter: world.rpg_barter_skill,
+            player_revision: 0,
+            merchant_revision: 0,
+        })
+        .expect("quote"),
+    );
+}
+
+#[when(regex = r"^quoting a buy of item 0x([0-9a-fA-F]+) from merchant 0x([0-9a-fA-F]+)$")]
+async fn when_rpg_quote_merchant(world: &mut BevyoutWorld, item_hex: String, merchant_hex: String) {
+    let merchant = HolderId::FixtureMerchant {
+        reference_form_id: parse_hex(&merchant_hex),
+    };
+    let player_revision = world
+        .canonical_ledger
+        .holders()
+        .get(&HolderId::Player)
+        .map(|state| state.revision)
+        .unwrap_or(0);
+    let merchant_revision = world
+        .canonical_ledger
+        .holders()
+        .get(&merchant)
+        .map(|state| state.revision)
+        .unwrap_or(0);
+    world.rpg_barter_quote = Some(
+        bevyout_core::barter::quote_barter(bevyout_core::barter::BarterQuoteInput {
+            direction: bevyout_core::barter::BarterDirection::Buy,
+            merchant,
+            player: HolderId::Player,
+            item_id: parse_item_instance_id(&item_hex),
+            count: 1,
+            base_value: world.rpg_barter_catalog_value,
+            player_barter: world.rpg_barter_skill,
+            player_revision,
+            merchant_revision,
+        })
+        .expect("quote"),
+    );
+}
+
+#[when("the merchant holder revision changes")]
+async fn when_rpg_merchant_revision_changes(world: &mut BevyoutWorld) {
+    let merchant = world.rpg_barter_quote.as_ref().expect("quote").merchant;
+    world
+        .canonical_ledger
+        .holders_mut()
+        .get_mut(&merchant)
+        .expect("merchant")
+        .revision += 1;
+}
+
+#[when("committing the last barter quote")]
+async fn when_rpg_commit_quote(world: &mut BevyoutWorld) {
+    let quote = world.rpg_barter_quote.clone().expect("quote");
+    let id = world.canonical_ledger.next_transaction_id();
+    world.rpg_barter_commit = Some(bevyout_core::barter::commit_barter(
+        &mut world.canonical_ledger,
+        id,
+        &quote,
+    ));
+}
+
+#[then(regex = r"^the barter unit price is (\d+)$")]
+async fn then_rpg_barter_unit_price(world: &mut BevyoutWorld, price: u64) {
+    assert_eq!(
+        world.rpg_barter_quote.as_ref().expect("quote").unit_price,
+        price
+    );
+}
+
+#[then(regex = r"^the barter total is (\d+)$")]
+async fn then_rpg_barter_total(world: &mut BevyoutWorld, total: u64) {
+    assert_eq!(world.rpg_barter_quote.as_ref().expect("quote").total, total);
+}
+
+#[then("the barter commit is rejected as stale")]
+async fn then_rpg_barter_stale(world: &mut BevyoutWorld) {
+    assert_eq!(
+        world
+            .rpg_barter_commit
+            .as_ref()
+            .expect("commit was not run"),
+        &Err(bevyout_core::barter::BarterError::StaleQuote)
+    );
+}
+
+#[given(regex = r"^a merchant restock last due at (\d+) ms$")]
+async fn given_rpg_restock(world: &mut BevyoutWorld, last: u64) {
+    world.rpg_restock_state = bevyout_core::barter::MerchantRestockState {
+        generation: 0,
+        last_restock_game_ms: last,
+        next_restock_game_ms: last
+            .saturating_add(bevyout_core::barter::MERCHANT_RESTOCK_INTERVAL_MS),
+        seed_state: bevyout_core::chems::RpgRngState::default(),
+    };
+}
+
+#[when(regex = r"^restock is evaluated at (\d+) ms$")]
+async fn when_rpg_restock(world: &mut BevyoutWorld, now: u64) {
+    world.rpg_restock_outcome = Some(bevyout_core::barter::restock_if_due(
+        bevyout_core::time::GameTime::from_ms(now),
+        &mut world.rpg_restock_state,
+        &bevyout_core::barter::MerchantStockCatalog::default(),
+    ));
+}
+
+#[then("restock is not due")]
+async fn then_rpg_restock_not_due(world: &mut BevyoutWorld) {
+    assert!(!world.rpg_restock_outcome.as_ref().expect("restock").due);
+}
+
+#[then("restock is due")]
+async fn then_rpg_restock_due(world: &mut BevyoutWorld) {
+    assert!(world.rpg_restock_outcome.as_ref().expect("restock").due);
+}
+
+#[then(regex = r"^the restock generation is (\d+)$")]
+async fn then_rpg_restock_generation(world: &mut BevyoutWorld, generation: u32) {
+    assert_eq!(
+        world
+            .rpg_restock_outcome
+            .as_ref()
+            .expect("restock")
+            .generation,
+        generation
+    );
 }

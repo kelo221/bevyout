@@ -143,7 +143,7 @@ pub struct BindingState {
 }
 
 impl BindingState {
-    fn remap(&mut self, from: ItemInstanceId, to: ItemInstanceId) {
+    pub(crate) fn remap(&mut self, from: ItemInstanceId, to: ItemInstanceId) {
         if self.equipped == Some(from) {
             self.equipped = Some(to);
         }
@@ -157,11 +157,11 @@ impl BindingState {
         }
     }
 
-    fn references(&self, id: ItemInstanceId) -> bool {
+    pub(crate) fn references(&self, id: ItemInstanceId) -> bool {
         self.equipped == Some(id) || self.equipped_apparel.contains(&id)
     }
 
-    fn prune_to(&mut self, items: &ItemHolderState) {
+    pub(crate) fn prune_to(&mut self, items: &ItemHolderState) {
         self.equipped = self
             .equipped
             .filter(|item_id| items.find(*item_id).is_some());
@@ -328,6 +328,7 @@ pub enum TransactionError {
     Jammed(JamReason),
     InvalidCombatRng,
     InvalidWeaponCondition,
+    StaleRevision,
 }
 
 impl std::fmt::Display for TransactionError {
@@ -340,14 +341,16 @@ impl std::error::Error for TransactionError {}
 
 #[derive(Clone, Debug, Default)]
 pub struct ItemLedger {
-    holders: BTreeMap<HolderId, ItemHolderState>,
-    bindings: BTreeMap<HolderId, BindingState>,
+    pub(crate) holders: BTreeMap<HolderId, ItemHolderState>,
+    pub(crate) bindings: BTreeMap<HolderId, BindingState>,
     finalized: BTreeMap<TransactionId, TransactionReceipt>,
     ammo_finalized: BTreeMap<TransactionId, AmmoTransactionReceipt>,
     combat_finalized: BTreeMap<TransactionId, CombatTransactionReceipt>,
-    used_transaction_ids: BTreeSet<TransactionId>,
-    next_item_id: ItemInstanceId,
-    next_transaction_id: TransactionId,
+    pub(crate) repair_finalized: BTreeMap<TransactionId, crate::repair::RepairReceipt>,
+    pub(crate) craft_finalized: BTreeMap<TransactionId, crate::crafting::CraftReceipt>,
+    pub(crate) used_transaction_ids: BTreeSet<TransactionId>,
+    pub(crate) next_item_id: ItemInstanceId,
+    pub(crate) next_transaction_id: TransactionId,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
@@ -359,6 +362,10 @@ pub struct ItemLedgerSnapshot {
     pub ammo_finalized: BTreeMap<TransactionId, AmmoTransactionReceipt>,
     #[serde(default)]
     pub combat_finalized: BTreeMap<TransactionId, CombatTransactionReceipt>,
+    #[serde(default)]
+    pub repair_finalized: BTreeMap<TransactionId, crate::repair::RepairReceipt>,
+    #[serde(default)]
+    pub craft_finalized: BTreeMap<TransactionId, crate::crafting::CraftReceipt>,
     pub used_transaction_ids: BTreeSet<TransactionId>,
     pub next_item_id: ItemInstanceId,
     pub next_transaction_id: TransactionId,
@@ -400,6 +407,8 @@ impl ItemLedger {
             finalized: self.finalized.clone(),
             ammo_finalized: self.ammo_finalized.clone(),
             combat_finalized: self.combat_finalized.clone(),
+            repair_finalized: self.repair_finalized.clone(),
+            craft_finalized: self.craft_finalized.clone(),
             used_transaction_ids: self.used_transaction_ids.clone(),
             next_item_id: self.next_item_id,
             next_transaction_id: self.next_transaction_id,
@@ -435,6 +444,8 @@ impl ItemLedger {
             finalized: snapshot.finalized,
             ammo_finalized: snapshot.ammo_finalized,
             combat_finalized: snapshot.combat_finalized,
+            repair_finalized: snapshot.repair_finalized,
+            craft_finalized: snapshot.craft_finalized,
             used_transaction_ids: snapshot.used_transaction_ids,
             next_item_id: snapshot.next_item_id,
             next_transaction_id: snapshot.next_transaction_id,
@@ -1024,6 +1035,45 @@ impl ItemLedger {
         self.execute_with_id(id, request)
     }
 
+    pub fn execute_quoted(
+        &mut self,
+        id: TransactionId,
+        request: TransactionRequest,
+        expected_player_revision: u64,
+        expected_merchant_revision: u64,
+    ) -> Result<TransactionReceipt, TransactionError> {
+        if let Some(receipt) = self.finalized.get(&id) {
+            return Ok(receipt.clone());
+        }
+        let (player, merchant) = match &request {
+            TransactionRequest::Buy {
+                merchant, player, ..
+            }
+            | TransactionRequest::Sell {
+                player, merchant, ..
+            } => (*player, *merchant),
+            TransactionRequest::Transfer { .. } => {
+                return self.execute_with_id(id, request);
+            }
+        };
+        let player_revision = self
+            .holders
+            .get(&player)
+            .ok_or(TransactionError::UnknownHolder(player))?
+            .revision;
+        let merchant_revision = self
+            .holders
+            .get(&merchant)
+            .ok_or(TransactionError::UnknownHolder(merchant))?
+            .revision;
+        if player_revision != expected_player_revision
+            || merchant_revision != expected_merchant_revision
+        {
+            return Err(TransactionError::StaleRevision);
+        }
+        self.execute_with_id(id, request)
+    }
+
     pub fn execute_with_id(
         &mut self,
         id: TransactionId,
@@ -1216,7 +1266,7 @@ impl ItemLedger {
         Ok(receipt)
     }
 
-    fn allocate_item_id(&mut self) -> ItemInstanceId {
+    pub(crate) fn allocate_item_id(&mut self) -> ItemInstanceId {
         let id = self.next_item_id;
         self.next_item_id = ItemInstanceId(id.0.saturating_add(1));
         id

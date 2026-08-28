@@ -37,6 +37,7 @@ fn test_app() -> App {
     app.insert_resource(super::super::day_night::GameClock::default())
         .insert_resource(super::super::day_night::DayNightPreview::default());
     app.init_resource::<interaction::CanonicalItemLedger>();
+    app.init_resource::<super::super::recipes::RecipeCatalog>();
     app.init_resource::<Assets<StandardMaterial>>();
     app.init_resource::<super::super::world::ActiveSaveState>();
     app.init_resource::<super::super::actor_state::ActorDefinitionCatalogs>();
