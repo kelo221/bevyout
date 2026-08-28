@@ -76,6 +76,10 @@ mod radiation {
 mod chems {
     pub use bevyout_core::chems::*;
 }
+#[allow(dead_code, unused_imports)]
+mod inspection {
+    pub use bevyout_core::inspection::*;
+}
 // M6 wave 3's actor-residency policy is pure and dependency-light. Include
 // the production seam verbatim so the executable feature coverage exercises
 // the same canonical identity and handoff decisions as the viewer.
@@ -1379,6 +1383,10 @@ struct BevyoutWorld {
     rpg_time_hour_before: Option<f32>,
     rpg_fast_evidence: Option<bevyout_core::lifecycle::FastTravelEvidence>,
     rpg_zone_bounds: Option<(u32, u8, u8)>,
+
+    // -- rpg_pipboy_save.feature (M9 W10 inspection snapshot) --
+    rpg_inspection_clock: bevyout_core::time::GameClockState,
+    rpg_inspection: Option<bevyout_core::inspection::RpgInspectionSnapshot>,
 }
 
 fn synthetic_dialogue_source() -> dialogue::DialogueSource {
@@ -21017,4 +21025,193 @@ async fn then_rpg_effect_expired(world: &mut BevyoutWorld) {
 #[then("the timed effect remains")]
 async fn then_rpg_effect_remains(world: &mut BevyoutWorld) {
     assert!(!world.rpg_time.effects.is_empty());
+}
+
+#[given("a default RPG inspection sheet")]
+async fn given_rpg_inspection_sheet(world: &mut BevyoutWorld) {
+    world.rpg_sheet = stats::CharacterSheet::default();
+    world.rpg_settings = stats::GmstSettings::default();
+    world.rpg_perk_progression = perks::PerkProgression::default();
+    world.rpg_effect_ledger = effects::ActiveEffectsLedger::default();
+    world.rpg_radiation_pool = radiation::RadiationPool::default();
+    world.rpg_addictions = chems::Addictions::default();
+    world.rpg_limbs = bevyout_core::combat::LimbState::healthy();
+    world.rpg_crime_ledger = bevyout_core::crime::CrimeLedger::default();
+    world.rpg_inspection_clock = bevyout_core::time::GameClockState::default();
+    world.rpg_inspection = None;
+}
+
+#[given(regex = r"^inspection radiation is (\d+) rads$")]
+async fn given_rpg_inspection_rads(world: &mut BevyoutWorld, rads: u16) {
+    world.rpg_radiation_pool = radiation::RadiationPool::new(rads);
+}
+
+#[given(regex = r"^an inspection chem effect on strength remaining (\d+) ms$")]
+async fn given_rpg_inspection_chem(world: &mut BevyoutWorld, remaining: u32) {
+    world.rpg_effect_ledger.apply(effects::ActiveEffect {
+        source: effects::EffectSource::Chem,
+        actor_value: actor_state::ActorValue::Special(actor_state::SpecialAttribute::Strength),
+        magnitude: 1.0,
+        remaining_ms: remaining,
+    });
+}
+
+#[given("inspection left leg is crippled")]
+async fn given_rpg_inspection_left_leg(world: &mut BevyoutWorld) {
+    world
+        .rpg_limbs
+        .part_mut(bevyout_core::combat::BodyPartId::LeftLeg)
+        .current_milli = 0;
+    world
+        .rpg_limbs
+        .part_mut(bevyout_core::combat::BodyPartId::LeftLeg)
+        .crippled = true;
+}
+
+#[given(regex = r"^inspection game time is (\d+) ms$")]
+async fn given_rpg_inspection_game_ms(world: &mut BevyoutWorld, ms: u64) {
+    world.rpg_inspection_clock.absolute_game_ms = ms;
+}
+
+#[when("the RPG inspection snapshot is built")]
+async fn when_rpg_inspection_built(world: &mut BevyoutWorld) {
+    world.rpg_inspection = Some(inspection::inspect_rpg(inspection::RpgInspectionInput {
+        name: "Player",
+        sheet: &world.rpg_sheet,
+        perks: &world.rpg_perk_progression,
+        perk_names: &[],
+        unspent_skill_points: 0,
+        total_skill_points: 0,
+        radiation: world.rpg_radiation_pool,
+        effects: &world.rpg_effect_ledger,
+        addictions: &world.rpg_addictions,
+        current_health: None,
+        current_action_points: None,
+        limbs: &world.rpg_limbs,
+        crime: &world.rpg_crime_ledger,
+        clock: world.rpg_inspection_clock,
+        lifecycle: None,
+        player_cell: None,
+        settings: &world.rpg_settings,
+        perk_catalog_revision: "",
+        gmst_catalog_revision: "",
+    }));
+}
+
+#[then(regex = r"^the inspection HP is (\d+) / (\d+)$")]
+async fn then_rpg_inspection_hp(world: &mut BevyoutWorld, current: u32, max: u32) {
+    let snapshot = world.rpg_inspection.as_ref().expect("inspection");
+    assert_eq!(snapshot.player.hp_current, current);
+    assert_eq!(snapshot.player.hp_max, max);
+}
+
+#[then(regex = r"^the inspection AP max is (\d+) and current is unavailable$")]
+async fn then_rpg_inspection_ap(world: &mut BevyoutWorld, max: u32) {
+    let snapshot = world.rpg_inspection.as_ref().expect("inspection");
+    assert_eq!(snapshot.player.ap_max, max);
+    assert!(!snapshot.player.ap_available);
+    assert_eq!(snapshot.player.ap_current, None);
+}
+
+#[then(regex = r"^the inspection XP is (\d+) / (\d+)$")]
+async fn then_rpg_inspection_xp(world: &mut BevyoutWorld, current: u32, next: u32) {
+    let snapshot = world.rpg_inspection.as_ref().expect("inspection");
+    assert_eq!(snapshot.player.xp_current, current);
+    assert_eq!(snapshot.player.xp_next, next);
+}
+
+#[then("VATS inspection is unavailable for planned wave 8")]
+async fn then_rpg_inspection_vats(world: &mut BevyoutWorld) {
+    let snapshot = world.rpg_inspection.as_ref().expect("inspection");
+    assert!(!snapshot.vats.available);
+    assert_eq!(snapshot.vats.reason, "unavailable");
+    assert_eq!(snapshot.vats.planned_wave, 8);
+}
+
+#[then(regex = r"^the inspection calendar is (\d+)-(\d+)-(\d+) (\d+):(\d+)$")]
+async fn then_rpg_inspection_calendar(
+    world: &mut BevyoutWorld,
+    year: u32,
+    month: u8,
+    day: u8,
+    hour: u8,
+    minute: u8,
+) {
+    let snapshot = world.rpg_inspection.as_ref().expect("inspection");
+    assert_eq!(snapshot.world.year, year);
+    assert_eq!(snapshot.world.month, month);
+    assert_eq!(snapshot.world.day, day);
+    assert_eq!(snapshot.world.hour, hour);
+    assert_eq!(snapshot.world.minute, minute);
+}
+
+#[then(regex = r"^the inspection radiation stage is (\d+)$")]
+async fn then_rpg_inspection_rad_stage(world: &mut BevyoutWorld, stage: u16) {
+    assert_eq!(
+        world
+            .rpg_inspection
+            .as_ref()
+            .expect("inspection")
+            .player
+            .radiation_stage,
+        stage
+    );
+}
+
+#[then(regex = r"^the inspection effects list strength then remaining (\d+) ms$")]
+async fn then_rpg_inspection_effects(world: &mut BevyoutWorld, remaining: u32) {
+    let snapshot = world.rpg_inspection.as_ref().expect("inspection");
+    assert_eq!(snapshot.effects.entries.len(), 1);
+    assert_eq!(snapshot.effects.entries[0].actor_value, "strength");
+    assert_eq!(snapshot.effects.entries[0].remaining_ms, remaining);
+}
+
+#[then(regex = r#"^Pip-Boy radiation text is "([^"]+)"$"#)]
+async fn then_rpg_inspection_rad_text(world: &mut BevyoutWorld, expected: String) {
+    let snapshot = world.rpg_inspection.as_ref().expect("inspection");
+    assert_eq!(inspection::radiation_stage_line(snapshot), expected);
+}
+
+#[then(regex = r"^the inspection limbs are head, torso, left_arm, right_arm, left_leg, right_leg$")]
+async fn then_rpg_inspection_limbs(world: &mut BevyoutWorld) {
+    let labels: Vec<_> = world
+        .rpg_inspection
+        .as_ref()
+        .expect("inspection")
+        .limbs
+        .parts
+        .iter()
+        .map(|part| part.label.as_str())
+        .collect();
+    assert_eq!(
+        labels,
+        [
+            "head",
+            "torso",
+            "left_arm",
+            "right_arm",
+            "left_leg",
+            "right_leg"
+        ]
+    );
+}
+
+#[then("inspection left leg is marked crippled")]
+async fn then_rpg_inspection_left_leg_crippled(world: &mut BevyoutWorld) {
+    let left_leg = world
+        .rpg_inspection
+        .as_ref()
+        .expect("inspection")
+        .limbs
+        .parts
+        .iter()
+        .find(|part| part.part == bevyout_core::combat::BodyPartId::LeftLeg)
+        .expect("left leg");
+    assert!(left_leg.crippled);
+}
+
+#[then(regex = r#"^Pip-Boy world clock text is "([^"]+)"$"#)]
+async fn then_rpg_inspection_clock_text(world: &mut BevyoutWorld, expected: String) {
+    let snapshot = world.rpg_inspection.as_ref().expect("inspection");
+    assert_eq!(inspection::world_clock_line(snapshot), expected);
 }

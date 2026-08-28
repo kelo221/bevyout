@@ -882,6 +882,10 @@ fn world_section_shows_the_session_summary() {
         texts.iter().any(|text| text.starts_with("PLAY TIME  ")),
         "expected a play-time line, got {texts:?}"
     );
+    assert!(
+        texts.iter().any(|text| text.starts_with("GAME TIME  ")),
+        "expected a game-time line, got {texts:?}"
+    );
 }
 
 #[test]
@@ -1192,10 +1196,13 @@ fn stat_segments_format_level_vitals_and_xp() {
         level: 2,
         hp_current: 159,
         hp_max: 210,
-        ap_current: 85,
+        ap_current: Some(85),
         ap_max: 85,
         xp_current: 263,
         xp_next: 550,
+        radiation_line: String::new(),
+        effect_lines: Vec::new(),
+        world_clock_line: String::new(),
     };
     assert_eq!(
         stat_segments(&status),
@@ -1206,6 +1213,20 @@ fn stat_segments_format_level_vitals_and_xp() {
             ("XP", "263/550".to_string()),
         ]
     );
+    let unavailable = PlayerStatus {
+        name: "A".into(),
+        level: 1,
+        hp_current: 200,
+        hp_max: 200,
+        ap_current: None,
+        ap_max: 75,
+        xp_current: 0,
+        xp_next: 200,
+        radiation_line: String::new(),
+        effect_lines: Vec::new(),
+        world_clock_line: String::new(),
+    };
+    assert_eq!(stat_segments(&unavailable)[2], ("AP", "—/75".to_string()));
 }
 
 /// An Aid-category catalog item with a custom display name (`aid_item`

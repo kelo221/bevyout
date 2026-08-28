@@ -83,7 +83,10 @@ fn install(app: &mut App, port: u16) {
         .with_method_main("bevyout.schedule_snapshot", schedule_snapshot)
         .with_method_main("bevyout.capture_viewport", capture_viewport)
         .with_method_main("bevyout.console.exec", console_exec)
-        .with_method_main("bevyout.console.help", console_help);
+        .with_method_main("bevyout.console.help", console_help)
+        .with_method_main("bevyout.rpg_stats_probe", rpg_stats_probe)
+        .with_method_main("bevyout.vats_probe", vats_probe)
+        .with_method_main("bevyout.active_effects_probe", active_effects_probe);
     let http = RemoteHttpPlugin::default()
         .with_address(std::net::Ipv4Addr::LOCALHOST)
         .with_port(port);
@@ -99,6 +102,9 @@ fn install(app: &mut App, port: u16) {
             "schedule_snapshot": 1,
             "viewport_capture": 1,
             "console": 1,
+            "rpg_stats_probe": 1,
+            "vats_probe": 1,
+            "active_effects_probe": 1,
             "runtime_write": true,
         }),
     ))
@@ -205,6 +211,21 @@ fn bridge_metadata(info: &AgentBridgeInfo) -> Value {
 
 fn capabilities(In(_params): In<Option<Value>>, info: Res<AgentBridgeInfo>) -> BrpResult {
     Ok(bridge_metadata(&info))
+}
+
+fn rpg_stats_probe(In(_params): In<Option<Value>>, world: &mut World) -> BrpResult {
+    serde_json::to_value(super::inspection::rpg_snapshot_from_world(world))
+        .map_err(BrpError::internal)
+}
+
+fn vats_probe(In(_params): In<Option<Value>>, world: &mut World) -> BrpResult {
+    serde_json::to_value(super::inspection::rpg_snapshot_from_world(world).vats)
+        .map_err(BrpError::internal)
+}
+
+fn active_effects_probe(In(_params): In<Option<Value>>, world: &mut World) -> BrpResult {
+    serde_json::to_value(super::inspection::rpg_snapshot_from_world(world).effects)
+        .map_err(BrpError::internal)
 }
 
 fn animation_zoo_probe(In(_params): In<Option<Value>>, world: &mut World) -> BrpResult {

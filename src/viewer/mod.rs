@@ -89,6 +89,7 @@ mod gpu_validation;
 mod hud;
 #[cfg(test)]
 mod hybrid_shadow_policy;
+mod inspection;
 mod lighting;
 mod material_clamp_policy;
 mod minigames;

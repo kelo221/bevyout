@@ -22,6 +22,7 @@ pub mod faction;
 pub mod form_id;
 pub mod geometry;
 pub mod image_space;
+pub mod inspection;
 pub mod item_transaction;
 pub mod items;
 pub mod lifecycle;

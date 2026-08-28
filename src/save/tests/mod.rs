@@ -240,6 +240,34 @@ fn v8_decode_defaults_missing_rpg_and_actor_limbs() {
 }
 
 #[test]
+fn decode_rpg_skips_unknown_subrecords() {
+    let mut payload = encode_rpg(&RpgSaveState::default()).unwrap();
+    write_subrecord(&mut payload, tag("UNKN"), b"future").unwrap();
+    let decoded = decode_rpg(&payload).unwrap();
+    assert_eq!(decoded, RpgSaveState::default());
+}
+
+#[test]
+fn decode_rpg_rejects_missing_head() {
+    let mut payload = Vec::new();
+    write_subrecord(&mut payload, tag("UNKN"), b"no-head").unwrap();
+    let error = decode_rpg(&payload).unwrap_err().to_string();
+    assert!(error.contains("RPGS is missing HEAD"), "{error}");
+}
+
+#[test]
+fn decode_rpg_rejects_unsupported_head_revision() {
+    let mut payload = Vec::new();
+    write_subrecord(&mut payload, tag("HEAD"), &0u32.to_le_bytes()).unwrap();
+    let zero = decode_rpg(&payload).unwrap_err().to_string();
+    assert!(zero.contains("unsupported"), "{zero}");
+    let mut payload = Vec::new();
+    write_subrecord(&mut payload, tag("HEAD"), &2u32.to_le_bytes()).unwrap();
+    let future = decode_rpg(&payload).unwrap_err().to_string();
+    assert!(future.contains("unsupported"), "{future}");
+}
+
+#[test]
 fn version_one_inventory_loads_without_condition_or_runtime_drops() {
     let mut save = sample_save();
     save.header.format_version = 1;

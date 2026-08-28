@@ -60,6 +60,13 @@ impl ConsoleCommandProvider for StatsCommandProvider {
             )
             .reference_callable(false)
             .mutating(),
+            ConsoleCommand::new(
+                "showstats",
+                "[player.]showstats",
+                "Dump the shared RPG inspection snapshot as JSON.",
+                show_stats,
+            )
+            .reference_callable(false),
         ] {
             registry.register(command)?;
         }
@@ -350,6 +357,32 @@ pub(super) fn reward_xp(
         ConsoleError::new("bad_type", "rewardxp expects a non-negative whole number")
     })?;
     apply_award(world, amount, "rewardxp")
+}
+
+fn show_stats(
+    world: &mut World,
+    invocation: &ConsoleInvocation,
+) -> Result<ConsoleCommandResult, ConsoleError> {
+    no_args(invocation)?;
+    let snapshot = super::super::inspection::rpg_snapshot_from_world(world);
+    let value = serde_json::to_value(&snapshot).map_err(|error| {
+        ConsoleError::new(
+            "inspection_serialize",
+            format!("failed to serialize stats: {error}"),
+        )
+    })?;
+    let player = &snapshot.player;
+    let ap = match player.ap_current {
+        Some(current) => format!("{current}/{}", player.ap_max),
+        None => format!("—/{}", player.ap_max),
+    };
+    Ok(ConsoleCommandResult::new(
+        value,
+        vec![format!(
+            "LVL {}  HP {}/{}  AP {}  XP {}/{}",
+            player.level, player.hp_current, player.hp_max, ap, player.xp_current, player.xp_next
+        )],
+    ))
 }
 
 /// Applies the award through the kernel and folds the granted skill points

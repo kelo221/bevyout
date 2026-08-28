@@ -3261,6 +3261,28 @@ fn stimpak_selects_fast_metabolism_branch_and_health_console_clamps() {
 }
 
 #[test]
+fn showstats_projects_goty_vitals_without_current_ap() {
+    let mut app = test_app();
+    let output = exec(&mut app, "showstats");
+    assert!(output.ok, "showstats failed: {:?}", output.error);
+    assert_eq!(output.value["schema_revision"].as_u64(), Some(1));
+    assert_eq!(output.value["player"]["hp_current"].as_u64(), Some(200));
+    assert_eq!(output.value["player"]["hp_max"].as_u64(), Some(200));
+    assert_eq!(output.value["player"]["ap_max"].as_u64(), Some(75));
+    assert_eq!(
+        output.value["player"]["ap_available"].as_bool(),
+        Some(false)
+    );
+    assert!(output.value["player"]["ap_current"].is_null());
+    assert_eq!(output.value["player"]["xp_current"].as_u64(), Some(0));
+    assert_eq!(output.value["player"]["xp_next"].as_u64(), Some(200));
+    assert_eq!(output.value["vats"]["available"].as_bool(), Some(false));
+    assert_eq!(output.value["vats"]["reason"], "unavailable");
+    assert_eq!(output.value["vats"]["planned_wave"].as_u64(), Some(8));
+    assert!(output.log[0].contains("AP —/75"), "{:?}", output.log);
+}
+
+#[test]
 fn jet_rolls_addiction_against_the_seeded_rng_and_cure_clears_it() {
     let mut app = test_app();
     app.insert_resource(ingestible_test_catalog());

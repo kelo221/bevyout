@@ -495,6 +495,28 @@ pub(super) fn spawn_stats_body(
                         BorderColor::all(GREEN),
                     ));
                 }
+                if !status.radiation_line.is_empty() {
+                    labels.spawn((
+                        Text::new(status.radiation_line.clone()),
+                        TextColor(GREEN),
+                        TextFont {
+                            font_size: FontSize::Px(16.0),
+                            ..default()
+                        },
+                        glow(),
+                    ));
+                }
+                for line in &status.effect_lines {
+                    labels.spawn((
+                        Text::new(line.clone()),
+                        TextColor(GREEN),
+                        TextFont {
+                            font_size: FontSize::Px(16.0),
+                            ..default()
+                        },
+                        glow(),
+                    ));
+                }
             });
             body.spawn(Node {
                 width: Val::Percent(64.0),
