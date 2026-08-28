@@ -1342,6 +1342,22 @@ struct BevyoutWorld {
         Option<Result<item_transaction::TransactionReceipt, bevyout_core::barter::BarterError>>,
     rpg_restock_state: bevyout_core::barter::MerchantRestockState,
     rpg_restock_outcome: Option<bevyout_core::barter::RestockOutcome>,
+
+    // -- rpg_stealth_crime.feature (M9 W6 stealth, ownership, crime) --
+    rpg_detection_state: perception::AwarenessState,
+    rpg_detection_config: bevyout_core::detection::DetectionConfig,
+    rpg_detection_evidence: Option<bevyout_core::detection::DetectionEvidence>,
+    rpg_detection_subjects: Vec<bevyout_core::detection::DetectionEvidence>,
+    rpg_quantize_ok: Option<bool>,
+    rpg_taker_factions: bevyout_core::items::TakerFactions,
+    rpg_faction_table: faction::FactionRelationTable,
+    rpg_crime_ledger: bevyout_core::crime::CrimeLedger,
+    rpg_crime_event: Option<bevyout_core::crime::CrimeEvent>,
+    rpg_crime_witnesses: Vec<bevyout_core::crime::WitnessEvidence>,
+    rpg_crime_report: Option<bevyout_core::crime::CrimeReport>,
+    rpg_stolen_item: item_transaction::ItemState,
+    rpg_hud_observers: Vec<bevyout_core::detection::ObserverHudInput>,
+    rpg_hud: Option<bevyout_core::detection::DetectionHud>,
 }
 
 fn synthetic_dialogue_source() -> dialogue::DialogueSource {
@@ -13144,15 +13160,17 @@ async fn when_awareness_round_trip(world: &mut BevyoutWorld) {
 
 #[then(regex = r"^the observer has acquired the player$")]
 async fn then_observer_acquired_player(world: &mut BevyoutWorld) {
-    assert_eq!(
-        world.perception_state.target(),
-        Some(perception::TargetId::player())
-    );
+    let acquired = world
+        .perception_state
+        .target()
+        .or_else(|| world.rpg_detection_state.target());
+    assert_eq!(acquired, Some(perception::TargetId::player()));
 }
 
 #[then(regex = r"^the observer has not acquired a target$")]
 async fn then_observer_not_acquired(world: &mut BevyoutWorld) {
     assert!(!world.perception_state.is_aware());
+    assert!(!world.rpg_detection_state.is_aware());
 }
 
 #[then(regex = r"^the observer has lost its target$")]
@@ -19535,4 +19553,441 @@ async fn then_rpg_restock_generation(world: &mut BevyoutWorld, generation: u32) 
             .generation,
         generation
     );
+}
+
+// ---------------------------------------------------------------------
+// rpg_stealth_crime.feature (M9 wave 6)
+// ---------------------------------------------------------------------
+
+fn rpg_observer_id() -> perception::TargetId {
+    perception::TargetId {
+        class: perception::TargetClass::Actor,
+        form_id: 0x10,
+    }
+}
+
+fn rpg_actor_id(form_id: u32) -> perception::TargetId {
+    perception::TargetId {
+        class: perception::TargetClass::Actor,
+        form_id,
+    }
+}
+
+fn rpg_base_evidence() -> bevyout_core::detection::DetectionEvidence {
+    bevyout_core::detection::DetectionEvidence {
+        observer: rpg_observer_id(),
+        subject: perception::TargetId::player(),
+        distance_mm: 5_000,
+        angle_millidegrees: 0,
+        light_bps: 10_000,
+        movement_noise_bps: 0,
+        armor_noise_bps: 0,
+        observer_perception: 0,
+        has_line_of_sight: true,
+        delta_ms: 0,
+    }
+}
+
+fn rpg_eligible_witness(form_id: u32) -> bevyout_core::crime::WitnessEvidence {
+    bevyout_core::crime::WitnessEvidence {
+        witness: rpg_actor_id(form_id),
+        has_line_of_sight: true,
+        distance_mm: 5_000,
+        alive: true,
+        enabled: true,
+        hostile_to_victim: false,
+    }
+}
+
+#[given("a quantized detection observer")]
+async fn given_rpg_detection_observer(world: &mut BevyoutWorld) {
+    world.rpg_detection_state = perception::AwarenessState::default();
+    world.rpg_detection_config = bevyout_core::detection::DetectionConfig::golden();
+    world.rpg_detection_evidence = None;
+    world.rpg_detection_subjects.clear();
+}
+
+#[given(regex = r"^a quantized detection observer with confidence (\d+) milli$")]
+async fn given_rpg_detection_observer_confidence(world: &mut BevyoutWorld, milli: u16) {
+    given_rpg_detection_observer(world).await;
+    world.rpg_detection_state.confidence_milli = milli;
+    world.rpg_detection_state.confidence = f32::from(milli) / 1_000.0;
+}
+
+#[given(regex = r"^a quantized detection observer that has acquired the player at (\d+) milli$")]
+async fn given_rpg_detection_observer_acquired(world: &mut BevyoutWorld, milli: u16) {
+    given_rpg_detection_observer_confidence(world, milli).await;
+    world.rpg_detection_state.acquired = Some(perception::TargetId::player());
+}
+
+#[given(
+    regex = r"^detection evidence distance (\d+) mm angle (\d+) light (\d+) movement (\d+) armor (\d+) perception (\d+) (with|without) line of sight$"
+)]
+#[allow(clippy::too_many_arguments)]
+async fn given_rpg_detection_evidence(
+    world: &mut BevyoutWorld,
+    distance: u32,
+    angle: u32,
+    light: u16,
+    movement: u16,
+    armor: u16,
+    perception_stat: u16,
+    los: String,
+) {
+    world.rpg_detection_subjects.clear();
+    world.rpg_detection_evidence = Some(bevyout_core::detection::DetectionEvidence {
+        distance_mm: distance,
+        angle_millidegrees: angle,
+        light_bps: light,
+        movement_noise_bps: movement,
+        armor_noise_bps: armor,
+        observer_perception: perception_stat,
+        has_line_of_sight: los == "with",
+        ..rpg_base_evidence()
+    });
+}
+
+#[given(regex = r"^two equally distant evidence subjects 0x([0-9a-fA-F]+) then 0x([0-9a-fA-F]+)$")]
+async fn given_rpg_two_subjects(world: &mut BevyoutWorld, first: String, second: String) {
+    let mut a = rpg_base_evidence();
+    a.subject = rpg_actor_id(parse_hex(&first));
+    let mut b = rpg_base_evidence();
+    b.subject = rpg_actor_id(parse_hex(&second));
+    world.rpg_detection_evidence = None;
+    world.rpg_detection_subjects = vec![a, b];
+}
+
+#[given(regex = r"^equidistant player and actor 0x([0-9a-fA-F]+) evidence$")]
+async fn given_rpg_player_and_actor(world: &mut BevyoutWorld, hex: String) {
+    let player = rpg_base_evidence();
+    let mut actor = rpg_base_evidence();
+    actor.subject = rpg_actor_id(parse_hex(&hex));
+    world.rpg_detection_evidence = None;
+    world.rpg_detection_subjects = vec![actor, player];
+}
+
+#[given(regex = r"^legacy awareness confidence ([\d.]+)$")]
+async fn given_rpg_legacy_awareness(world: &mut BevyoutWorld, confidence: f32) {
+    world.rpg_detection_state = perception::AwarenessState {
+        confidence,
+        ..perception::AwarenessState::default()
+    };
+    bevyout_core::detection::migrate_legacy_awareness(&mut world.rpg_detection_state);
+}
+
+#[when(regex = r"^quantized detection advances (\d+) ms$")]
+async fn when_rpg_detection_advances(world: &mut BevyoutWorld, delta_ms: u32) {
+    let mut batch = if world.rpg_detection_subjects.is_empty() {
+        vec![
+            world
+                .rpg_detection_evidence
+                .expect("detection evidence was not set"),
+        ]
+    } else {
+        world.rpg_detection_subjects.clone()
+    };
+    for evidence in &mut batch {
+        evidence.delta_ms = delta_ms;
+    }
+    bevyout_core::detection::update_from_evidence(
+        &mut world.rpg_detection_state,
+        &batch,
+        &world.rpg_detection_config,
+    );
+}
+
+#[when("non-finite distance is quantized")]
+async fn when_rpg_non_finite_quantized(world: &mut BevyoutWorld) {
+    world.rpg_quantize_ok = Some(bevyout_core::detection::quantize_geometry(f32::NAN, 0.0).is_ok());
+}
+
+#[then(regex = r"^the observer has acquired actor 0x([0-9a-fA-F]+)$")]
+async fn then_rpg_observer_acquired_actor(world: &mut BevyoutWorld, hex: String) {
+    assert_eq!(
+        world.rpg_detection_state.acquired,
+        Some(rpg_actor_id(parse_hex(&hex)))
+    );
+}
+
+#[then(regex = r"^the detection confidence milli is (\d+)$")]
+async fn then_rpg_confidence_milli(world: &mut BevyoutWorld, milli: u16) {
+    assert_eq!(world.rpg_detection_state.confidence_milli, milli);
+}
+
+#[then("detection quantization is rejected")]
+async fn then_rpg_quantize_rejected(world: &mut BevyoutWorld) {
+    assert_eq!(world.rpg_quantize_ok, Some(false));
+}
+
+#[then(regex = r"^migrated confidence milli is (\d+)$")]
+async fn then_rpg_migrated_milli(world: &mut BevyoutWorld, milli: u16) {
+    assert_eq!(world.rpg_detection_state.confidence_milli, milli);
+}
+
+#[given(regex = r"^the player is rank (-?\d+) in faction 0x([0-9a-fA-F]+)$")]
+async fn given_rpg_player_faction_rank(world: &mut BevyoutWorld, rank: i8, hex: String) {
+    world.rpg_taker_factions.memberships = vec![bevyout_core::disposition::FactionMembership {
+        faction_form_id: parse_hex(&hex),
+        rank,
+    }];
+}
+
+#[given(regex = r"^faction 0x([0-9a-fA-F]+) is known$")]
+async fn given_rpg_faction_known(world: &mut BevyoutWorld, hex: String) {
+    world.rpg_faction_table.insert(faction::PreparedFaction {
+        form_id: parse_hex(&hex),
+        ..Default::default()
+    });
+}
+
+#[when(regex = r"^taking a faction-owned reference 0x([0-9a-fA-F]+) rank (-?\d+) is classified$")]
+async fn when_rpg_faction_owned_classified(world: &mut BevyoutWorld, hex: String, rank: i32) {
+    world.take_classification = Some(item_rules::classify_ownership(
+        item_rules::OwnershipClaim {
+            owner_form_id: Some(parse_hex(&hex)),
+            owner_faction_rank: Some(rank),
+        },
+        &world.rpg_taker_factions,
+        &world.rpg_faction_table,
+    ));
+}
+
+#[given("a player crime ledger")]
+async fn given_rpg_crime_ledger(world: &mut BevyoutWorld) {
+    world.rpg_crime_ledger = bevyout_core::crime::CrimeLedger::default();
+    world.rpg_crime_event = None;
+    world.rpg_crime_witnesses.clear();
+    world.rpg_crime_report = None;
+    world.rpg_stolen_item = item_transaction::ItemState::default();
+}
+
+#[given(regex = r"^a player crime ledger with bounty (\d+) karma (-?\d+) and sequence (\d+)$")]
+async fn given_rpg_crime_ledger_snapshot(
+    world: &mut BevyoutWorld,
+    bounty: u32,
+    karma: i32,
+    sequence: u64,
+) {
+    world.rpg_crime_ledger = bevyout_core::crime::CrimeLedger {
+        bounty,
+        karma,
+        next_sequence: sequence,
+        reported: Default::default(),
+    };
+}
+
+#[given(regex = r"^an illegal theft of owner 0x([0-9a-fA-F]+)$")]
+async fn given_rpg_illegal_theft(world: &mut BevyoutWorld, hex: String) {
+    let owner = parse_hex(&hex);
+    let id = bevyout_core::crime::CrimeLedger::allocate(
+        perception::TargetId::player(),
+        &mut world.rpg_crime_ledger,
+    );
+    world.rpg_crime_event = Some(bevyout_core::crime::CrimeEvent {
+        id,
+        kind: bevyout_core::crime::CrimeKind::Theft,
+        victim: rpg_actor_id(owner),
+        item_id: None,
+        owner_form_id: Some(owner),
+    });
+}
+
+#[given("an unreported assault crime")]
+async fn given_rpg_unreported_assault(world: &mut BevyoutWorld) {
+    let id = bevyout_core::crime::CrimeLedger::allocate(
+        perception::TargetId::player(),
+        &mut world.rpg_crime_ledger,
+    );
+    world.rpg_crime_event = Some(bevyout_core::crime::CrimeEvent {
+        id,
+        kind: bevyout_core::crime::CrimeKind::Assault,
+        victim: rpg_actor_id(0x41600),
+        item_id: None,
+        owner_form_id: None,
+    });
+}
+
+#[given(regex = r"^an eligible witness 0x([0-9a-fA-F]+)$")]
+async fn given_rpg_eligible_witness(world: &mut BevyoutWorld, hex: String) {
+    world
+        .rpg_crime_witnesses
+        .push(rpg_eligible_witness(parse_hex(&hex)));
+}
+
+#[given(regex = r"^an occluded witness 0x([0-9a-fA-F]+)$")]
+async fn given_rpg_occluded_witness(world: &mut BevyoutWorld, hex: String) {
+    world
+        .rpg_crime_witnesses
+        .push(bevyout_core::crime::WitnessEvidence {
+            has_line_of_sight: false,
+            ..rpg_eligible_witness(parse_hex(&hex))
+        });
+}
+
+#[given(regex = r"^a distant witness 0x([0-9a-fA-F]+)$")]
+async fn given_rpg_distant_witness(world: &mut BevyoutWorld, hex: String) {
+    world
+        .rpg_crime_witnesses
+        .push(bevyout_core::crime::WitnessEvidence {
+            distance_mm: bevyout_core::crime::CRIME_ALARM_RANGE_MM + 1,
+            ..rpg_eligible_witness(parse_hex(&hex))
+        });
+}
+
+#[given(regex = r"^a dead witness 0x([0-9a-fA-F]+)$")]
+async fn given_rpg_dead_witness(world: &mut BevyoutWorld, hex: String) {
+    world
+        .rpg_crime_witnesses
+        .push(bevyout_core::crime::WitnessEvidence {
+            alive: false,
+            ..rpg_eligible_witness(parse_hex(&hex))
+        });
+}
+
+#[given(regex = r"^a disabled witness 0x([0-9a-fA-F]+)$")]
+async fn given_rpg_disabled_witness(world: &mut BevyoutWorld, hex: String) {
+    world
+        .rpg_crime_witnesses
+        .push(bevyout_core::crime::WitnessEvidence {
+            enabled: false,
+            ..rpg_eligible_witness(parse_hex(&hex))
+        });
+}
+
+#[given(regex = r"^a victim-hostile witness 0x([0-9a-fA-F]+)$")]
+async fn given_rpg_victim_hostile_witness(world: &mut BevyoutWorld, hex: String) {
+    world
+        .rpg_crime_witnesses
+        .push(bevyout_core::crime::WitnessEvidence {
+            hostile_to_victim: true,
+            ..rpg_eligible_witness(parse_hex(&hex))
+        });
+}
+
+fn rpg_resolve_stored_crime(world: &mut BevyoutWorld) {
+    let event = world.rpg_crime_event.expect("crime event was not set");
+    world.rpg_crime_report = bevyout_core::crime::resolve_crime(
+        &mut world.rpg_crime_ledger,
+        event,
+        &mut world.rpg_crime_witnesses,
+        Some(&mut world.rpg_stolen_item),
+    );
+}
+
+#[when("the theft is resolved with no witnesses")]
+async fn when_rpg_theft_no_witnesses(world: &mut BevyoutWorld) {
+    world.rpg_crime_witnesses.clear();
+    rpg_resolve_stored_crime(world);
+}
+
+#[when("the theft is resolved with witnesses")]
+async fn when_rpg_theft_with_witnesses(world: &mut BevyoutWorld) {
+    rpg_resolve_stored_crime(world);
+}
+
+#[when("the same crime is reported again")]
+async fn when_rpg_crime_replayed(world: &mut BevyoutWorld) {
+    rpg_resolve_stored_crime(world);
+}
+
+#[when(regex = r"^the assault is escalated to murder with an eligible witness 0x([0-9a-fA-F]+)$")]
+async fn when_rpg_assault_escalated(world: &mut BevyoutWorld, hex: String) {
+    let assault = world.rpg_crime_event.expect("assault was not set");
+    world.rpg_crime_witnesses = vec![rpg_eligible_witness(parse_hex(&hex))];
+    world.rpg_crime_report = bevyout_core::crime::escalate_assault_to_murder(
+        &mut world.rpg_crime_ledger,
+        assault,
+        &mut world.rpg_crime_witnesses,
+    );
+}
+
+#[then(regex = r"^the item is marked stolen from 0x([0-9a-fA-F]+)$")]
+async fn then_rpg_item_stolen(world: &mut BevyoutWorld, hex: String) {
+    assert!(world.rpg_stolen_item.ownership.stolen);
+    assert_eq!(
+        world.rpg_stolen_item.ownership.origin_owner_form_id,
+        Some(parse_hex(&hex))
+    );
+}
+
+#[then("no crime was reported")]
+async fn then_rpg_no_crime_report(world: &mut BevyoutWorld) {
+    assert!(world.rpg_crime_report.is_none());
+}
+
+#[then("a theft crime is reported once")]
+async fn then_rpg_theft_reported_once(world: &mut BevyoutWorld) {
+    let report = world.rpg_crime_report.as_ref().expect("crime report");
+    assert_eq!(report.kind, bevyout_core::crime::CrimeKind::Theft);
+    assert_eq!(world.rpg_crime_ledger.reported.len(), 1);
+}
+
+#[then("a murder crime is reported once")]
+async fn then_rpg_murder_reported_once(world: &mut BevyoutWorld) {
+    let report = world.rpg_crime_report.as_ref().expect("crime report");
+    assert_eq!(report.kind, bevyout_core::crime::CrimeKind::Murder);
+    assert_eq!(world.rpg_crime_ledger.reported.len(), 1);
+}
+
+#[then(regex = r"^the player bounty is (\d+)$")]
+async fn then_rpg_player_bounty(world: &mut BevyoutWorld, bounty: u32) {
+    assert_eq!(world.rpg_crime_ledger.bounty, bounty);
+}
+
+#[then(regex = r"^the player karma is (-?\d+)$")]
+async fn then_rpg_player_karma(world: &mut BevyoutWorld, karma: i32) {
+    assert_eq!(world.rpg_crime_ledger.karma, karma);
+}
+
+#[given("no detection observers")]
+async fn given_rpg_no_hud_observers(world: &mut BevyoutWorld) {
+    world.rpg_hud_observers.clear();
+}
+
+#[given(regex = r"^a hostile observer with confidence (\d+) milli and no acquisition$")]
+async fn given_rpg_hostile_caution(world: &mut BevyoutWorld, milli: u16) {
+    world.rpg_hud_observers = vec![bevyout_core::detection::ObserverHudInput {
+        hostile: true,
+        acquired_player: false,
+        confidence_milli: milli,
+    }];
+}
+
+#[given("a hostile observer that has acquired the player")]
+async fn given_rpg_hostile_danger(world: &mut BevyoutWorld) {
+    world.rpg_hud_observers = vec![bevyout_core::detection::ObserverHudInput {
+        hostile: true,
+        acquired_player: true,
+        confidence_milli: 800,
+    }];
+}
+
+#[when("the detection HUD is projected")]
+async fn when_rpg_hud_projected(world: &mut BevyoutWorld) {
+    world.rpg_hud = Some(bevyout_core::detection::project_detection_hud(
+        &world.rpg_hud_observers,
+    ));
+}
+
+#[then(regex = r"^the detection HUD is (Hidden|Caution|Danger)$")]
+async fn then_rpg_hud_label(world: &mut BevyoutWorld, label: String) {
+    let expected = match label.as_str() {
+        "Hidden" => bevyout_core::detection::DetectionHud::Hidden,
+        "Caution" => bevyout_core::detection::DetectionHud::Caution,
+        "Danger" => bevyout_core::detection::DetectionHud::Danger,
+        other => panic!("unknown HUD {other}"),
+    };
+    assert_eq!(world.rpg_hud, Some(expected));
+}
+
+#[then("awareness and crime serde round-trip")]
+async fn then_rpg_awareness_crime_serde(world: &mut BevyoutWorld) {
+    let crime = serde_json::to_string(&world.rpg_crime_ledger).expect("encode crime");
+    let crime_back: bevyout_core::crime::CrimeLedger =
+        serde_json::from_str(&crime).expect("decode crime");
+    assert_eq!(crime_back, world.rpg_crime_ledger);
+    let awareness = serde_json::to_string(&world.rpg_detection_state).expect("encode awareness");
+    let awareness_back: perception::AwarenessState =
+        serde_json::from_str(&awareness).expect("decode awareness");
+    assert_eq!(awareness_back, world.rpg_detection_state);
 }

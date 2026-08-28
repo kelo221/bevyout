@@ -351,6 +351,7 @@ pub(crate) fn scripted_corpse_toggle(world: &mut World, entity: Entity) -> bool 
             name: name.clone(),
             item_names: container_item_names(&placement.inventory),
             owner_form_id: placement.owner_form_id,
+            owner_faction_rank: placement.owner_faction_rank,
         });
         if world.contains_resource::<Messages<PlaySound>>()
             && let Some(form_id) = placement.audio.open_sound_form_id
@@ -490,15 +491,15 @@ pub(crate) fn scripted_pickup(
             .map_err(|_| ScriptedPickupError::ItemTransactionFailed)?;
         let _ = world.resource_mut::<PlayerInventory>().add_stack(stack);
     }
-    // Issue #81 (F81.4): picking up an owned reference is theft; no
-    // crime/karma consequences in M3, only the stable log line.
-    if let item_rules::TakeClassification::Steal { owner_form_id } =
-        item_rules::classify_take(placement.owner_form_id)
-    {
-        info!(
-            "steal {:08x} owner {:08x}",
-            placement.base_form_id, owner_form_id
-        );
+    if runtime_item.is_none() {
+        let claim = item_rules::OwnershipClaim {
+            owner_form_id: placement.owner_form_id,
+            owner_faction_rank: placement.owner_faction_rank,
+        };
+        let item_id = world
+            .get_resource::<CanonicalItemLedger>()
+            .and_then(|canonical| crime::latest_player_item(canonical, placement.base_form_id));
+        crime::report_theft_in_world(world, claim, item_id, placement.base_form_id);
     }
     if let Some(form_id) = placement.audio.pickup_sound_form_id {
         world.write_message(PlaySound::pickup_at(form_id, position));

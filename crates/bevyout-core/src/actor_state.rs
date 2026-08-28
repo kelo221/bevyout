@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::actor::ActorKind;
 use crate::combat::limbs::LimbState;
+use crate::perception::AwarenessState;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum SpecialAttribute {
@@ -286,6 +287,8 @@ pub struct ActorInstanceState {
     pub package: Option<ActorPackageCheckpoint>,
     /// NPC limb health. Player limbs live on RPGS, not here.
     pub limbs: LimbState,
+    /// NPC awareness. Player HUD projection is not saved here.
+    pub awareness: AwarenessState,
 }
 
 impl Default for ActorInstanceState {
@@ -296,6 +299,7 @@ impl Default for ActorInstanceState {
             value_mutations: BTreeMap::new(),
             package: None,
             limbs: LimbState::healthy(),
+            awareness: AwarenessState::default(),
         }
     }
 }

@@ -192,16 +192,24 @@ pub(super) fn activate_focused_placement(
                 }
                 let _ = inventory.add_stack(stack);
             }
-            // Issue #81 (F81.4): picking up an owned reference is theft; no
-            // crime/karma consequences in M3, only the stable log line.
             // Player-dropped runtime items carry no owner.
-            if let item_rules::TakeClassification::Steal { owner_form_id } =
-                item_rules::classify_take(placement.owner_form_id)
-            {
-                info!(
-                    "steal {:08x} owner {:08x}",
-                    placement.base_form_id, owner_form_id
-                );
+            if runtime_item.is_none() {
+                commands.queue({
+                    let claim = item_rules::OwnershipClaim {
+                        owner_form_id: placement.owner_form_id,
+                        owner_faction_rank: placement.owner_faction_rank,
+                    };
+                    let steal_form_id = placement.base_form_id;
+                    move |world: &mut World| {
+                        let item_id =
+                            world
+                                .get_resource::<CanonicalItemLedger>()
+                                .and_then(|canonical| {
+                                    crime::latest_player_item(canonical, steal_form_id)
+                                });
+                        crime::report_theft_in_world(world, claim, item_id, steal_form_id);
+                    }
+                });
             }
             write_pickup_sound(&mut sounds, placement.audio.pickup_sound_form_id, position);
             notice.show(format!("Picked up {name} x{count}"));
@@ -266,6 +274,7 @@ pub(super) fn activate_focused_placement(
                 name: name.clone(),
                 item_names: container_item_names(&placement.inventory),
                 owner_form_id: placement.owner_form_id,
+                owner_faction_rank: placement.owner_faction_rank,
             });
             write_container_sound(&mut sounds, placement.audio.open_sound_form_id, position);
             animation_playback.write(animation::PlayPlacementAnimation {

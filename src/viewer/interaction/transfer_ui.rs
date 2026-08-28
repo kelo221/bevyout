@@ -28,6 +28,14 @@ use super::super::fallout_ui::{
 };
 use super::super::inventory::{DropAction, InventoryStack, StackKey, drop_action};
 use super::animation::{self, ClipTransition};
+use bevyout_core::crime::WitnessEvidence;
+use bevyout_core::items::OwnershipClaim;
+
+use super::super::actor::ActorRuntime;
+use super::super::actor_state::ActorDefinitionCatalogs;
+use super::super::crime;
+use super::super::perception::ActorAwareness;
+use super::super::stats::PlayerProgression;
 use super::{
     ActiveContainerTarget, CanonicalItemLedger, ContainerStates, InteractionState, PlaySound,
     PlayerEquipment, PlayerInventory, container_policy, item_rules,
@@ -228,6 +236,9 @@ fn handle_action_buttons(
     catalog: Res<PreparedItemCatalog>,
     mut sounds: MessageWriter<PlaySound>,
     mut requests: MessageWriter<RequestStateTransition>,
+    catalogs: Option<Res<ActorDefinitionCatalogs>>,
+    mut progression: Option<ResMut<PlayerProgression>>,
+    actors: Query<(&ActorRuntime, &ActorAwareness)>,
 ) {
     for (interaction, action) in &buttons {
         if *interaction != Interaction::Pressed {
@@ -246,13 +257,21 @@ fn handle_action_buttons(
                     continue;
                 };
                 let mut played_sound = false;
-                for (form_id, result) in take_all(
-                    container,
-                    &mut inventory,
-                    active_container.owner_form_id,
-                    active_container.reference_form_id,
-                    &mut canonical,
-                ) {
+                let claim = OwnershipClaim {
+                    owner_form_id: active_container.owner_form_id,
+                    owner_faction_rank: active_container.owner_faction_rank,
+                };
+                let witnesses = crime::live_witnesses(actors.iter());
+                let mut theft = TheftReportContext {
+                    claim,
+                    reference_form_id: active_container.reference_form_id,
+                    catalogs: catalogs.as_deref(),
+                    progression: progression.as_deref_mut(),
+                    witnesses: &witnesses,
+                };
+                for (form_id, result) in
+                    take_all(container, &mut inventory, &mut canonical, &mut theft)
+                {
                     if log_transfer(
                         result,
                         form_id,
@@ -273,12 +292,19 @@ fn handle_action_buttons(
     }
 }
 
+struct TheftReportContext<'a> {
+    claim: OwnershipClaim,
+    reference_form_id: u32,
+    catalogs: Option<&'a ActorDefinitionCatalogs>,
+    progression: Option<&'a mut PlayerProgression>,
+    witnesses: &'a [WitnessEvidence],
+}
+
 fn take_all(
     container: &mut container_policy::ContainerState,
     inventory: &mut PlayerInventory,
-    owner_form_id: Option<u32>,
-    reference_form_id: u32,
     canonical: &mut CanonicalItemLedger,
+    theft: &mut TheftReportContext<'_>,
 ) -> Vec<(u32, Result<i32, container_policy::TransferError>)> {
     container
         .stacks
@@ -287,15 +313,7 @@ fn take_all(
         .map(|(form_id, count)| {
             (
                 form_id,
-                take(
-                    container,
-                    inventory,
-                    form_id,
-                    count,
-                    owner_form_id,
-                    reference_form_id,
-                    canonical,
-                ),
+                take(container, inventory, form_id, count, canonical, theft),
             )
         })
         .collect()
@@ -390,6 +408,9 @@ fn handle_container_rows(
     mut sounds: MessageWriter<PlaySound>,
     mut ui_state: ResMut<TransferUiState>,
     picker: Option<Res<TransferQuantityPicker>>,
+    catalogs: Option<Res<ActorDefinitionCatalogs>>,
+    mut progression: Option<ResMut<PlayerProgression>>,
+    actors: Query<(&ActorRuntime, &ActorAwareness)>,
 ) {
     let Some(active_container) = active.0.as_ref() else {
         return;
@@ -405,6 +426,18 @@ fn handle_container_rows(
             return;
         };
         let count = container_policy::stack_count(&container.stacks, form_id);
+        let claim = OwnershipClaim {
+            owner_form_id: active_container.owner_form_id,
+            owner_faction_rank: active_container.owner_faction_rank,
+        };
+        let witnesses = crime::live_witnesses(actors.iter());
+        let mut theft = TheftReportContext {
+            claim,
+            reference_form_id: active_container.reference_form_id,
+            catalogs: catalogs.as_deref(),
+            progression: progression.as_deref_mut(),
+            witnesses: &witnesses,
+        };
         match drop_action(count) {
             Some(DropAction::DropOne) => {
                 if log_transfer(
@@ -413,9 +446,8 @@ fn handle_container_rows(
                         &mut inventory,
                         form_id,
                         1,
-                        active_container.owner_form_id,
-                        active_container.reference_form_id,
                         &mut canonical,
+                        &mut theft,
                     ),
                     form_id,
                     active_container.reference_form_id,
@@ -547,6 +579,9 @@ fn handle_quantity_buttons(
     mut canonical: ResMut<CanonicalItemLedger>,
     catalog: Res<PreparedItemCatalog>,
     mut sounds: MessageWriter<PlaySound>,
+    catalogs: Option<Res<ActorDefinitionCatalogs>>,
+    mut progression: Option<ResMut<PlayerProgression>>,
+    actors: Query<(&ActorRuntime, &ActorAwareness)>,
 ) {
     let Some(ref mut picker) = picker else {
         return;
@@ -567,19 +602,31 @@ fn handle_quantity_buttons(
                 {
                     let transfer_direction = picker.direction;
                     let (result, form_id, direction_label) = match transfer_direction {
-                        TransferDirection::ContainerToPlayer => (
-                            take(
-                                container,
-                                &mut inventory,
+                        TransferDirection::ContainerToPlayer => {
+                            let witnesses = crime::live_witnesses(actors.iter());
+                            let mut theft = TheftReportContext {
+                                claim: OwnershipClaim {
+                                    owner_form_id: active_container.owner_form_id,
+                                    owner_faction_rank: active_container.owner_faction_rank,
+                                },
+                                reference_form_id: active_container.reference_form_id,
+                                catalogs: catalogs.as_deref(),
+                                progression: progression.as_deref_mut(),
+                                witnesses: &witnesses,
+                            };
+                            (
+                                take(
+                                    container,
+                                    &mut inventory,
+                                    picker.form_id,
+                                    picker.quantity,
+                                    &mut canonical,
+                                    &mut theft,
+                                ),
                                 picker.form_id,
-                                picker.quantity,
-                                active_container.owner_form_id,
-                                active_container.reference_form_id,
-                                &mut canonical,
-                            ),
-                            picker.form_id,
-                            "-> player",
-                        ),
+                                "-> player",
+                            )
+                        }
                         TransferDirection::PlayerToContainer => {
                             let key = StackKey {
                                 base_form_id: picker.form_id,
@@ -775,9 +822,8 @@ fn take(
     inventory: &mut PlayerInventory,
     form_id: u32,
     count: i32,
-    owner_form_id: Option<u32>,
-    reference_form_id: u32,
     canonical: &mut CanonicalItemLedger,
+    theft: &mut TheftReportContext<'_>,
 ) -> Result<i32, container_policy::TransferError> {
     let available = container_policy::stack_count(&container.stacks, form_id);
     if count <= 0 || count > available {
@@ -791,9 +837,11 @@ fn take(
         .sync_player(&inventory.legacy_snapshot())
         .map_err(|_| container_policy::TransferError::CanonicalTransaction)?;
     canonical
-        .ensure_container(reference_form_id, &container.stacks)
+        .ensure_container(theft.reference_form_id, &container.stacks)
         .map_err(|_| container_policy::TransferError::CanonicalTransaction)?;
-    let holder = crate::item_transaction::HolderId::FixtureContainer { reference_form_id };
+    let holder = crate::item_transaction::HolderId::FixtureContainer {
+        reference_form_id: theft.reference_form_id,
+    };
     let source_item = canonical
         .ledger
         .holders()
@@ -814,18 +862,21 @@ fn take(
         .map_err(|_| container_policy::TransferError::CanonicalTransaction)?;
     let mut discard = Vec::new();
     let moved = container_policy::transfer(&mut container.stacks, &mut discard, form_id, count)?;
-    // Issue #81 (F81.4): taking from an owned container is theft; no
-    // crime/karma consequences in M3, only the stable log line.
-    if let item_rules::TakeClassification::Steal { owner_form_id } =
-        item_rules::classify_take(owner_form_id)
-    {
-        info!("steal {:08x} owner {:08x}", form_id, owner_form_id);
-    }
     let _ = inventory.add_stack(InventoryStack {
         base_form_id: form_id,
         count: moved,
         condition: moved_condition,
     });
+    let item_id = crime::latest_player_item(canonical, form_id);
+    crime::maybe_report_theft(
+        theft.claim,
+        theft.catalogs,
+        theft.progression.as_deref_mut(),
+        canonical,
+        item_id,
+        form_id,
+        theft.witnesses,
+    );
     Ok(moved)
 }
 

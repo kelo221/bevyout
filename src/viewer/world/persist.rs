@@ -1041,6 +1041,7 @@ fn capture_rpg(world: &World) -> RpgSaveState {
         current_health: progression.current_health,
         limbs: progression.limbs,
         rng,
+        crime: progression.crime,
     }
 }
 

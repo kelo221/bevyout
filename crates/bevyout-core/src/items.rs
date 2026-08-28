@@ -1,8 +1,11 @@
-//! Pure caps, ownership, and quest-item rules (issue #81).
+//! Pure caps, ownership, and quest-item rules (issue #81, M9 wave 6).
 //!
 //! Dependency-free (std only, no Bevy) exactly like `container_policy` so
 //! `tests/features.rs` can include it verbatim. Callers check these rules
 //! before invoking the #75 transfer ops; the ops themselves stay unchanged.
+
+use crate::disposition::FactionMembership;
+use crate::faction::FactionRelationTable;
 
 /// FO3 bottle-cap currency base record (`Caps001`).
 pub const CAPS_FORM_ID: u32 = 0x0000_000F;
@@ -59,13 +62,84 @@ pub enum TakeClassification {
     Steal { owner_form_id: u32 },
 }
 
-// ponytail: any non-player owner counts as theft — there is no faction
-// membership model yet; add `XRNK` rank checks when factions land.
-pub fn classify_take(owner_form_id: Option<u32>) -> TakeClassification {
-    match owner_form_id {
-        Some(owner) if owner != PLAYER_FORM_ID => TakeClassification::Steal {
-            owner_form_id: owner,
-        },
-        _ => TakeClassification::Take,
+/// Authored ownership on a reference or container (`XOWN` / `XRNK`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct OwnershipClaim {
+    pub owner_form_id: Option<u32>,
+    pub owner_faction_rank: Option<i32>,
+}
+
+impl OwnershipClaim {
+    #[must_use]
+    pub const fn actor(owner_form_id: u32) -> Self {
+        Self {
+            owner_form_id: Some(owner_form_id),
+            owner_faction_rank: None,
+        }
     }
+}
+
+/// Membership snapshot used by take/steal classification.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TakerFactions {
+    pub memberships: Vec<FactionMembership>,
+}
+
+impl TakerFactions {
+    #[must_use]
+    pub fn rank_in(&self, faction_form_id: u32) -> Option<i8> {
+        self.memberships
+            .iter()
+            .filter(|membership| membership.faction_form_id == faction_form_id)
+            .map(|membership| membership.rank)
+            .max()
+    }
+}
+
+/// Actor-owned property is theft unless the owner is the player. Faction-owned
+/// property is legal when the taker holds at least the required rank in a
+/// known faction. Unknown owners that are not the player remain theft so the
+/// existing cucumber (`owned by 0x0001A2B3`) stays green.
+pub fn classify_ownership(
+    claim: OwnershipClaim,
+    taker: &TakerFactions,
+    factions: &FactionRelationTable,
+) -> TakeClassification {
+    let Some(owner) = claim.owner_form_id else {
+        return TakeClassification::Take;
+    };
+    if owner == PLAYER_FORM_ID {
+        return TakeClassification::Take;
+    }
+    if factions.is_known(owner) {
+        let required = claim.owner_faction_rank.unwrap_or(0);
+        if taker
+            .rank_in(owner)
+            .is_some_and(|rank| i32::from(rank) >= required)
+        {
+            return TakeClassification::Take;
+        }
+        return TakeClassification::Steal {
+            owner_form_id: owner,
+        };
+    }
+    TakeClassification::Steal {
+        owner_form_id: owner,
+    }
+}
+
+#[cfg(test)]
+#[path = "tests/items.rs"]
+mod tests;
+
+/// Compatibility wrapper: owner FormID only, empty taker factions.
+pub fn classify_take(owner_form_id: Option<u32>) -> TakeClassification {
+    classify_ownership(
+        OwnershipClaim {
+            owner_form_id,
+            owner_faction_rank: None,
+        },
+        &TakerFactions::default(),
+        &FactionRelationTable::default(),
+    )
 }

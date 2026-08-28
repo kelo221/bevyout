@@ -1,3 +1,5 @@
+use bevyout_core::items::OwnershipClaim;
+
 use super::*;
 
 fn test_item(base_form_id: u32, name: &str) -> PreparedItemDefinition {
@@ -29,6 +31,7 @@ fn active_transfer_pane_selects_the_matching_icon_and_details_stack() {
         name: "Test Container".into(),
         item_names: Default::default(),
         owner_form_id: None,
+        owner_faction_rank: None,
     };
     let states = ContainerStates(std::collections::HashMap::from([(
         0x100,
@@ -86,6 +89,7 @@ fn left_clicking_container_row_takes_item_and_plays_pickup_sound() {
             name: "Test Container".into(),
             item_names: Default::default(),
             owner_form_id: None,
+            owner_faction_rank: None,
         })))
         .insert_resource(ContainerStates(std::collections::HashMap::from([(
             0x100,
@@ -137,6 +141,7 @@ fn left_clicking_player_row_stores_item_and_plays_drop_sound() {
             name: "Test Container".into(),
             item_names: Default::default(),
             owner_form_id: None,
+            owner_faction_rank: None,
         })))
         .insert_resource(ContainerStates(std::collections::HashMap::from([(
             0x100,
@@ -189,7 +194,14 @@ fn take_all_moves_every_container_stack_through_the_canonical_path() {
     let mut inventory = PlayerInventory::default();
     let mut canonical = CanonicalItemLedger::default();
 
-    let moved = take_all(&mut container, &mut inventory, None, 0x100, &mut canonical);
+    let mut theft = super::TheftReportContext {
+        claim: OwnershipClaim::default(),
+        reference_form_id: 0x100,
+        catalogs: None,
+        progression: None,
+        witnesses: &[],
+    };
+    let moved = take_all(&mut container, &mut inventory, &mut canonical, &mut theft);
 
     assert!(moved.iter().all(|(_, result)| result.is_ok()));
     assert!(container.stacks.is_empty());

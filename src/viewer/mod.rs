@@ -59,6 +59,7 @@ mod animation;
 mod animation_zoo;
 mod audio;
 mod cinema;
+mod crime;
 mod interaction;
 mod inventory;
 mod openmw_player;

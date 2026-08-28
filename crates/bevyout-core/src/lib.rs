@@ -12,6 +12,8 @@ pub mod chems;
 pub mod combat;
 pub mod content;
 pub mod crafting;
+pub mod crime;
+pub mod detection;
 pub mod dialogue;
 pub mod disposition;
 pub mod effects;

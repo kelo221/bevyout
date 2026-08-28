@@ -37,6 +37,7 @@ mod actor_state_commands;
 pub(crate) mod ai_package_commands;
 mod cinema_commands;
 mod common;
+mod crime_commands;
 mod dialogue_commands;
 mod effect_commands;
 mod item_commands;
@@ -53,11 +54,9 @@ mod stats_commands;
 mod ui_commands;
 mod weapon_commands;
 mod world_commands;
-
 use common::{no_args, parse_item_form_id, toggle_result};
 #[cfg(test)]
 use render_commands::*;
-
 #[derive(Component)]
 pub(crate) struct GameUi;
 
@@ -117,7 +116,7 @@ fn install(app: &mut App) {
         hooks.register_angle_adapter(player::console_get_angles, player::console_set_angles);
     }
     let mut registry = app.world_mut().resource_mut::<ConsoleRegistry>();
-    let providers: [&dyn ConsoleCommandProvider; 19] = [
+    let providers: [&dyn ConsoleCommandProvider; 20] = [
         &player_commands::PlayerCommandProvider,
         &navigation_commands::NavigationCommandProvider,
         &world_commands::WorldCommandProvider,
@@ -137,6 +136,7 @@ fn install(app: &mut App) {
         &perk_commands::PerkCommandProvider,
         &limb_commands::LimbCommandProvider,
         &repair_commands::RepairCommandProvider,
+        &crime_commands::CrimeCommandProvider,
     ];
     for provider in providers {
         registry

@@ -20,9 +20,11 @@ use bevyout_core::actor_state::{ActorInstanceState, ActorLifeState, ActorPackage
 use bevyout_core::chems::{Addictions as ChemAddictions, RpgRngState};
 use bevyout_core::combat::limbs::LimbState;
 use bevyout_core::combat::rng::CombatRngState;
+use bevyout_core::crime::CrimeLedger;
 use bevyout_core::dialogue::DialogueSnapshot;
 use bevyout_core::effects::ActiveEffectsLedger;
 use bevyout_core::manifest::exterior::WorldLocation;
+use bevyout_core::perception::AwarenessState;
 use bevyout_core::perks::PerkProgression;
 use bevyout_core::radiation::RadiationPool;
 use bevyout_core::stats::CharacterSheet;
@@ -80,6 +82,7 @@ pub struct RpgSaveState {
     pub current_health: Option<f32>,
     pub limbs: LimbState,
     pub rng: RpgRngState,
+    pub crime: CrimeLedger,
 }
 
 impl PartialEq for SaveGame {
@@ -1208,6 +1211,15 @@ fn encode_actor(
                 .as_bytes(),
         )?;
     }
+    if actor.awareness != AwarenessState::default() {
+        write_subrecord(
+            &mut payload,
+            tag("AWRS"),
+            ron::ser::to_string(&actor.awareness)
+                .context("encoding ACTR awareness")?
+                .as_bytes(),
+        )?;
+    }
     Ok(payload)
 }
 
@@ -1218,6 +1230,7 @@ fn decode_actor(payload: &[u8]) -> Result<(u32, u32, ActorInstanceState)> {
     let mut value_mutations = None;
     let mut package = None;
     let mut limbs = None;
+    let mut awareness = None;
     for subrecord in read_subrecords(payload)? {
         match &subrecord.tag {
             record_tag if *record_tag == tag("CELL") => {
@@ -1276,6 +1289,14 @@ fn decode_actor(payload: &[u8]) -> Result<(u32, u32, ActorInstanceState)> {
                     ron::de::from_bytes(&subrecord.payload).context("decoding ACTR limb state")?,
                 );
             }
+            record_tag if *record_tag == tag("AWRS") => {
+                if awareness.is_some() {
+                    bail!("ACTR contains duplicate AWRS");
+                }
+                awareness = Some(
+                    ron::de::from_bytes(&subrecord.payload).context("decoding ACTR awareness")?,
+                );
+            }
             _ => {}
         }
     }
@@ -1286,6 +1307,7 @@ fn decode_actor(payload: &[u8]) -> Result<(u32, u32, ActorInstanceState)> {
         value_mutations: value_mutations.unwrap_or_default(),
         package,
         limbs: limbs.unwrap_or_default(),
+        awareness: awareness.unwrap_or_default(),
     };
     actor
         .validate()
@@ -1354,6 +1376,15 @@ fn encode_rpg(rpg: &RpgSaveState) -> Result<Vec<u8>> {
             .context("encoding RPGS RNG")?
             .as_bytes(),
     )?;
+    if rpg.crime != CrimeLedger::default() {
+        write_subrecord(
+            &mut payload,
+            tag("CRIM"),
+            ron::ser::to_string(&rpg.crime)
+                .context("encoding RPGS CRIM")?
+                .as_bytes(),
+        )?;
+    }
     Ok(payload)
 }
 
@@ -1404,6 +1435,10 @@ fn decode_rpg(payload: &[u8]) -> Result<RpgSaveState> {
             }
             record_tag if *record_tag == tag("RNG0") => {
                 rpg.rng = ron::de::from_bytes(&subrecord.payload).context("decoding RPGS RNG")?;
+            }
+            record_tag if *record_tag == tag("CRIM") => {
+                rpg.crime =
+                    ron::de::from_bytes(&subrecord.payload).context("decoding RPGS CRIM")?;
             }
             _ => {}
         }

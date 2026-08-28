@@ -58,6 +58,7 @@ pub(crate) struct PlayerProgression {
     pub(crate) addictions: CoreAddictions,
     pub(crate) current_health: Option<f32>,
     pub(crate) limbs: LimbState,
+    pub(crate) crime: bevyout_core::crime::CrimeLedger,
 }
 
 /// Player-selected limb for targeted Stimpak restoration. Defaults to torso.

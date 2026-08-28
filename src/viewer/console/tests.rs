@@ -243,6 +243,28 @@ fn limb_commands_report_and_cripple_player_parts() {
 }
 
 #[test]
+fn crime_commands_report_detection_bounty_and_karma() {
+    let mut app = test_app();
+    let detect = exec(&mut app, "detectstate");
+    assert!(detect.ok);
+    assert_eq!(detect.value["hud"], "hidden");
+    let crime = exec(&mut app, "crime");
+    assert!(crime.ok);
+    assert_eq!(crime.value["bounty"], 0);
+    assert_eq!(crime.value["karma"], 0);
+    assert_eq!(exec(&mut app, "getkarma").value["karma"], 0);
+    let modified = exec(&mut app, "modkarma -5");
+    assert!(modified.ok);
+    assert_eq!(modified.value["karma"], -5);
+    assert_eq!(exec(&mut app, "getkarma").value["karma"], -5);
+    assert_eq!(exec(&mut app, "crime").value["karma"], -5);
+    assert_eq!(
+        exec(&mut app, "setownership").error.unwrap().code,
+        "bad_arity"
+    );
+}
+
+#[test]
 fn screen_fx_commands_report_and_queue_catalog_modifier_lifecycle() {
     let mut app = test_app();
     let help = exec(&mut app, "help screenfx");

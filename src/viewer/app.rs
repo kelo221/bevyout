@@ -342,6 +342,7 @@ pub(crate) fn run_view(manifest_path: PathBuf, options: RunViewOptions) -> Resul
             addictions: save.rpg.addictions.clone(),
             current_health: save.rpg.current_health,
             limbs: save.rpg.limbs.clone(),
+            crime: save.rpg.crime.clone(),
         });
         app.insert_resource(effects::RngResource(save.rpg.rng));
         app.world_mut()

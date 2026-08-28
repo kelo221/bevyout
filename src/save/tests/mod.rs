@@ -73,6 +73,7 @@ fn sample_save() -> SaveGame {
                         elapsed_seconds: 4.5,
                     }),
                     limbs: bevyout_core::combat::LimbState::healthy(),
+                    awareness: Default::default(),
                 },
             )]),
         },
