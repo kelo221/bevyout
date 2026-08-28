@@ -21,6 +21,27 @@ impl ConsoleCommandProvider for WorldCommandProvider {
             )
             .mutating(),
             ConsoleCommand::new(
+                "unlock",
+                "unlock <reference>",
+                "Clear a door reference's lock (GECK unlock parity; same as setlock <reference> 0).",
+                unlock,
+            )
+            .mutating(),
+            ConsoleCommand::new(
+                "lockpick",
+                "lockpick [<reference>|angle <milli>|torque <ms>|release|force|cancel]",
+                "Start, inspect, or step a headless lockpick session. No arguments reports the active session.",
+                lockpick,
+            )
+            .mutating(),
+            ConsoleCommand::new(
+                "hackterminal",
+                "hackterminal [<reference>|guess <word>|bracket <id>|cancel]",
+                "Start, inspect, or step a synthetic terminal hacking session. No arguments reports the active board.",
+                hackterminal,
+            )
+            .mutating(),
+            ConsoleCommand::new(
                 "tp",
                 "tp <x> <y> <z> [<cell-formid>]",
                 "Atomically teleport the player to (x, y, z) in metres, optionally after swapping to a prepared cell first.",
@@ -875,6 +896,263 @@ pub(super) fn setlock(
             "key_form_id": key_form_id.flatten(),
         }),
         vec![summary],
+    ))
+}
+
+pub(super) fn unlock(
+    world: &mut World,
+    invocation: &ConsoleInvocation,
+) -> Result<ConsoleCommandResult, ConsoleError> {
+    let [selector] = invocation.args.as_slice() else {
+        return Err(ConsoleError::new(
+            "bad_arity",
+            "unlock requires exactly one door reference",
+        ));
+    };
+    let mut unlock_invocation = invocation.clone();
+    unlock_invocation.command = "setlock".into();
+    unlock_invocation.args = vec![selector.clone(), "0".into()];
+    setlock(world, &unlock_invocation)
+}
+
+pub(super) fn lockpick(
+    world: &mut World,
+    invocation: &ConsoleInvocation,
+) -> Result<ConsoleCommandResult, ConsoleError> {
+    match invocation.args.as_slice() {
+        [] => lockpick_status(world),
+        [selector] if !is_lockpick_verb(selector) => start_lockpick_console(world, selector),
+        [verb] if verb.eq_ignore_ascii_case("cancel") => {
+            apply_lockpick_console(world, bevyout_core::minigames::LockpickInput::Cancel)
+        }
+        [verb] if verb.eq_ignore_ascii_case("force") => {
+            apply_lockpick_console(world, bevyout_core::minigames::LockpickInput::ForceLock)
+        }
+        [verb] if verb.eq_ignore_ascii_case("release") => {
+            apply_lockpick_console(world, bevyout_core::minigames::LockpickInput::ReleaseTorque)
+        }
+        [verb, value] if verb.eq_ignore_ascii_case("angle") => {
+            let angle = crate::viewer::minigames::parse_pick_angle(value)
+                .map_err(|error| ConsoleError::new("bad_type", error.to_string()))?;
+            apply_lockpick_console(
+                world,
+                bevyout_core::minigames::LockpickInput::SetPickAngle(angle),
+            )
+        }
+        [verb, value] if verb.eq_ignore_ascii_case("torque") => {
+            let delta_ms = value.parse::<u32>().map_err(|_| {
+                ConsoleError::new("bad_type", "lockpick torque expects milliseconds")
+            })?;
+            apply_lockpick_console(
+                world,
+                bevyout_core::minigames::LockpickInput::ApplyTorque { delta_ms },
+            )
+        }
+        _ => Err(ConsoleError::new(
+            "bad_arity",
+            "lockpick expects a door reference, or angle/torque/release/force/cancel",
+        )),
+    }
+}
+
+fn is_lockpick_verb(value: &str) -> bool {
+    matches!(
+        value.to_ascii_lowercase().as_str(),
+        "angle" | "torque" | "release" | "force" | "cancel"
+    )
+}
+
+fn start_lockpick_console(
+    world: &mut World,
+    selector: &str,
+) -> Result<ConsoleCommandResult, ConsoleError> {
+    let entity = resolve_reference(world, selector)?;
+    let placement = world
+        .get::<interaction::PlacementRoot>(entity)
+        .ok_or_else(|| ConsoleError::new("not_activatable", "reference has no placement root"))?
+        .placement()
+        .clone();
+    let PreparedSemantic::Door(door) = &placement.semantic else {
+        return Err(ConsoleError::new(
+            "not_a_door",
+            "lockpick only accepts door references",
+        ));
+    };
+    let difficulty = door.lock_level.unwrap_or(0).max(0) as u8;
+    crate::viewer::minigames::begin_lockpick(world, entity, difficulty, placement.owner_form_id);
+    let mut result = lockpick_status(world)?;
+    result.log = vec![format!(
+        "lockpick {:08x} difficulty {difficulty}",
+        placement.reference_form_id
+    )];
+    Ok(result)
+}
+
+fn apply_lockpick_console(
+    world: &mut World,
+    input: bevyout_core::minigames::LockpickInput,
+) -> Result<ConsoleCommandResult, ConsoleError> {
+    let commit = crate::viewer::minigames::apply_lockpick_input(world, input)
+        .map_err(|error| ConsoleError::new("minigame", error.to_string()))?;
+    let mut result = lockpick_status(world)?;
+    result.value["commit"] = json!({
+        "lock_unlocked": commit.lock_unlocked,
+        "pin_consumed": commit.pin_consumed,
+    });
+    Ok(result)
+}
+
+fn lockpick_status(world: &mut World) -> Result<ConsoleCommandResult, ConsoleError> {
+    let Some(session) = crate::viewer::minigames::lockpick_snapshot(world).cloned() else {
+        return Ok(ConsoleCommandResult::new(
+            json!({ "active": false }),
+            vec!["lockpick: no active session".into()],
+        ));
+    };
+    let rng_index = world
+        .get_resource::<crate::viewer::minigames::MinigameRuntime>()
+        .map(|runtime| runtime.rng.draw_index())
+        .unwrap_or(0);
+    let pins = world
+        .get_resource::<interaction::CanonicalItemLedger>()
+        .map(|ledger| bevyout_core::minigames::bobby_pin_count(&ledger.ledger))
+        .unwrap_or(0);
+    Ok(ConsoleCommandResult::new(
+        json!({
+            "active": session.is_active(),
+            "phase": format!("{:?}", session.phase),
+            "difficulty": session.config.difficulty,
+            "skill": session.config.skill,
+            "pick_angle_milli": session.pick_angle.0,
+            "cylinder_milli": session.cylinder.0,
+            "stress": session.stress.0,
+            "pin_breaks": session.pin_breaks,
+            "force_chance_bps": session.last_force_chance_bps,
+            "unlocked": session.unlocked(),
+            "rng_draw_index": rng_index,
+            "bobby_pins": pins,
+        }),
+        vec![format!(
+            "lockpick phase={:?} angle={} cylinder={} stress={} pins={pins} rng={rng_index}",
+            session.phase, session.pick_angle.0, session.cylinder.0, session.stress.0
+        )],
+    ))
+}
+
+pub(super) fn hackterminal(
+    world: &mut World,
+    invocation: &ConsoleInvocation,
+) -> Result<ConsoleCommandResult, ConsoleError> {
+    match invocation.args.as_slice() {
+        [] => hacking_status(world),
+        [selector] if !is_hacking_verb(selector) => start_hacking_console(world, selector),
+        [verb] if verb.eq_ignore_ascii_case("cancel") => {
+            apply_hacking_console(world, bevyout_core::minigames::HackingInput::Cancel)
+        }
+        [verb, word] if verb.eq_ignore_ascii_case("guess") => {
+            let session = crate::viewer::minigames::hacking_snapshot(world)
+                .ok_or_else(|| ConsoleError::new("minigame", "no active hacking session"))?;
+            let index = session
+                .board
+                .words
+                .iter()
+                .position(|entry| entry.text.eq_ignore_ascii_case(word))
+                .ok_or_else(|| ConsoleError::new("minigame", "UnknownWord"))?;
+            apply_hacking_console(
+                world,
+                bevyout_core::minigames::HackingInput::GuessWord { index },
+            )
+        }
+        [verb, value] if verb.eq_ignore_ascii_case("bracket") => {
+            let pair = value.parse::<u8>().map_err(|_| {
+                ConsoleError::new("bad_type", "hackterminal bracket expects an integer id")
+            })?;
+            apply_hacking_console(
+                world,
+                bevyout_core::minigames::HackingInput::UseBracket { pair },
+            )
+        }
+        _ => Err(ConsoleError::new(
+            "bad_arity",
+            "hackterminal expects a reference, or guess/bracket/cancel",
+        )),
+    }
+}
+
+fn is_hacking_verb(value: &str) -> bool {
+    matches!(
+        value.to_ascii_lowercase().as_str(),
+        "guess" | "bracket" | "cancel"
+    )
+}
+
+fn start_hacking_console(
+    world: &mut World,
+    selector: &str,
+) -> Result<ConsoleCommandResult, ConsoleError> {
+    let entity = resolve_reference(world, selector)?;
+    if world.get::<interaction::PlacementRoot>(entity).is_none() {
+        return Err(ConsoleError::new(
+            "not_activatable",
+            "reference has no placement root",
+        ));
+    }
+    crate::viewer::minigames::begin_hacking(world, entity)
+        .map_err(|error| ConsoleError::new("minigame", error.to_string()))?;
+    let mut result = hacking_status(world)?;
+    result.log = vec![format!("hackterminal {selector} started")];
+    Ok(result)
+}
+
+fn apply_hacking_console(
+    world: &mut World,
+    input: bevyout_core::minigames::HackingInput,
+) -> Result<ConsoleCommandResult, ConsoleError> {
+    let commit = crate::viewer::minigames::apply_hacking_input(world, input)
+        .map_err(|error| ConsoleError::new("minigame", error.to_string()))?;
+    let mut result = hacking_status(world)?;
+    result.value["commit"] = json!({
+        "terminal_unlocked": commit.terminal_unlocked,
+        "terminal_locked_out": commit.terminal_locked_out,
+    });
+    Ok(result)
+}
+
+fn hacking_status(world: &mut World) -> Result<ConsoleCommandResult, ConsoleError> {
+    let Some(session) = crate::viewer::minigames::hacking_snapshot(world).cloned() else {
+        return Ok(ConsoleCommandResult::new(
+            json!({ "active": false }),
+            vec!["hackterminal: no active session".into()],
+        ));
+    };
+    let rng_index = world
+        .get_resource::<crate::viewer::minigames::MinigameRuntime>()
+        .map(|runtime| runtime.rng.draw_index())
+        .unwrap_or(0);
+    let words: Vec<&str> = session
+        .board
+        .words
+        .iter()
+        .map(|word| word.text.as_str())
+        .collect();
+    Ok(ConsoleCommandResult::new(
+        json!({
+            "active": session.is_active(),
+            "phase": format!("{:?}", session.phase),
+            "words": words,
+            "attempts_remaining": session.attempts_remaining,
+            "likeness": session.last_likeness,
+            "unlocked": session.unlocked(),
+            "locked_out": session.locked_out(),
+            "rng_draw_index": rng_index,
+        }),
+        vec![format!(
+            "hackterminal phase={:?} attempts={} likeness={:?} words={}",
+            session.phase,
+            session.attempts_remaining,
+            session.last_likeness,
+            words.join(",")
+        )],
     ))
 }
 

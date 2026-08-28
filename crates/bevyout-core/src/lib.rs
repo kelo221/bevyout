@@ -27,6 +27,7 @@ pub mod items;
 pub mod lighting;
 pub mod local_light_policy;
 pub mod manifest;
+pub mod minigames;
 pub mod pause_menu;
 pub mod perception;
 pub mod perks;

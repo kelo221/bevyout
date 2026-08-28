@@ -25,6 +25,8 @@ pub(super) struct ContainerActivation<'w> {
     states: ResMut<'w, ContainerStates>,
     active: ResMut<'w, ActiveContainerTarget>,
     modal_requests: MessageWriter<'w, RequestStateTransition>,
+    minigames: Option<ResMut<'w, crate::viewer::minigames::MinigameRuntime>>,
+    progression: Option<Res<'w, crate::viewer::stats::PlayerProgression>>,
 }
 
 /// Bundles wave-1's dropped-item retrieval resources (save-state removal,
@@ -304,6 +306,25 @@ pub(super) fn activate_focused_placement(
                     "door {} ({:08x}) is locked; key {:?}",
                     name, placement.reference_form_id, door.key_form_id
                 );
+                let difficulty = door.lock_level.unwrap_or(0).max(0) as u8;
+                let owner = placement.owner_form_id;
+                if let Some(runtime) = container_activation.minigames.as_mut() {
+                    let skill = container_activation
+                        .progression
+                        .as_ref()
+                        .map(|progression| {
+                            progression
+                                .stats
+                                .skill_value(bevyout_core::actor_state::ActorSkill::Lockpick)
+                        })
+                        .unwrap_or(0);
+                    crate::viewer::minigames::start_lockpick_session(
+                        runtime, skill, entity, difficulty, owner,
+                    );
+                    container_activation
+                        .modal_requests
+                        .write(RequestStateTransition::Modal(GameplayModal::Lockpicking));
+                }
                 return;
             }
             // Issue #186: the open-state toggle goes through the shared

@@ -15,9 +15,11 @@ pub const CRIME_ALARM_RANGE_MM: u32 = 40_000;
 pub const THEFT_BOUNTY: u32 = 40;
 pub const ASSAULT_BOUNTY: u32 = 40;
 pub const MURDER_BOUNTY: u32 = 1_000;
+pub const TRESPASS_BOUNTY: u32 = 40;
 pub const THEFT_KARMA: i32 = -5;
 pub const ASSAULT_KARMA: i32 = -10;
 pub const MURDER_KARMA: i32 = -100;
+pub const TRESPASS_KARMA: i32 = -5;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct CrimeId {
@@ -30,6 +32,7 @@ pub enum CrimeKind {
     Theft,
     Assault,
     Murder,
+    Trespass,
 }
 
 impl CrimeKind {
@@ -39,6 +42,7 @@ impl CrimeKind {
             Self::Theft => "theft",
             Self::Assault => "assault",
             Self::Murder => "murder",
+            Self::Trespass => "trespass",
         }
     }
 
@@ -48,6 +52,7 @@ impl CrimeKind {
             Self::Theft => THEFT_BOUNTY,
             Self::Assault => ASSAULT_BOUNTY,
             Self::Murder => MURDER_BOUNTY,
+            Self::Trespass => TRESPASS_BOUNTY,
         }
     }
 
@@ -57,6 +62,7 @@ impl CrimeKind {
             Self::Theft => THEFT_KARMA,
             Self::Assault => ASSAULT_KARMA,
             Self::Murder => MURDER_KARMA,
+            Self::Trespass => TRESPASS_KARMA,
         }
     }
 }

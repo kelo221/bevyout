@@ -84,6 +84,8 @@ fn every_legal_modal_transition_lands_in_expected_state() {
         GameplayModal::PipBoy,
         GameplayModal::Container,
         GameplayModal::Console,
+        GameplayModal::Lockpicking,
+        GameplayModal::Hacking,
     ] {
         apply(&mut app, RequestStateTransition::Modal(modal));
         assert_eq!(current_modal(&app), modal);
@@ -219,6 +221,10 @@ fn probe_system_runs_exactly_once_per_frame_across_modal_round_trip() {
         RequestStateTransition::Modal(GameplayModal::Container),
         RequestStateTransition::Modal(GameplayModal::None),
         RequestStateTransition::Modal(GameplayModal::Console),
+        RequestStateTransition::Modal(GameplayModal::None),
+        RequestStateTransition::Modal(GameplayModal::Lockpicking),
+        RequestStateTransition::Modal(GameplayModal::None),
+        RequestStateTransition::Modal(GameplayModal::Hacking),
         RequestStateTransition::Modal(GameplayModal::None),
     ];
     for request in sequence {

@@ -34,11 +34,9 @@ use crate::save::{
 };
 #[cfg(test)]
 use crate::vsa::PreparedInventoryEntry;
-#[cfg(test)]
-use crate::vsa::PreparedSemantic;
-use crate::vsa::{PreparedPlacement, PreparedSceneManifest, is_bake_static};
+use crate::vsa::{PreparedPlacement, PreparedSceneManifest, PreparedSemantic, is_bake_static};
 
-use super::super::{actor, animation, interaction, player, weapon};
+use super::super::{actor, animation, interaction, nav, player, weapon};
 use super::persist_policy;
 use super::preload::{ActiveCell, ResidentCells};
 
@@ -392,6 +390,7 @@ fn capture_cell_placements(
                 rotation_xyzw: placement.rotation_xyzw,
                 scale: [placement.scale, placement.scale, placement.scale],
             },
+            lock_level: door_lock_level(placement),
         });
         let snapshot = match spawned.get(&placement.reference_form_id) {
             Some((entity, transform)) => persist_policy::RuntimeSnapshot {
@@ -399,6 +398,8 @@ fn capture_cell_placements(
                 present: true,
                 transform: Some(*transform),
                 activated: open.contains(entity).then_some(true),
+                lock_level: live_door_lock_level(world, *entity)
+                    .or_else(|| door_lock_level(placement)),
                 body: dynamic_body_snapshot(world, *entity),
             },
             None => persist_policy::RuntimeSnapshot {
@@ -406,6 +407,7 @@ fn capture_cell_placements(
                 present: false,
                 transform: None,
                 activated: None,
+                lock_level: None,
                 body: None,
             },
         };
@@ -575,9 +577,9 @@ fn dynamic_body_snapshot(world: &World, entity: Entity) -> Option<persist_policy
 }
 
 /// Folds a fresh capture into `ActiveSaveState`, overwriting only the
-/// capture-observable fields (deleted/activated/transform/body) of each
-/// observed reference and preserving fields capture cannot see (enabled
-/// overrides, enable roots, locks) from any previously loaded save delta.
+/// capture-observable fields (deleted/activated/transform/body/lock_level)
+/// of each observed reference and preserving fields capture cannot see
+/// (enabled overrides, enable roots) from any previously loaded save delta.
 /// All-default deltas are dropped. Container `inventory`/`leveled_resolved`
 /// are folded in separately by `merge_captured_container_deltas` below
 /// (issue #76) since they are observed through a different resource scoped
@@ -599,6 +601,7 @@ fn merge_captured_deltas(
             .and_then(|delta| delta.transform)
             .map(to_saved_transform);
         existing.body = new.and_then(|delta| delta.body).map(to_saved_body);
+        existing.lock_level = new.and_then(|delta| delta.lock_level);
         if *existing == PersistentReferenceDelta::default() {
             cell_state.references.remove(&form_id);
         }
@@ -756,6 +759,17 @@ fn apply_cell_placements(
             });
             restored_pose = Some(pose);
         }
+        if let Some(lock_level) = application.lock_level {
+            let restored = if lock_level > 0 {
+                Some(lock_level)
+            } else {
+                None
+            };
+            if let Some(mut root) = world.get_mut::<interaction::PlacementRoot>(entity) {
+                root.set_door_lock_level(restored);
+            }
+            nav::api::set_door_lock_level(world, form_id.into(), restored);
+        }
         if application.activated == Some(true) {
             let newly_opened = world
                 .get_resource_or_insert_with(interaction::InteractionState::default)
@@ -847,6 +861,40 @@ fn apply_body_restore_now(world: &mut World, entity: Entity, restore: &DynamicBo
     true
 }
 
+fn door_lock_level(placement: &PreparedPlacement) -> Option<i8> {
+    match &placement.semantic {
+        PreparedSemantic::Door(door) => door.lock_level,
+        _ => None,
+    }
+}
+
+fn live_door_lock_level(world: &World, entity: Entity) -> Option<i8> {
+    world
+        .get::<interaction::PlacementRoot>(entity)
+        .and_then(|root| door_lock_level(root.placement()))
+}
+
+fn minigame_save_blocked(world: &World) -> bool {
+    if matches!(
+        world
+            .get_resource::<State<crate::app_state::GameplayModal>>()
+            .map(|modal| *modal.get()),
+        Some(
+            crate::app_state::GameplayModal::Lockpicking | crate::app_state::GameplayModal::Hacking
+        )
+    ) {
+        return true;
+    }
+    world
+        .get_resource::<super::super::minigames::MinigameRuntime>()
+        .is_some_and(|runtime| {
+            bevyout_core::minigames::saving_blocked(
+                runtime.lockpick.as_ref(),
+                runtime.hacking.as_ref(),
+            )
+        })
+}
+
 fn to_saved_transform(transform: persist_policy::TransformDelta) -> SavedTransform {
     SavedTransform {
         translation: transform.translation,
@@ -868,6 +916,7 @@ fn to_policy_delta(delta: &PersistentReferenceDelta) -> persist_policy::Referenc
         enabled: delta.enabled,
         deleted: delta.deleted,
         activated: delta.activated,
+        lock_level: delta.lock_level,
         enable_root_form_id: delta.enable_root_form_id,
         transform: delta
             .transform
@@ -890,6 +939,11 @@ fn to_policy_delta(delta: &PersistentReferenceDelta) -> persist_policy::Referenc
 /// on `--save-slot` load), the live `ActiveSaveState`, and the player
 /// inventory, and writes it to `slot`. Returns the written primary path.
 pub(crate) fn write_save_slot(world: &mut World, slot: &str) -> anyhow::Result<PathBuf> {
+    if minigame_save_blocked(world) {
+        anyhow::bail!(
+            "minigame save deferred: an active lockpick or hacking session must finish or cancel before saving"
+        );
+    }
     let Some(active) = world.get_resource::<ActiveCell>().map(|cell| cell.0) else {
         anyhow::bail!("no active cell to save");
     };

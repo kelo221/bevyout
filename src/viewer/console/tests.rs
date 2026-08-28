@@ -42,6 +42,7 @@ fn test_app() -> App {
     app.init_resource::<super::super::world::ActiveSaveState>();
     app.init_resource::<super::super::actor_state::ActorDefinitionCatalogs>();
     app.init_state::<GameplayModal>();
+    app.add_message::<crate::app_state::RequestStateTransition>();
     let camera = player::CameraModeState {
         collision_build_complete: true,
         collisions_ready: true,
@@ -65,6 +66,7 @@ fn test_app() -> App {
     app.add_plugins((
         super::super::stats::StatsPlugin,
         super::super::effects::EffectsPlugin,
+        super::super::minigames::MinigamesPlugin,
     ));
     player::set_camera_mode(app.world_mut(), player::CameraMode::Fps).unwrap();
     app.update();
@@ -1554,6 +1556,108 @@ fn setlock_sets_and_clears_the_interaction_and_nav_lock_state_together() {
     let door = door_state(&mut app);
     assert_eq!(door.lock_level, None);
     assert_eq!(door.key_form_id, Some(200));
+}
+
+#[test]
+fn unlock_clears_a_door_lock() {
+    let mut app = test_app();
+    nav::agent::init_test_archipelago_state(app.world_mut());
+    register_placement(
+        &mut app,
+        "Door((lock_level: Some(25), key_form_id: None, destination: None))",
+    );
+    let output = exec(&mut app, "unlock 00000010");
+    assert!(output.ok, "{output:?}");
+    assert_eq!(output.value["lock_level"], Value::Null);
+}
+
+#[test]
+fn lockpick_console_starts_steps_and_unlocks_without_consuming_a_pin() {
+    let mut app = test_app();
+    nav::agent::init_test_archipelago_state(app.world_mut());
+    register_placement(
+        &mut app,
+        "Door((lock_level: Some(25), key_form_id: None, destination: None))",
+    );
+    crate::viewer::minigames::grant_runtime_bobby_pins(app.world_mut(), 2).unwrap();
+    let start = exec(&mut app, "lockpick 00000010");
+    assert!(start.ok, "{start:?}");
+    assert_eq!(start.value["active"], true);
+    let sweet = start.value["difficulty"].as_u64().unwrap() as i32 * 900 - 45_000;
+    let angle = exec(&mut app, &format!("lockpick angle {sweet}"));
+    assert!(angle.ok, "{angle:?}");
+    let torque = exec(&mut app, "lockpick torque 1000");
+    assert!(torque.ok, "{torque:?}");
+    assert_eq!(torque.value["unlocked"], true);
+    assert_eq!(torque.value["bobby_pins"], 2);
+    let entity = app
+        .world_mut()
+        .query_filtered::<Entity, With<interaction::PlacementRoot>>()
+        .single(app.world())
+        .unwrap();
+    let placement = app
+        .world()
+        .get::<interaction::PlacementRoot>(entity)
+        .unwrap()
+        .placement()
+        .clone();
+    match placement.semantic {
+        crate::vsa::PreparedSemantic::Door(door) => assert_eq!(door.lock_level, None),
+        _ => panic!("expected a door"),
+    }
+}
+
+#[test]
+fn lockpick_console_rejects_out_of_range_angle() {
+    let mut app = test_app();
+    register_placement(
+        &mut app,
+        "Door((lock_level: Some(25), key_form_id: None, destination: None))",
+    );
+    assert!(exec(&mut app, "lockpick 00000010").ok);
+    assert_eq!(
+        error_code(&exec(&mut app, "lockpick angle 90001")),
+        "bad_type"
+    );
+}
+
+#[test]
+fn hackterminal_console_guesses_the_synthetic_password() {
+    let mut app = test_app();
+    register_placement(&mut app, "Activator");
+    let start = exec(&mut app, "hackterminal 00000010");
+    assert!(start.ok, "{start:?}");
+    assert_eq!(start.value["active"], true);
+    let words = start.value["words"]
+        .as_array()
+        .expect("synthetic board words");
+    assert!(words.iter().any(|word| word == "VENT"));
+    let guess = exec(&mut app, "hackterminal guess VENT");
+    assert!(guess.ok, "{guess:?}");
+    assert_eq!(guess.value["unlocked"], true);
+}
+
+#[test]
+fn save_is_blocked_while_a_lockpick_session_is_active() {
+    let mut app = test_app();
+    register_placement(
+        &mut app,
+        "Door((lock_level: Some(25), key_form_id: None, destination: None))",
+    );
+    crate::viewer::minigames::grant_runtime_bobby_pins(app.world_mut(), 1).unwrap();
+    assert!(exec(&mut app, "lockpick 00000010").ok);
+    let blocked = exec(&mut app, "save slot1");
+    assert!(!blocked.ok);
+    assert_eq!(error_code(&blocked), "save_failed");
+    assert!(
+        blocked
+            .error
+            .as_ref()
+            .expect("error")
+            .message
+            .contains("minigame save deferred")
+    );
+    assert!(exec(&mut app, "lockpick cancel").ok);
 }
 
 // -- save (issue #60, F60.3) ------------------------------------------

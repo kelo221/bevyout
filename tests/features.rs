@@ -1358,6 +1358,19 @@ struct BevyoutWorld {
     rpg_stolen_item: item_transaction::ItemState,
     rpg_hud_observers: Vec<bevyout_core::detection::ObserverHudInput>,
     rpg_hud: Option<bevyout_core::detection::DetectionHud>,
+
+    // -- rpg_minigames.feature (M9 W7 lockpicking and hacking) --
+    rpg_minigame_rng: bevyout_core::minigames::MinigameRngState,
+    rpg_lockpick: Option<bevyout_core::minigames::LockpickSession>,
+    rpg_hacking: Option<bevyout_core::minigames::HackingSession>,
+    rpg_minigame_items: item_transaction::ItemLedger,
+    rpg_minigame_commit: Option<
+        Result<bevyout_core::minigames::MinigameCommit, bevyout_core::minigames::MinigameError>,
+    >,
+    rpg_hacking_bank: Vec<String>,
+    rpg_hacking_password: String,
+    rpg_lockpick_snapshot: Option<bevyout_core::minigames::LockpickSession>,
+    rpg_hacking_snapshot: Option<bevyout_core::minigames::HackingSession>,
 }
 
 fn synthetic_dialogue_source() -> dialogue::DialogueSource {
@@ -3955,6 +3968,7 @@ async fn given_persist_baseline(world: &mut BevyoutWorld, hex: String, x: f32, y
         .push(persist_policy::BaselinePlacement {
             reference_form_id: parse_hex(&hex),
             transform: persist_transform([x, y, z]),
+            lock_level: None,
         });
 }
 
@@ -3979,6 +3993,7 @@ async fn given_persist_snapshot_moving(
             present: true,
             transform: Some(persist_transform([x, y, z])),
             activated: None,
+            lock_level: None,
             body: Some(persist_policy::BodyDelta {
                 linear_velocity: [vx, vy, vz],
                 angular_velocity: [0.0, 0.0, 0.0],
@@ -4004,6 +4019,7 @@ async fn given_persist_snapshot_at_rest(
             present: true,
             transform: Some(persist_transform([x, y, z])),
             activated: None,
+            lock_level: None,
             body: Some(persist_policy::BodyDelta::default()),
         });
 }
@@ -4017,6 +4033,7 @@ async fn given_persist_snapshot_open(world: &mut BevyoutWorld, hex: String) {
             present: true,
             transform: None,
             activated: Some(true),
+            lock_level: None,
             body: None,
         });
 }
@@ -4030,6 +4047,7 @@ async fn given_persist_snapshot_absent(world: &mut BevyoutWorld, hex: String) {
             present: false,
             transform: None,
             activated: None,
+            lock_level: None,
             body: None,
         });
 }
@@ -19990,4 +20008,489 @@ async fn then_rpg_awareness_crime_serde(world: &mut BevyoutWorld) {
     let awareness_back: perception::AwarenessState =
         serde_json::from_str(&awareness).expect("decode awareness");
     assert_eq!(awareness_back, world.rpg_detection_state);
+}
+
+fn rpg_lockpick_config(
+    difficulty: u8,
+    skill: u8,
+    sweet: i32,
+    tolerance: u32,
+    owner: Option<u32>,
+) -> bevyout_core::minigames::LockpickConfig {
+    bevyout_core::minigames::LockpickConfig {
+        difficulty,
+        skill,
+        sweet_spot_milli: sweet,
+        tolerance_milli: tolerance,
+        owner_form_id: owner,
+    }
+}
+
+fn rpg_step_lockpick(world: &mut BevyoutWorld, input: bevyout_core::minigames::LockpickInput) {
+    let Some(session) = world.rpg_lockpick.as_mut() else {
+        panic!("no lockpick session");
+    };
+    world.rpg_minigame_commit = Some(bevyout_core::minigames::step_lockpick(
+        session,
+        input,
+        &mut world.rpg_minigame_items,
+        &mut world.rpg_minigame_rng,
+        &mut world.rpg_crime_ledger,
+        &mut world.rpg_crime_witnesses,
+    ));
+}
+
+fn rpg_step_hacking(world: &mut BevyoutWorld, input: bevyout_core::minigames::HackingInput) {
+    let Some(session) = world.rpg_hacking.as_mut() else {
+        panic!("no hacking session");
+    };
+    world.rpg_minigame_commit = Some(bevyout_core::minigames::step_hacking(
+        session,
+        input,
+        &mut world.rpg_minigame_rng,
+    ));
+}
+
+#[given(
+    regex = r"^a lockpick session difficulty (\d+) skill (\d+) sweet spot (-?\d+) tolerance (\d+)$"
+)]
+async fn given_rpg_lockpick(
+    world: &mut BevyoutWorld,
+    difficulty: u8,
+    skill: u8,
+    sweet: i32,
+    tolerance: u32,
+) {
+    world.rpg_minigame_rng = bevyout_core::minigames::MinigameRngState::from_seed(0);
+    world.rpg_lockpick = Some(bevyout_core::minigames::LockpickSession::new(
+        bevyout_core::minigames::MinigameSessionId(1),
+        rpg_lockpick_config(difficulty, skill, sweet, tolerance, None),
+    ));
+}
+
+#[given(
+    regex = r"^a lockpick session difficulty (\d+) skill (\d+) sweet spot (-?\d+) tolerance (\d+) seed (\d+)$"
+)]
+async fn given_rpg_lockpick_seeded(
+    world: &mut BevyoutWorld,
+    difficulty: u8,
+    skill: u8,
+    sweet: i32,
+    tolerance: u32,
+    seed: u64,
+) {
+    world.rpg_minigame_rng = bevyout_core::minigames::MinigameRngState::from_seed(seed);
+    world.rpg_lockpick = Some(bevyout_core::minigames::LockpickSession::new(
+        bevyout_core::minigames::MinigameSessionId(1),
+        rpg_lockpick_config(difficulty, skill, sweet, tolerance, None),
+    ));
+}
+
+#[given(
+    regex = r"^a lockpick session difficulty (\d+) skill (\d+) sweet spot (-?\d+) tolerance (\d+) owned by 0x([0-9a-fA-F]+)$"
+)]
+async fn given_rpg_lockpick_owned(
+    world: &mut BevyoutWorld,
+    difficulty: u8,
+    skill: u8,
+    sweet: i32,
+    tolerance: u32,
+    owner: String,
+) {
+    world.rpg_minigame_rng = bevyout_core::minigames::MinigameRngState::from_seed(0);
+    world.rpg_lockpick = Some(bevyout_core::minigames::LockpickSession::new(
+        bevyout_core::minigames::MinigameSessionId(1),
+        rpg_lockpick_config(
+            difficulty,
+            skill,
+            sweet,
+            tolerance,
+            Some(u32::from_str_radix(&owner, 16).expect("owner")),
+        ),
+    ));
+}
+
+#[given(regex = r"^the player holds (\d+) bobby pins?$")]
+async fn given_rpg_bobby_pins(world: &mut BevyoutWorld, count: u32) {
+    world.rpg_minigame_items = item_transaction::ItemLedger::new();
+    bevyout_core::minigames::grant_bobby_pins(&mut world.rpg_minigame_items, count)
+        .expect("grant bobby pins");
+}
+
+#[given(regex = r"^a crime witness 0x([0-9a-fA-F]+)$")]
+async fn given_rpg_minigame_witness(world: &mut BevyoutWorld, hex: String) {
+    world.rpg_crime_witnesses = vec![bevyout_core::crime::WitnessEvidence {
+        witness: perception::TargetId {
+            class: perception::TargetClass::Actor,
+            form_id: u32::from_str_radix(&hex, 16).expect("witness"),
+        },
+        has_line_of_sight: true,
+        distance_mm: 1_000,
+        alive: true,
+        enabled: true,
+        hostile_to_victim: false,
+    }];
+}
+
+#[when(regex = r"^the lockpick pick angle is set to (-?\d+)$")]
+async fn when_rpg_set_pick_angle(world: &mut BevyoutWorld, angle: i32) {
+    rpg_step_lockpick(
+        world,
+        bevyout_core::minigames::LockpickInput::SetPickAngle(
+            bevyout_core::minigames::PickAngleMilliDegrees(angle),
+        ),
+    );
+}
+
+#[when(regex = r"^lockpick torque is applied for (\d+) ms$")]
+async fn when_rpg_apply_torque(world: &mut BevyoutWorld, delta_ms: u32) {
+    rpg_step_lockpick(
+        world,
+        bevyout_core::minigames::LockpickInput::ApplyTorque { delta_ms },
+    );
+}
+
+#[when("the lockpick session is cancelled")]
+async fn when_rpg_cancel_lockpick(world: &mut BevyoutWorld) {
+    rpg_step_lockpick(world, bevyout_core::minigames::LockpickInput::Cancel);
+}
+
+#[when("the lock is force-attempted")]
+async fn when_rpg_force_lock(world: &mut BevyoutWorld) {
+    rpg_step_lockpick(world, bevyout_core::minigames::LockpickInput::ForceLock);
+}
+
+#[then("the lockpick session is active")]
+async fn then_rpg_lockpick_active(world: &mut BevyoutWorld) {
+    assert!(
+        world
+            .rpg_lockpick
+            .as_ref()
+            .is_some_and(bevyout_core::minigames::LockpickSession::is_active)
+    );
+    assert!(world.rpg_minigame_commit.as_ref().unwrap().is_ok());
+}
+
+#[then("the lockpick input is rejected")]
+async fn then_rpg_lockpick_rejected(world: &mut BevyoutWorld) {
+    assert!(world.rpg_minigame_commit.as_ref().unwrap().is_err());
+}
+
+#[then(regex = r"^the minigame RNG draw index is (\d+)$")]
+async fn then_rpg_rng_index(world: &mut BevyoutWorld, index: u32) {
+    assert_eq!(world.rpg_minigame_rng.draw_index(), index);
+}
+
+#[then("the minigame RNG draw index is greater than 0")]
+async fn then_rpg_rng_nonzero(world: &mut BevyoutWorld) {
+    assert!(world.rpg_minigame_rng.draw_index() > 0);
+}
+
+#[then("the lock is unlocked")]
+async fn then_rpg_lock_unlocked(world: &mut BevyoutWorld) {
+    assert!(world.rpg_lockpick.as_ref().unwrap().unlocked());
+    assert!(
+        world
+            .rpg_minigame_commit
+            .as_ref()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .lock_unlocked
+    );
+}
+
+#[then("the lock is not unlocked")]
+async fn then_rpg_lock_not_unlocked(world: &mut BevyoutWorld) {
+    assert!(!world.rpg_lockpick.as_ref().unwrap().unlocked());
+}
+
+#[then(regex = r"^the lockpick cylinder milli is (\d+)$")]
+async fn then_rpg_cylinder(world: &mut BevyoutWorld, milli: u32) {
+    assert_eq!(world.rpg_lockpick.as_ref().unwrap().cylinder.0, milli);
+}
+
+#[then(regex = r"^the lockpick stress is (\d+)$")]
+async fn then_rpg_stress(world: &mut BevyoutWorld, stress: u16) {
+    assert_eq!(world.rpg_lockpick.as_ref().unwrap().stress.0, stress);
+}
+
+#[then(regex = r"^the player bobby pin count is (\d+)$")]
+async fn then_rpg_pin_count(world: &mut BevyoutWorld, count: u32) {
+    assert_eq!(
+        bevyout_core::minigames::bobby_pin_count(&world.rpg_minigame_items),
+        count
+    );
+}
+
+#[then("a bobby pin broke")]
+async fn then_rpg_pin_broke(world: &mut BevyoutWorld) {
+    let commit = world
+        .rpg_minigame_commit
+        .as_ref()
+        .unwrap()
+        .as_ref()
+        .unwrap();
+    assert!(commit.pin_consumed);
+    assert!(world.rpg_lockpick.as_ref().unwrap().pin_breaks >= 1);
+}
+
+#[then("the lockpick session is cancelled")]
+async fn then_rpg_lockpick_cancelled(world: &mut BevyoutWorld) {
+    assert_eq!(
+        world.rpg_lockpick.as_ref().unwrap().phase,
+        bevyout_core::minigames::LockpickPhase::Cancelled
+    );
+}
+
+#[then(regex = r"^the force lock chance bps is (\d+)$")]
+async fn then_rpg_force_chance(world: &mut BevyoutWorld, chance: u32) {
+    assert_eq!(
+        world.rpg_lockpick.as_ref().unwrap().last_force_chance_bps,
+        Some(chance)
+    );
+}
+
+#[then("the lockpick session is not succeeded")]
+async fn then_rpg_lockpick_not_succeeded(world: &mut BevyoutWorld) {
+    assert!(!world.rpg_lockpick.as_ref().unwrap().unlocked());
+}
+
+#[then("the lockpick snapshot round-trips")]
+async fn then_rpg_lockpick_serde(world: &mut BevyoutWorld) {
+    let encoded = serde_json::to_string(world.rpg_lockpick.as_ref().unwrap()).expect("encode");
+    let decoded: bevyout_core::minigames::LockpickSession =
+        serde_json::from_str(&encoded).expect("decode");
+    assert_eq!(&decoded, world.rpg_lockpick.as_ref().unwrap());
+    world.rpg_lockpick_snapshot = Some(decoded);
+}
+
+#[then("the lockpick snapshot matches the previous snapshot")]
+async fn then_rpg_lockpick_matches(world: &mut BevyoutWorld) {
+    assert_eq!(
+        world.rpg_lockpick.as_ref(),
+        world.rpg_lockpick_snapshot.as_ref()
+    );
+}
+
+#[given(regex = r"^a hacking session with words (.+) and password ([A-Z]+)$")]
+async fn given_rpg_hacking_session(world: &mut BevyoutWorld, words: String, password: String) {
+    let words: Vec<bevyout_core::minigames::HackingWord> = words
+        .split_whitespace()
+        .map(|text| bevyout_core::minigames::HackingWord {
+            text: text.to_string(),
+        })
+        .collect();
+    let password_index = words
+        .iter()
+        .position(|word| word.text == password)
+        .expect("password on board");
+    world.rpg_minigame_rng = bevyout_core::minigames::MinigameRngState::from_seed(0);
+    world.rpg_hacking = Some(bevyout_core::minigames::HackingSession::new(
+        bevyout_core::minigames::MinigameSessionId(2),
+        bevyout_core::minigames::HackingBoard {
+            words,
+            password_index,
+            brackets: Vec::new(),
+        },
+    ));
+}
+
+#[given(regex = r"^a hacking dud bracket (\d+) and reset bracket (\d+)$")]
+async fn given_rpg_hacking_brackets(world: &mut BevyoutWorld, dud: u8, reset: u8) {
+    let session = world.rpg_hacking.as_mut().expect("hacking session");
+    session.board.brackets = vec![
+        bevyout_core::minigames::BracketPair {
+            id: dud,
+            kind: bevyout_core::minigames::BracketKind::Dud,
+            used: false,
+        },
+        bevyout_core::minigames::BracketPair {
+            id: reset,
+            kind: bevyout_core::minigames::BracketKind::ResetAttempts,
+            used: false,
+        },
+    ];
+}
+
+#[given(regex = r"^a synthetic hacking word bank (.+)$")]
+async fn given_rpg_hacking_bank(world: &mut BevyoutWorld, words: String) {
+    world.rpg_hacking_bank = words.split_whitespace().map(str::to_string).collect();
+}
+
+#[given(regex = r"^a hacking password ([A-Z]+)$")]
+async fn given_rpg_hacking_password(world: &mut BevyoutWorld, password: String) {
+    world.rpg_hacking_password = password;
+}
+
+#[when(regex = r"^a hacking board is generated with seed (\d+)$")]
+async fn when_rpg_generate_board(world: &mut BevyoutWorld, seed: u64) {
+    world.rpg_minigame_rng = bevyout_core::minigames::MinigameRngState::from_seed(seed);
+    let board = bevyout_core::minigames::generate_hacking_board(
+        &world.rpg_hacking_bank,
+        &world.rpg_hacking_password,
+        &mut world.rpg_minigame_rng,
+    )
+    .expect("board");
+    world.rpg_hacking = Some(bevyout_core::minigames::HackingSession::new(
+        bevyout_core::minigames::MinigameSessionId(2),
+        board,
+    ));
+}
+
+#[when(regex = r"^the hacking word ([A-Z]+) is guessed$")]
+async fn when_rpg_guess_word(world: &mut BevyoutWorld, word: String) {
+    let index = world
+        .rpg_hacking
+        .as_ref()
+        .expect("hacking")
+        .board
+        .words
+        .iter()
+        .position(|entry| entry.text == word);
+    match index {
+        Some(index) => rpg_step_hacking(
+            world,
+            bevyout_core::minigames::HackingInput::GuessWord { index },
+        ),
+        None => {
+            world.rpg_minigame_commit =
+                Some(Err(bevyout_core::minigames::MinigameError::UnknownWord));
+        }
+    }
+}
+
+#[when(regex = r"^hacking bracket (\d+) is used$")]
+async fn when_rpg_use_bracket(world: &mut BevyoutWorld, pair: u8) {
+    rpg_step_hacking(
+        world,
+        bevyout_core::minigames::HackingInput::UseBracket { pair },
+    );
+}
+
+#[then(regex = r"^the hacking likeness is (\d+)$")]
+async fn then_rpg_likeness(world: &mut BevyoutWorld, likeness: u8) {
+    assert_eq!(
+        world.rpg_hacking.as_ref().unwrap().last_likeness,
+        Some(likeness)
+    );
+}
+
+#[then(regex = r"^the hacking attempts remaining are (\d+)$")]
+async fn then_rpg_attempts(world: &mut BevyoutWorld, remaining: u8) {
+    assert_eq!(
+        world.rpg_hacking.as_ref().unwrap().attempts_remaining,
+        remaining
+    );
+}
+
+#[then("the terminal is unlocked")]
+async fn then_rpg_terminal_unlocked(world: &mut BevyoutWorld) {
+    assert!(world.rpg_hacking.as_ref().unwrap().unlocked());
+}
+
+#[then("the terminal is locked out")]
+async fn then_rpg_terminal_locked_out(world: &mut BevyoutWorld) {
+    assert!(world.rpg_hacking.as_ref().unwrap().locked_out());
+}
+
+#[then("the hacking input is rejected")]
+async fn then_rpg_hacking_rejected(world: &mut BevyoutWorld) {
+    assert!(world.rpg_minigame_commit.as_ref().unwrap().is_err());
+}
+
+#[then("the hacking board has one password")]
+async fn then_rpg_one_password(world: &mut BevyoutWorld) {
+    let session = world.rpg_hacking.as_ref().unwrap();
+    let password = session.board.password();
+    assert_eq!(
+        session
+            .board
+            .words
+            .iter()
+            .filter(|word| word.text == password)
+            .count(),
+        1
+    );
+}
+
+#[then(regex = r"^every hacking board word has length (\d+)$")]
+async fn then_rpg_word_len(world: &mut BevyoutWorld, length: usize) {
+    assert!(
+        world
+            .rpg_hacking
+            .as_ref()
+            .unwrap()
+            .board
+            .words
+            .iter()
+            .all(|word| word.text.len() == length)
+    );
+}
+
+#[then(regex = r"^the hacking board dud count is (\d+)$")]
+async fn then_rpg_dud_count(world: &mut BevyoutWorld, count: usize) {
+    let session = world.rpg_hacking.as_ref().unwrap();
+    assert_eq!(
+        session.board.words.len() - session.removed_duds.len() - 1,
+        count
+    );
+}
+
+#[then("the hacking snapshot round-trips")]
+async fn then_rpg_hacking_serde(world: &mut BevyoutWorld) {
+    let encoded = serde_json::to_string(world.rpg_hacking.as_ref().unwrap()).expect("encode");
+    let decoded: bevyout_core::minigames::HackingSession =
+        serde_json::from_str(&encoded).expect("decode");
+    assert_eq!(&decoded, world.rpg_hacking.as_ref().unwrap());
+    world.rpg_hacking_snapshot = Some(decoded);
+}
+
+#[then("the hacking snapshot matches the previous snapshot")]
+async fn then_rpg_hacking_matches(world: &mut BevyoutWorld) {
+    assert_eq!(
+        world.rpg_hacking.as_ref(),
+        world.rpg_hacking_snapshot.as_ref()
+    );
+}
+
+#[then("a trespass crime is reported")]
+async fn then_rpg_trespass_reported(world: &mut BevyoutWorld) {
+    let commit = world
+        .rpg_minigame_commit
+        .as_ref()
+        .unwrap()
+        .as_ref()
+        .unwrap();
+    assert_eq!(
+        commit.crime.as_ref().map(|report| report.kind),
+        Some(bevyout_core::crime::CrimeKind::Trespass)
+    );
+}
+
+#[then("no trespass crime is reported")]
+async fn then_rpg_no_trespass(world: &mut BevyoutWorld) {
+    let commit = world
+        .rpg_minigame_commit
+        .as_ref()
+        .unwrap()
+        .as_ref()
+        .unwrap();
+    assert!(commit.crime.is_none());
+}
+
+#[then("saving is blocked for an active minigame")]
+async fn then_rpg_save_blocked(world: &mut BevyoutWorld) {
+    assert!(bevyout_core::minigames::saving_blocked(
+        world.rpg_lockpick.as_ref(),
+        world.rpg_hacking.as_ref()
+    ));
+}
+
+#[then("saving is allowed after minigame cancellation")]
+async fn then_rpg_save_allowed(world: &mut BevyoutWorld) {
+    assert!(!bevyout_core::minigames::saving_blocked(
+        world.rpg_lockpick.as_ref(),
+        world.rpg_hacking.as_ref()
+    ));
 }

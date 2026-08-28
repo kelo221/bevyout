@@ -31,6 +31,10 @@ pub(crate) enum GameplayModal {
     /// resident-`Ready` shows a minimal loading overlay while its manifest
     /// loads, rather than swapping the cell instantly.
     Loading,
+    /// M9 wave 7 hairpin lockpicking. Active sessions are not saved.
+    Lockpicking,
+    /// M9 wave 7 RobCo terminal hacking. Active sessions are not saved.
+    Hacking,
 }
 
 /// Single entry point for requesting a state change (F35.3). Requests are
@@ -85,6 +89,10 @@ const LEGAL_MODAL_TRANSITIONS: &[(GameplayModal, GameplayModal)] = &[
     (GameplayModal::Console, GameplayModal::None),
     (GameplayModal::None, GameplayModal::Loading),
     (GameplayModal::Loading, GameplayModal::None),
+    (GameplayModal::None, GameplayModal::Lockpicking),
+    (GameplayModal::Lockpicking, GameplayModal::None),
+    (GameplayModal::None, GameplayModal::Hacking),
+    (GameplayModal::Hacking, GameplayModal::None),
 ];
 
 fn is_legal_app_transition(from: AppState, to: AppState) -> bool {
@@ -202,6 +210,8 @@ fn toggle_paused_on_escape(
         GameplayModal::Dialogue
         | GameplayModal::PipBoy
         | GameplayModal::Container
+        | GameplayModal::Lockpicking
+        | GameplayModal::Hacking
         | GameplayModal::Loading => return,
     };
     requests.write(RequestStateTransition::Modal(target));
@@ -225,6 +235,8 @@ fn toggle_pipboy_on_tab(
         | GameplayModal::Dialogue
         | GameplayModal::Container
         | GameplayModal::Console
+        | GameplayModal::Lockpicking
+        | GameplayModal::Hacking
         | GameplayModal::Loading => return,
     };
     requests.write(RequestStateTransition::Modal(target));
@@ -247,6 +259,8 @@ fn toggle_console_on_backquote(
         | GameplayModal::Dialogue
         | GameplayModal::PipBoy
         | GameplayModal::Container
+        | GameplayModal::Lockpicking
+        | GameplayModal::Hacking
         | GameplayModal::Loading => return,
     };
     requests.write(RequestStateTransition::Modal(target));
@@ -323,6 +337,10 @@ impl Plugin for AppStatePlugin {
             .add_systems(OnEnter(GameplayModal::PipBoy), pause_virtual_time)
             .add_systems(OnExit(GameplayModal::PipBoy), resume_virtual_time)
             .add_systems(OnEnter(GameplayModal::Container), pause_virtual_time)
-            .add_systems(OnExit(GameplayModal::Container), resume_virtual_time);
+            .add_systems(OnExit(GameplayModal::Container), resume_virtual_time)
+            .add_systems(OnEnter(GameplayModal::Lockpicking), pause_virtual_time)
+            .add_systems(OnExit(GameplayModal::Lockpicking), resume_virtual_time)
+            .add_systems(OnEnter(GameplayModal::Hacking), pause_virtual_time)
+            .add_systems(OnExit(GameplayModal::Hacking), resume_virtual_time);
     }
 }
