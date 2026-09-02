@@ -1,5 +1,11 @@
 # M6 wave 7 — bounded exterior route manual
 
+Live-state note (2026-08-03): this remains a frozen acceptance protocol, not
+gate-complete evidence. GitHub issue #285 is currently closed, but its latest
+evidence comment says numeric threshold sign-off remains open. Treat W6-C as
+unresolved until that state is reconciled with an explicit threshold decision;
+do not execute or claim the W7 gate from the issue closure alone.
+
 This manual freezes the current-data six-cell Super-Duper Mart to Megaton
 protocol and its safety ring. It is an acceptance script, not a claim that
 gate #87 has passed. The route data is current v21 Fallout 3 data; actor
@@ -115,6 +121,27 @@ non-renderable source-NIF diagnostics in route cells. They did not fail a
 selected cell. These are the current preparation measurements; the older
 timed-out jobs=1/jobs=4 attempts and PR #261's historical four-worker figures
 remain diagnostic only.
+
+### Current-master preparation checkpoint — 2026-08-03
+
+This is a post-#288 preparation check, not a replacement for the frozen v21
+W7 baseline or a W7 acceptance run. From `master` commit `e139af26`, the exact
+14-selector native command used the new ignored cache
+`.bevyout/m6-w2-overnight-master-20260803` and prepare revision
+`prepare-v22-m6-worldspace-lod-imad-screen-fx-combat-condition`.
+
+- clean: `14 done, 0 failed`, native shared assets `1608/1608`, real
+  `873.20s`; batch counters were `assets reused 0, built 0, rebuilt 0`,
+  `physics reads 305`, and `physics hits 153`;
+- warm: `14 cells valid, 0 stale`, all 14 completed cells skipped, real
+  `9.40s`;
+- report-only fingerprints: `14 cells valid, 0 stale`, real `5.46s`.
+
+The clean run emitted recoverable non-renderable diagnostics for
+`creatures/eyebot/skeleton.nif`, `creatures/giantant/skeleton.nif`, and
+`marker_radiation.nif`; all selected cells still completed. The source
+fingerprint was
+`24efdfcef26d1ebb3d347c976da6c85cd8a17e313b8a22c2709ff90b180941d0`.
 
 ## Exact fixture boundaries
 
