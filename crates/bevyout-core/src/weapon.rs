@@ -10,6 +10,9 @@ use std::fmt;
 use crate::actor_state::{
     ActorDefinition, ActorInstanceState, ActorLifeState, ActorStateError, ActorValue,
 };
+use crate::combat::body::BodyPartId;
+use crate::combat::limbs::{LimbImpact, LimbImpactOutcome, ShotId, apply_limb_impact};
+use crate::perception::TargetId;
 
 pub const DEFAULT_FIRE_SECONDS: f32 = 0.12;
 pub const DEFAULT_RELOAD_SECONDS: f32 = 1.5;
@@ -147,6 +150,11 @@ impl WeaponState {
             self.action_elapsed = 0.0;
         }
     }
+
+    /// Replaces reload duration from a base time scaled by arm-cripple bps.
+    pub fn set_reload_seconds(&mut self, reload_seconds: f32) {
+        self.definition.reload_seconds = reload_seconds;
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -160,12 +168,35 @@ pub struct DamageOutcome {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ImpactEvidence {
     pub distance_meters: f32,
+    pub body_part: Option<BodyPartId>,
+    pub shot_id: Option<ShotId>,
+    pub target: Option<TargetId>,
+}
+
+impl ImpactEvidence {
+    #[must_use]
+    pub const fn at_distance(distance_meters: f32) -> Self {
+        Self {
+            distance_meters,
+            body_part: None,
+            shot_id: None,
+            target: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ActorImpactOutcome {
+    pub health: DamageOutcome,
+    pub limb: Option<LimbImpactOutcome>,
+    pub duplicate: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum ImpactOutcome {
     OutOfRange,
-    Actor(DamageOutcome),
+    Duplicate,
+    Actor(ActorImpactOutcome),
 }
 
 #[must_use]
@@ -249,7 +280,33 @@ pub fn resolve_actor_impact(
     if !impact_is_in_range(weapon, evidence) {
         return Ok(ImpactOutcome::OutOfRange);
     }
-    apply_actor_damage(definition, state, weapon.damage).map(ImpactOutcome::Actor)
+    if let Some(shot_id) = evidence.shot_id
+        && state.limbs.applied_shots.contains(&shot_id)
+    {
+        return Ok(ImpactOutcome::Duplicate);
+    }
+    let health = apply_actor_damage(definition, state, weapon.damage)?;
+    let part = evidence.body_part.unwrap_or(BodyPartId::Torso);
+    let limb = evidence.shot_id.map(|shot_id| {
+        let milli = (health.applied_damage.max(0.0) * 1_000.0).round() as u32;
+        apply_limb_impact(
+            &mut state.limbs,
+            LimbImpact {
+                shot_id,
+                target: evidence.target.unwrap_or(TargetId {
+                    class: crate::perception::TargetClass::Actor,
+                    form_id: state.reference_form_id,
+                }),
+                part,
+                final_damage_milli: milli,
+            },
+        )
+    });
+    Ok(ImpactOutcome::Actor(ActorImpactOutcome {
+        health,
+        limb,
+        duplicate: false,
+    }))
 }
 
 #[cfg(test)]

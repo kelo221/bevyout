@@ -54,6 +54,22 @@ fn view_and_render_validate_day_night_cycle_duration() {
 }
 
 #[test]
+fn view_and_render_keep_wgpu_validation_off_unless_opted_in() {
+    let cli = Cli::try_parse_from(["bevyout", "view", "--manifest", "scene.ron"]).unwrap();
+    let CommandLine::View(args) = cli.command else {
+        panic!("expected view command");
+    };
+    assert!(!args.wgpu_validation);
+
+    let cli =
+        Cli::try_parse_from(["bevyout", "render", "SuperDuperMart", "--wgpu-validation"]).unwrap();
+    let CommandLine::Render(args) = cli.command else {
+        panic!("expected render command");
+    };
+    assert!(args.wgpu_validation);
+}
+
+#[test]
 fn animation_zoo_requires_an_actor_and_validates_bridge_options() {
     let cli = Cli::try_parse_from([
         "bevyout",
@@ -73,6 +89,7 @@ fn animation_zoo_requires_an_actor_and_validates_bridge_options() {
     assert_eq!(args.start_clip.as_deref(), Some("idle"));
     assert_eq!(args.agent_port, 15_702);
     assert!(!args.agent_bridge);
+    assert!(!args.wgpu_validation);
     assert!(Cli::try_parse_from(["bevyout", "animation-zoo", "SuperDuperMart"]).is_err());
     assert!(
         Cli::try_parse_from([
@@ -126,6 +143,7 @@ fn ragdoll_lab_defaults_to_boxddd() {
     assert!(args.agent_bridge);
     assert_eq!(args.agent_port, 16_000);
 
+    assert!(!args.wgpu_validation);
     assert!(Cli::try_parse_from(["bevyout", "ragdoll-lab", "SuperDuperMart"]).is_err());
     assert!(
         Cli::try_parse_from([
@@ -599,6 +617,30 @@ fn accepts_editor_id_selectors_and_legacy_paths() {
         ])
         .is_err()
     );
+
+    let cli = Cli::try_parse_from(["bevyout", "export-raylib", "SuperDuperMart"]).unwrap();
+    let CommandLine::ExportRaylib(args) = cli.command else {
+        panic!("expected export-raylib command");
+    };
+    assert_eq!(args.selector, "SuperDuperMart");
+    assert!(args.no_actors);
+    assert_eq!(args.shadow_resolution, 512);
+
+    let cli = Cli::try_parse_from([
+        "bevyout",
+        "export-raylib",
+        "SuperDuperMart",
+        "--no-actors",
+        "false",
+        "--shadow-resolution",
+        "128",
+    ])
+    .unwrap();
+    let CommandLine::ExportRaylib(args) = cli.command else {
+        panic!("expected export-raylib command");
+    };
+    assert!(!args.no_actors);
+    assert_eq!(args.shadow_resolution, 128);
 }
 
 #[test]

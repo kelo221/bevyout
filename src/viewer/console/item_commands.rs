@@ -15,8 +15,8 @@ impl ConsoleCommandProvider for ItemCommandProvider {
             ConsoleCommand::new("useitem", "[player.]useitem <ItemInstanceId>", "Consume one unit through the canonical item-use seam.", use_item).reference_callable(false).mutating(),
             ConsoleCommand::new("giveitem", "giveitem <actor-reference> <FormID> [count]", "Add count (default 1) of an item FormID to an NPC/creature's own canonical inventory (issue #185: grants a nav agent's bound actor a door key for AI door-access testing).", give_item).mutating(),
             ConsoleCommand::new("setmerchant", "setmerchant <container-reference> <caps>", "Mark a prepared static container as a merchant with fixed caps.", set_merchant).mutating(),
-            ConsoleCommand::new("buy", "buy <merchant-reference> <ItemInstanceId> [count]", "Buy a fixed-price item from a prepared static merchant.", buy_item).mutating(),
-            ConsoleCommand::new("sell", "sell <merchant-reference> <ItemInstanceId> [count]", "Sell a fixed-price item to a prepared static merchant.", sell_item).mutating(),
+            ConsoleCommand::new("buy", "buy <merchant-reference> <ItemInstanceId> [count]", "Buy from a prepared static merchant using a Fallout 3 barter quote.", buy_item).mutating(),
+            ConsoleCommand::new("sell", "sell <merchant-reference> <ItemInstanceId> [count]", "Sell to a prepared static merchant using a Fallout 3 barter quote.", sell_item).mutating(),
         ] {
             registry.register(command)?;
         }
@@ -491,13 +491,21 @@ pub(super) fn use_item(
     let ingestible = world
         .get_resource::<super::super::effects::EffectCatalog>()
         .and_then(|catalog| catalog.get(used.base_form_id).cloned());
+    let restore_limbs = ingestible
+        .as_ref()
+        .is_some_and(bevyout_core::effects::IngestibleDefinition::restores_limbs);
     let application = ingestible
-        .map(|definition| super::effect_commands::apply_ingestible_to_player(world, &definition));
+        .as_ref()
+        .map(|definition| super::effect_commands::apply_ingestible_to_player(world, definition));
     let mut value = json!({ "item_id": item_id.0, "base_form_id": used.base_form_id, "count": 1 });
     let mut log = vec![format!("used item {:016x}", item_id.0)];
     if let Some(application) = application {
         value["ingestible"] = effect_commands::application_json(&application);
         log.push(effect_commands::application_summary(&application));
+    }
+    if restore_limbs {
+        limb_commands::restore_selected_player_limb(world);
+        value["limb_restore"] = true.into();
     }
     Ok(ConsoleCommandResult::new(value, log))
 }
@@ -583,37 +591,50 @@ pub(super) fn merchant_transaction(
     let item_id = parse_item_instance_id(item_value)
         .ok_or_else(|| ConsoleError::new("bad_type", "item instance id must be hexadecimal"))?;
     let merchant = HolderId::FixtureMerchant { reference_form_id };
-    let item = world
-        .resource::<interaction::CanonicalItemLedger>()
-        .ledger
-        .holders()
-        .get(&merchant)
-        .and_then(|state| state.find(item_id))
-        .or_else(|| {
-            world
-                .resource::<interaction::CanonicalItemLedger>()
-                .ledger
+    let (base_form_id, player_revision, merchant_revision, transaction_id) = {
+        let ledger = &world.resource::<interaction::CanonicalItemLedger>().ledger;
+        let item = ledger
+            .holders()
+            .get(&merchant)
+            .and_then(|state| state.find(item_id))
+            .or_else(|| {
+                ledger
+                    .holders()
+                    .get(&HolderId::Player)
+                    .and_then(|state| state.find(item_id))
+            })
+            .ok_or_else(|| ConsoleError::new("item_not_found", "item instance is not available"))?;
+        (
+            item.base_form_id,
+            ledger
                 .holders()
                 .get(&HolderId::Player)
-                .and_then(|state| state.find(item_id))
-        })
-        .ok_or_else(|| ConsoleError::new("item_not_found", "item instance is not available"))?;
+                .map(|state| state.revision)
+                .unwrap_or(0),
+            ledger
+                .holders()
+                .get(&merchant)
+                .map(|state| state.revision)
+                .unwrap_or(0),
+            ledger.next_transaction_id(),
+        )
+    };
     let value = world
         .resource::<PreparedItemCatalog>()
         .items
         .iter()
-        .find(|definition| definition.base_form_id == item.base_form_id)
+        .find(|definition| definition.base_form_id == base_form_id)
         .and_then(|definition| definition.value)
         .filter(|value| *value >= 0)
         .ok_or_else(|| {
             ConsoleError::new("invalid_price", "item has no non-negative catalog value")
         })? as u64;
-    if item.base_form_id == interaction::item_rules::CAPS_FORM_ID
+    if base_form_id == interaction::item_rules::CAPS_FORM_ID
         || world
             .resource::<PreparedItemCatalog>()
             .items
             .iter()
-            .find(|definition| definition.base_form_id == item.base_form_id)
+            .find(|definition| definition.base_form_id == base_form_id)
             .is_some_and(|definition| definition.quest_item)
     {
         return Err(ConsoleError::new(
@@ -621,36 +642,52 @@ pub(super) fn merchant_transaction(
             "caps and quest items cannot be traded",
         ));
     }
-    let request = if buying {
-        TransactionRequest::Buy {
-            merchant,
-            player: HolderId::Player,
-            item_id,
-            count,
-            unit_price: value,
-        }
-    } else {
-        TransactionRequest::Sell {
-            player: HolderId::Player,
-            merchant,
-            item_id,
-            count,
-            unit_price: value,
-        }
+    let player_barter = world
+        .get_resource::<super::stats::PlayerProgression>()
+        .map(|progression| {
+            progression
+                .stats
+                .skill_value(bevyout_core::actor_state::ActorSkill::Barter)
+        })
+        .unwrap_or(0);
+    let quote = bevyout_core::barter::quote_barter(bevyout_core::barter::BarterQuoteInput {
+        direction: if buying {
+            bevyout_core::barter::BarterDirection::Buy
+        } else {
+            bevyout_core::barter::BarterDirection::Sell
+        },
+        merchant,
+        player: HolderId::Player,
+        item_id,
+        count,
+        base_value: value,
+        player_barter,
+        player_revision,
+        merchant_revision,
+    })
+    .map_err(|error| ConsoleError::new("barter_quote_failed", error.to_string()))?;
+    let receipt = {
+        let mut canonical = world.resource_mut::<interaction::CanonicalItemLedger>();
+        bevyout_core::barter::commit_barter(&mut canonical.ledger, transaction_id, &quote)
+            .map_err(|error| ConsoleError::new("merchant_transfer_failed", error.to_string()))?
     };
-    let receipt = world
-        .resource_mut::<interaction::CanonicalItemLedger>()
-        .ledger
-        .execute(request)
-        .map_err(|error| ConsoleError::new("merchant_transfer_failed", error.to_string()))?;
     Ok(ConsoleCommandResult::new(
-        json!({ "merchant": reference_form_id, "item_id": item_id.0, "count": count, "unit_price": value, "transaction_id": receipt.id.0 }),
+        json!({
+            "merchant": reference_form_id,
+            "item_id": item_id.0,
+            "count": count,
+            "base_value": value,
+            "unit_price": quote.unit_price,
+            "total": quote.total,
+            "factor_milli": quote.factor_milli,
+            "transaction_id": receipt.id.0
+        }),
         vec![format!(
             "{} {:016x} x{} at {} caps",
             if buying { "bought" } else { "sold" },
             item_id.0,
             count,
-            value
+            quote.unit_price
         )],
     ))
 }

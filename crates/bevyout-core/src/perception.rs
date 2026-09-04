@@ -143,12 +143,17 @@ pub enum AwarenessEvent {
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct AwarenessState {
-    /// Detection confidence in `[0, 1]`.
+    /// Detection confidence in `[0, 1]`. Wave 6 also stores milli units; the
+    /// f32 copy remains so existing saves and the float `update` path migrate.
     pub confidence: f32,
+    /// Quantized confidence in `[0, 1000]`. Authoritative for stealth evidence.
+    pub confidence_milli: u16,
     /// The one currently acquired target, or `None`.
     pub acquired: Option<TargetId>,
     /// Seconds since the acquired/primary target was last visible.
     pub time_since_seen: f32,
+    /// Milliseconds since the acquired/primary target was last visible.
+    pub time_since_seen_ms: u32,
     /// Last position the primary target was seen at, for search behavior.
     pub last_known_position: Option<[f32; 3]>,
 }
@@ -200,6 +205,17 @@ impl AwarenessState {
             self.confidence = (self.confidence - config.decay_per_second * dt).max(0.0);
             self.time_since_seen += dt;
         }
+        self.confidence_milli = if self.confidence.is_finite() {
+            (self.confidence.clamp(0.0, 1.0) * 1_000.0).round() as u16
+        } else {
+            0
+        };
+        self.time_since_seen_ms = if self.time_since_seen.is_finite() && self.time_since_seen > 0.0
+        {
+            (self.time_since_seen * 1_000.0).round() as u32
+        } else {
+            0
+        };
 
         match self.acquired {
             None => {

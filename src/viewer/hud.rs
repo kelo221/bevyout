@@ -76,6 +76,7 @@ impl Plugin for HudPlugin {
         app.init_resource::<HudVitals>()
             .init_resource::<HudMessages>()
             .init_resource::<HudSneaking>()
+            .init_resource::<HudDetection>()
             .add_systems(Startup, spawn_hud)
             .add_systems(
                 Update,
@@ -85,6 +86,7 @@ impl Plugin for HudPlugin {
                     refresh_messages,
                     pulse_crosshair,
                     sync_sneak_visibility,
+                    sync_detection_text,
                     sync_modal_visibility,
                 )
                     .in_set(ViewerSet::Ui),
@@ -127,6 +129,10 @@ impl Default for HudVitals {
 /// state; HUD-only otherwise.
 #[derive(Resource, Default)]
 pub(crate) struct HudSneaking(pub(crate) bool);
+
+/// HUD projection of observer awareness + hostility. Not an authority.
+#[derive(Resource, Default, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct HudDetection(pub(crate) bevyout_core::detection::DetectionHud);
 
 /// Top-left notification feed. Kept deliberately narrow: `push` records a
 /// line, and the presentation system rebuilds the column when dirty.
@@ -829,6 +835,23 @@ fn sync_sneak_visibility(
     };
     for mut node in &mut indicators {
         node.display = display;
+    }
+}
+
+fn sync_detection_text(
+    detection: Res<HudDetection>,
+    mut indicators: Query<&mut Text, With<StealthIndicator>>,
+) {
+    if !detection.is_changed() {
+        return;
+    }
+    let label = match detection.0 {
+        bevyout_core::detection::DetectionHud::Hidden => "[ H I D D E N ]",
+        bevyout_core::detection::DetectionHud::Caution => "[ C A U T I O N ]",
+        bevyout_core::detection::DetectionHud::Danger => "[ D A N G E R ]",
+    };
+    for mut text in &mut indicators {
+        *text = Text::new(label);
     }
 }
 

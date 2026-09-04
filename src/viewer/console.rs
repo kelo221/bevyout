@@ -16,7 +16,7 @@ use crate::console::{
     ConsoleCommand, ConsoleCommandProvider, ConsoleCommandResult, ConsoleEntityHooks, ConsoleError,
     ConsoleInvocation, ConsoleRegistry, resolve_reference,
 };
-use crate::item_transaction::{HolderId, ItemInstanceId, TransactionRequest};
+use crate::item_transaction::{HolderId, ItemInstanceId};
 use crate::vsa::{PreparedItemCatalog, PreparedItemStats, PreparedSemantic};
 
 use super::controls::{
@@ -34,30 +34,29 @@ use super::{
     actor, actor_animation, actor_state, diagnostics, interaction, nav, nav_overlay, player, stats,
 };
 mod actor_state_commands;
-// pub(crate): issue #218's autonomous package driver calls `start_package`
-// directly -- one implementation shared with the console `runpackage`.
 pub(crate) mod ai_package_commands;
 mod cinema_commands;
 mod common;
+mod crime_commands;
 mod dialogue_commands;
 mod effect_commands;
 mod item_commands;
+mod limb_commands;
 mod navigation_commands;
 mod perception_commands;
 mod perk_commands;
 mod persistence_commands;
 mod player_commands;
 mod render_commands;
+mod repair_commands;
 mod screen_fx_commands;
 mod stats_commands;
 mod ui_commands;
 mod weapon_commands;
 mod world_commands;
-
 use common::{no_args, parse_item_form_id, toggle_result};
 #[cfg(test)]
 use render_commands::*;
-
 #[derive(Component)]
 pub(crate) struct GameUi;
 
@@ -100,7 +99,6 @@ fn install(app: &mut App) {
         .init_resource::<RealtimeShadowSettings>()
         .init_resource::<nav_overlay::NavMeshOverlayState>()
         .init_resource::<nav_overlay::NavOverlayExposureLock>()
-        // Issue #151: `tdi` debug HUD state lives in `diagnostics.rs`.
         .init_resource::<diagnostics::DebugInfoState>()
         .add_systems(Startup, diagnostics::spawn_debug_info_hud)
         .add_systems(
@@ -118,7 +116,7 @@ fn install(app: &mut App) {
         hooks.register_angle_adapter(player::console_get_angles, player::console_set_angles);
     }
     let mut registry = app.world_mut().resource_mut::<ConsoleRegistry>();
-    let providers: [&dyn ConsoleCommandProvider; 17] = [
+    let providers: [&dyn ConsoleCommandProvider; 20] = [
         &player_commands::PlayerCommandProvider,
         &navigation_commands::NavigationCommandProvider,
         &world_commands::WorldCommandProvider,
@@ -136,6 +134,9 @@ fn install(app: &mut App) {
         &screen_fx_commands::ScreenFxCommandProvider,
         &stats_commands::StatsCommandProvider,
         &perk_commands::PerkCommandProvider,
+        &limb_commands::LimbCommandProvider,
+        &repair_commands::RepairCommandProvider,
+        &crime_commands::CrimeCommandProvider,
     ];
     for provider in providers {
         registry

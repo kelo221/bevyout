@@ -17,6 +17,7 @@ use crate::vsa::{
 
 use super::animation::{self, ClipTransition};
 use super::audio::PlaySound;
+use super::crime;
 use super::inventory::{Inventory, InventoryStack, StackKey, TransferResult};
 use super::player::equipment::{self, EquipError, EquipKind, EquipOutcome, EquipmentState};
 use super::player::{CameraMode, CameraModeState};

@@ -29,7 +29,9 @@ use super::interaction::{
 use super::inventory::{DropAction, StackKey, drop_action};
 use super::pipboy_reader::OpenReaderRequested;
 use super::player::FpsPlayer;
-use super::stats::{ActorStats, PlayerProgression, StatsSettings};
+use super::stats::{
+    ActorStats, PlayerLimbTarget, PlayerProgression, StatsSettings, restore_targeted_stimpak,
+};
 use super::{
     CellInfo, PreparedItemCatalog, PreparedItemCategory, PreparedItemDefinition, PreparedItemStats,
     cell_label,
@@ -88,19 +90,22 @@ fn view_label(view: PipBoyView) -> &'static str {
 }
 
 /// Display-only player status behind the header stat bar and the Stats
-/// view's caption. There is no health/XP gameplay system in scope yet, so
-/// these are the factory defaults; a future stats slice owns those rules and
-/// overwrites this resource -- the Pip-Boy only ever renders it.
+/// view's caption. Live values come from [`crate::viewer::inspection`]; this
+/// resource only formats them.
 #[derive(Resource, Debug, Clone)]
 struct PlayerStatus {
     name: String,
     level: u32,
     hp_current: u32,
     hp_max: u32,
-    ap_current: u32,
+    ap_current: Option<u32>,
     ap_max: u32,
     xp_current: u32,
     xp_next: u32,
+    radiation_line: String,
+    effect_lines: Vec<String>,
+    world_clock_line: String,
+    limbs: bevyout_core::combat::LimbState,
 }
 
 impl Default for PlayerStatus {
@@ -110,21 +115,65 @@ impl Default for PlayerStatus {
             level: 1,
             hp_current: 100,
             hp_max: 100,
-            ap_current: 85,
-            ap_max: 85,
+            ap_current: None,
+            ap_max: 75,
             xp_current: 0,
             xp_next: 200,
+            radiation_line: String::new(),
+            effect_lines: Vec::new(),
+            world_clock_line: String::new(),
+            limbs: bevyout_core::combat::LimbState::healthy(),
         }
     }
+}
+
+fn project_status_from_snapshot(
+    status: &mut PlayerStatus,
+    snapshot: &bevyout_core::inspection::RpgInspectionSnapshot,
+) {
+    status.name = snapshot.player.name.clone();
+    status.level = u32::from(snapshot.player.level);
+    status.hp_current = snapshot.player.hp_current;
+    status.hp_max = snapshot.player.hp_max;
+    status.ap_current = snapshot.player.ap_current;
+    status.ap_max = snapshot.player.ap_max;
+    status.xp_current = snapshot.player.xp_current;
+    status.xp_next = snapshot.player.xp_next;
+    status.radiation_line = bevyout_core::inspection::radiation_stage_line(snapshot);
+    status.effect_lines = snapshot
+        .effects
+        .entries
+        .iter()
+        .map(|entry| {
+            format!(
+                "{}  {}  {:+}  {} ms",
+                entry.source, entry.actor_value, entry.magnitude, entry.remaining_ms
+            )
+        })
+        .collect();
+    status.world_clock_line = bevyout_core::inspection::world_clock_line(snapshot);
+    let mut limbs = bevyout_core::combat::LimbState::healthy();
+    for part in &snapshot.limbs.parts {
+        *limbs.part_mut(part.part) = bevyout_core::combat::LimbCondition {
+            current_milli: part.current_milli,
+            max_milli: part.max_milli,
+            crippled: part.crippled,
+        };
+    }
+    status.limbs = limbs;
 }
 
 /// The header bar's four stat segments, in display order, as (label, value)
 /// pairs -- kept pure so the exact formatting is unit-testable.
 fn stat_segments(status: &PlayerStatus) -> [(&'static str, String); 4] {
+    let ap = match status.ap_current {
+        Some(current) => format!("{}/{}", current, status.ap_max),
+        None => format!("—/{}", status.ap_max),
+    };
     [
         ("LVL", status.level.to_string()),
         ("HP", format!("{}/{}", status.hp_current, status.hp_max)),
-        ("AP", format!("{}/{}", status.ap_current, status.ap_max)),
+        ("AP", ap),
         ("XP", format!("{}/{}", status.xp_current, status.xp_next)),
     ]
 }
@@ -265,6 +314,7 @@ fn install(app: &mut App) {
         .init_resource::<EffectCatalog>()
         .init_resource::<StatsSettings>()
         .init_resource::<PlayerProgression>()
+        .init_resource::<PlayerLimbTarget>()
         .init_resource::<RngResource>()
         // `handle_item_action_button`'s dependencies, normally registered by
         // `interaction`/`audio`/`pipboy_reader`'s installs -- `init_resource`
@@ -278,7 +328,12 @@ fn install(app: &mut App) {
         .add_plugins(presentation::PipBoyPresentationPlugin)
         .add_systems(
             OnEnter(GameplayModal::PipBoy),
-            (presentation::begin_open, enter_pipboy).chain(),
+            (
+                presentation::begin_open,
+                project_player_status,
+                enter_pipboy,
+            )
+                .chain(),
         )
         .add_systems(
             OnExit(GameplayModal::PipBoy),
@@ -344,6 +399,13 @@ fn handle_equip_and_hotkeys(
             hotkeys.assign(number, selected);
             notice.show(format!("Bound hotkey {number}"));
         }
+    }
+}
+
+fn project_player_status(world: &mut World) {
+    let snapshot = super::inspection::rpg_snapshot_from_world(world);
+    if let Some(mut status) = world.get_resource_mut::<PlayerStatus>() {
+        project_status_from_snapshot(&mut status, &snapshot);
     }
 }
 
@@ -629,7 +691,8 @@ struct AidUseContext<'w, 's> {
     effect_catalog: Res<'w, EffectCatalog>,
     settings: Res<'w, StatsSettings>,
     rng: ResMut<'w, RngResource>,
-    progression: Res<'w, PlayerProgression>,
+    progression: ResMut<'w, PlayerProgression>,
+    limb_target: Res<'w, PlayerLimbTarget>,
     player: AidPlayerQuery<'w, 's>,
 }
 
@@ -680,6 +743,9 @@ fn use_item(
             },
             &mut context.rng.0,
         );
+        if definition.restores_limbs() {
+            restore_targeted_stimpak(&mut context.progression, context.limb_target.0);
+        }
     }
     if let Some(form_id) = item.audio.pickup_sound_form_id {
         sounds.write(PlaySound {
@@ -1422,6 +1488,17 @@ fn spawn_data_body(root: &mut ChildSpawnerCommands, sources: &ScreenSources, sta
                 for line in world_lines(session, sources.time.elapsed_secs_f64()) {
                     body.spawn((
                         Text::new(line),
+                        TextColor(GREEN),
+                        TextFont {
+                            font_size: FontSize::Px(19.0),
+                            ..default()
+                        },
+                        glow(),
+                    ));
+                }
+                if !sources.status.world_clock_line.is_empty() {
+                    body.spawn((
+                        Text::new(sources.status.world_clock_line.clone()),
                         TextColor(GREEN),
                         TextFont {
                             font_size: FontSize::Px(19.0),

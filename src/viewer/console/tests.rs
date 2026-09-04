@@ -36,11 +36,14 @@ fn test_app() -> App {
         .insert_resource(interaction::PlayerEquipment::default());
     app.insert_resource(super::super::day_night::GameClock::default())
         .insert_resource(super::super::day_night::DayNightPreview::default());
+    app.init_resource::<super::super::game_time::GameTimeRuntime>();
     app.init_resource::<interaction::CanonicalItemLedger>();
+    app.init_resource::<super::super::recipes::RecipeCatalog>();
     app.init_resource::<Assets<StandardMaterial>>();
     app.init_resource::<super::super::world::ActiveSaveState>();
     app.init_resource::<super::super::actor_state::ActorDefinitionCatalogs>();
     app.init_state::<GameplayModal>();
+    app.add_message::<crate::app_state::RequestStateTransition>();
     let camera = player::CameraModeState {
         collision_build_complete: true,
         collisions_ready: true,
@@ -64,6 +67,7 @@ fn test_app() -> App {
     app.add_plugins((
         super::super::stats::StatsPlugin,
         super::super::effects::EffectsPlugin,
+        super::super::minigames::MinigamesPlugin,
     ));
     player::set_camera_mode(app.world_mut(), player::CameraMode::Fps).unwrap();
     app.update();
@@ -191,6 +195,7 @@ fn weapon_commands_expose_state_and_queue_normal_action_requests() {
     let combat = exec(&mut app, "combatstate");
     assert_eq!(combat.value["capabilities"]["ammo"], true);
     assert_eq!(combat.value["capabilities"]["condition"], true);
+    assert_eq!(combat.value["capabilities"]["limbs"], true);
     assert_eq!(combat.value["capabilities"]["vats"], false);
     let vats = exec(&mut app, "vatsstate");
     assert_eq!(vats.value["available"], false);
@@ -222,6 +227,43 @@ fn weapon_commands_expose_state_and_queue_normal_action_requests() {
             .iter_current_update_messages()
             .count(),
         1
+    );
+}
+
+#[test]
+fn limb_commands_report_and_cripple_player_parts() {
+    let mut app = test_app();
+    let shown = exec(&mut app, "showlimbs");
+    assert!(shown.ok);
+    assert_eq!(shown.value["locomotion_bps"], 10_000);
+    assert_eq!(shown.value["selected"], "torso");
+    assert!(exec(&mut app, "selectlimb left_leg").ok);
+    assert!(exec(&mut app, "cripple left_leg").ok);
+    let shown = exec(&mut app, "showlimbs");
+    assert_eq!(shown.value["locomotion_bps"], 6_000);
+    assert_eq!(shown.value["parts"]["left_leg"]["crippled"], true);
+    assert_eq!(shown.value["selected"], "left_leg");
+}
+
+#[test]
+fn crime_commands_report_detection_bounty_and_karma() {
+    let mut app = test_app();
+    let detect = exec(&mut app, "detectstate");
+    assert!(detect.ok);
+    assert_eq!(detect.value["hud"], "hidden");
+    let crime = exec(&mut app, "crime");
+    assert!(crime.ok);
+    assert_eq!(crime.value["bounty"], 0);
+    assert_eq!(crime.value["karma"], 0);
+    assert_eq!(exec(&mut app, "getkarma").value["karma"], 0);
+    let modified = exec(&mut app, "modkarma -5");
+    assert!(modified.ok);
+    assert_eq!(modified.value["karma"], -5);
+    assert_eq!(exec(&mut app, "getkarma").value["karma"], -5);
+    assert_eq!(exec(&mut app, "crime").value["karma"], -5);
+    assert_eq!(
+        exec(&mut app, "setownership").error.unwrap().code,
+        "bad_arity"
     );
 }
 
@@ -1515,6 +1557,309 @@ fn setlock_sets_and_clears_the_interaction_and_nav_lock_state_together() {
     let door = door_state(&mut app);
     assert_eq!(door.lock_level, None);
     assert_eq!(door.key_form_id, Some(200));
+}
+
+#[test]
+fn unlock_clears_a_door_lock() {
+    let mut app = test_app();
+    nav::agent::init_test_archipelago_state(app.world_mut());
+    register_placement(
+        &mut app,
+        "Door((lock_level: Some(25), key_form_id: None, destination: None))",
+    );
+    let output = exec(&mut app, "unlock 00000010");
+    assert!(output.ok, "{output:?}");
+    assert_eq!(output.value["lock_level"], Value::Null);
+}
+
+#[test]
+fn lockpick_console_starts_steps_and_unlocks_without_consuming_a_pin() {
+    let mut app = test_app();
+    nav::agent::init_test_archipelago_state(app.world_mut());
+    register_placement(
+        &mut app,
+        "Door((lock_level: Some(25), key_form_id: None, destination: None))",
+    );
+    crate::viewer::minigames::grant_runtime_bobby_pins(app.world_mut(), 2).unwrap();
+    let start = exec(&mut app, "lockpick 00000010");
+    assert!(start.ok, "{start:?}");
+    assert_eq!(start.value["active"], true);
+    let sweet = start.value["difficulty"].as_u64().unwrap() as i32 * 900 - 45_000;
+    let angle = exec(&mut app, &format!("lockpick angle {sweet}"));
+    assert!(angle.ok, "{angle:?}");
+    let torque = exec(&mut app, "lockpick torque 1000");
+    assert!(torque.ok, "{torque:?}");
+    assert_eq!(torque.value["unlocked"], true);
+    assert_eq!(torque.value["bobby_pins"], 2);
+    let entity = app
+        .world_mut()
+        .query_filtered::<Entity, With<interaction::PlacementRoot>>()
+        .single(app.world())
+        .unwrap();
+    let placement = app
+        .world()
+        .get::<interaction::PlacementRoot>(entity)
+        .unwrap()
+        .placement()
+        .clone();
+    match placement.semantic {
+        crate::vsa::PreparedSemantic::Door(door) => assert_eq!(door.lock_level, None),
+        _ => panic!("expected a door"),
+    }
+}
+
+#[test]
+fn lockpick_console_rejects_out_of_range_angle() {
+    let mut app = test_app();
+    register_placement(
+        &mut app,
+        "Door((lock_level: Some(25), key_form_id: None, destination: None))",
+    );
+    assert!(exec(&mut app, "lockpick 00000010").ok);
+    assert_eq!(
+        error_code(&exec(&mut app, "lockpick angle 90001")),
+        "bad_type"
+    );
+}
+
+#[test]
+fn hackterminal_console_guesses_the_synthetic_password() {
+    let mut app = test_app();
+    register_placement(&mut app, "Activator");
+    let start = exec(&mut app, "hackterminal 00000010");
+    assert!(start.ok, "{start:?}");
+    assert_eq!(start.value["active"], true);
+    let words = start.value["words"]
+        .as_array()
+        .expect("synthetic board words");
+    assert!(words.iter().any(|word| word == "VENT"));
+    let guess = exec(&mut app, "hackterminal guess VENT");
+    assert!(guess.ok, "{guess:?}");
+    assert_eq!(guess.value["unlocked"], true);
+}
+
+#[test]
+fn save_is_blocked_while_a_lockpick_session_is_active() {
+    let mut app = test_app();
+    register_placement(
+        &mut app,
+        "Door((lock_level: Some(25), key_form_id: None, destination: None))",
+    );
+    crate::viewer::minigames::grant_runtime_bobby_pins(app.world_mut(), 1).unwrap();
+    assert!(exec(&mut app, "lockpick 00000010").ok);
+    let blocked = exec(&mut app, "save slot1");
+    assert!(!blocked.ok);
+    assert_eq!(error_code(&blocked), "save_failed");
+    assert!(
+        blocked
+            .error
+            .as_ref()
+            .expect("error")
+            .message
+            .contains("minigame save deferred")
+    );
+    assert!(exec(&mut app, "lockpick cancel").ok);
+}
+
+#[test]
+fn showgametime_and_passtime_use_the_integer_clock() {
+    let mut app = test_app();
+    let shown = exec(&mut app, "showgametime");
+    assert!(shown.ok, "{shown:?}");
+    assert_eq!(shown.value["game_ms"], 0);
+    assert_eq!(shown.value["timescale"], 0);
+    assert!(exec(&mut app, "settime 8").ok);
+    assert_eq!(
+        app.world()
+            .resource::<super::super::day_night::GameClock>()
+            .hour,
+        8.0
+    );
+    assert_eq!(
+        app.world()
+            .resource::<super::super::game_time::GameTimeRuntime>()
+            .world
+            .clock
+            .absolute_game_ms,
+        0,
+        "settime must not write the integer clock"
+    );
+    let passed = exec(&mut app, "passtime 1");
+    assert!(passed.ok, "{passed:?}");
+    assert_eq!(passed.value["game_ms"], 3_600_000);
+    assert_eq!(
+        app.world()
+            .resource::<super::super::day_night::GameClock>()
+            .hour,
+        1.0
+    );
+    assert_eq!(exec(&mut app, "passtime").error.unwrap().code, "bad_arity");
+}
+
+#[test]
+fn resetcell_and_fasttravel_reject_bad_form_ids() {
+    let mut app = test_app();
+    assert_eq!(
+        exec(&mut app, "resetcell zz").error.unwrap().code,
+        "bad_form_id"
+    );
+    assert_eq!(
+        exec(&mut app, "fasttravel zz").error.unwrap().code,
+        "bad_form_id"
+    );
+}
+
+#[test]
+fn resetcell_unregistered_cell_is_not_due() {
+    let mut app = test_app();
+    let output = exec(&mut app, "resetcell 000151e3");
+    assert_eq!(error_code(&output), "reset_rejected");
+    assert!(
+        output.error.as_ref().unwrap().message.contains("NotDue"),
+        "{:?}",
+        output.error
+    );
+}
+
+fn insert_fast_travel_manifest(app: &mut App, interior: bool, asset_root: String) {
+    let mut manifest = fixture_manifest();
+    manifest.cell.interior = interior;
+    manifest.asset_root = asset_root;
+    app.world_mut()
+        .insert_resource(crate::viewer::LoadedSceneManifest(manifest));
+}
+
+fn write_prepared_destination(test_name: &str, cell: u32) -> std::path::PathBuf {
+    let temp_root = std::env::temp_dir().join(format!(
+        "bevyout-console-{test_name}-{}-{cell:08x}",
+        std::process::id()
+    ));
+    let scene_dir = temp_root.join("scenes").join(format!("{cell:08x}"));
+    std::fs::create_dir_all(&scene_dir).expect("create synthetic prepared-cell fixture dir");
+    std::fs::write(scene_dir.join("scene.ron"), "()").expect("write scene fixture");
+    temp_root
+}
+
+fn heavy_misc_item(base_form_id: u32, weight: f32) -> PreparedItemDefinition {
+    PreparedItemDefinition {
+        base_form_id,
+        record_kind: "MISC".into(),
+        category: PreparedItemCategory::Misc,
+        editor_id: None,
+        display_name: None,
+        source_model_path: None,
+        icon_asset_path: None,
+        world_asset_path: None,
+        physics_asset_path: None,
+        drop_collider: Default::default(),
+        value: None,
+        weight: Some(weight),
+        quest_item: false,
+        stats: PreparedItemStats::default(),
+        audio: Default::default(),
+    }
+}
+
+#[test]
+fn fasttravel_unprepared_destination_does_not_advance_time() {
+    let mut app = test_app();
+    app.add_message::<interaction::DoorTravelRequested>();
+    insert_fast_travel_manifest(&mut app, false, "cache/00017f37".into());
+    let before = app
+        .world()
+        .resource::<super::super::game_time::GameTimeRuntime>()
+        .world
+        .clock
+        .absolute_game_ms;
+    let output = exec(&mut app, "fasttravel 000badd0");
+    assert_eq!(error_code(&output), "cell_not_found");
+    assert_eq!(
+        app.world()
+            .resource::<super::super::game_time::GameTimeRuntime>()
+            .world
+            .clock
+            .absolute_game_ms,
+        before
+    );
+    let requests = app
+        .world()
+        .resource::<Messages<interaction::DoorTravelRequested>>();
+    assert_eq!(requests.iter_current_update_messages().count(), 0);
+}
+
+#[test]
+fn fasttravel_from_an_interior_is_blocked_without_advancing_time() {
+    let mut app = test_app();
+    app.add_message::<interaction::DoorTravelRequested>();
+    let destination = 0x0002_0002u32;
+    let temp_root = write_prepared_destination("fasttravel-interior", destination);
+    insert_fast_travel_manifest(&mut app, true, temp_root.to_string_lossy().into_owned());
+    let before = app
+        .world()
+        .resource::<super::super::game_time::GameTimeRuntime>()
+        .world
+        .clock
+        .absolute_game_ms;
+    let output = exec(&mut app, "fasttravel 00020002");
+    let cleanup = std::fs::remove_dir_all(&temp_root);
+    assert_eq!(error_code(&output), "fast_travel_blocked");
+    assert!(
+        output.error.as_ref().unwrap().message.contains("Interior"),
+        "{:?}",
+        output.error
+    );
+    assert_eq!(
+        app.world()
+            .resource::<super::super::game_time::GameTimeRuntime>()
+            .world
+            .clock
+            .absolute_game_ms,
+        before
+    );
+    cleanup.expect("remove synthetic prepared-cell fixture dir");
+}
+
+#[test]
+fn fasttravel_encumbered_player_is_blocked_without_advancing_time() {
+    let mut app = test_app();
+    app.add_message::<interaction::DoorTravelRequested>();
+    let destination = 0x0002_0002u32;
+    let temp_root = write_prepared_destination("fasttravel-encumbered", destination);
+    insert_fast_travel_manifest(&mut app, false, temp_root.to_string_lossy().into_owned());
+    app.insert_resource(PreparedItemCatalog {
+        revision: "test".into(),
+        source_fingerprint: "test".into(),
+        items: vec![heavy_misc_item(0x42, 400.0)],
+    });
+    exec(&mut app, "additem 00000042");
+    let before = app
+        .world()
+        .resource::<super::super::game_time::GameTimeRuntime>()
+        .world
+        .clock
+        .absolute_game_ms;
+    let output = exec(&mut app, "fasttravel 00020002");
+    let cleanup = std::fs::remove_dir_all(&temp_root);
+    assert_eq!(error_code(&output), "fast_travel_blocked");
+    assert!(
+        output
+            .error
+            .as_ref()
+            .unwrap()
+            .message
+            .contains("Encumbered"),
+        "{:?}",
+        output.error
+    );
+    assert_eq!(
+        app.world()
+            .resource::<super::super::game_time::GameTimeRuntime>()
+            .world
+            .clock
+            .absolute_game_ms,
+        before
+    );
+    cleanup.expect("remove synthetic prepared-cell fixture dir");
 }
 
 // -- save (issue #60, F60.3) ------------------------------------------
@@ -3066,6 +3411,28 @@ fn stimpak_selects_fast_metabolism_branch_and_health_console_clamps() {
         exec(&mut app, "getav health").value["result"].as_f64(),
         Some(0.0)
     );
+}
+
+#[test]
+fn showstats_projects_goty_vitals_without_current_ap() {
+    let mut app = test_app();
+    let output = exec(&mut app, "showstats");
+    assert!(output.ok, "showstats failed: {:?}", output.error);
+    assert_eq!(output.value["schema_revision"].as_u64(), Some(1));
+    assert_eq!(output.value["player"]["hp_current"].as_u64(), Some(200));
+    assert_eq!(output.value["player"]["hp_max"].as_u64(), Some(200));
+    assert_eq!(output.value["player"]["ap_max"].as_u64(), Some(75));
+    assert_eq!(
+        output.value["player"]["ap_available"].as_bool(),
+        Some(false)
+    );
+    assert!(output.value["player"]["ap_current"].is_null());
+    assert_eq!(output.value["player"]["xp_current"].as_u64(), Some(0));
+    assert_eq!(output.value["player"]["xp_next"].as_u64(), Some(200));
+    assert_eq!(output.value["vats"]["available"].as_bool(), Some(false));
+    assert_eq!(output.value["vats"]["reason"], "unavailable");
+    assert_eq!(output.value["vats"]["planned_wave"].as_u64(), Some(8));
+    assert!(output.log[0].contains("AP —/75"), "{:?}", output.log);
 }
 
 #[test]

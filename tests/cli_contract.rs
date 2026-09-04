@@ -13,7 +13,15 @@ fn help_lists_the_supported_commands() {
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
     for command in [
-        "cache", "prepare", "bake", "render", "view", "report", "cells", "script",
+        "cache",
+        "prepare",
+        "bake",
+        "render",
+        "view",
+        "report",
+        "cells",
+        "script",
+        "export-raylib",
     ] {
         assert!(stdout.contains(command), "help should mention {command}");
     }
@@ -103,4 +111,13 @@ fn viewer_help_describes_the_agent_bridge() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("agent-bridge"));
     assert!(stdout.contains("agent-port"));
+    assert!(stdout.contains("wgpu-validation"));
+}
+
+#[test]
+fn render_help_describes_wgpu_validation_opt_in() {
+    let output = run_cli(&["render", "--help"]);
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("wgpu-validation"));
 }

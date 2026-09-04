@@ -55,6 +55,9 @@ cargo run-dev -- bake SuperDuperMart
 cargo run-dev -- render SuperDuperMart
 ```
 
+`run-dev` is the compile-time path (`opt-level = 1` on this crate). For a
+playable viewer FPS without a full release build, use `cargo run-play -- render SuperDuperMart` (`dev-opt`, `opt-level = 3`). GPU API validation is off by default; pass `--wgpu-validation` (or `WGPU_VALIDATION=1`) when diagnosing renderer bugs.
+
 The equivalent direct command is `cargo run --features bevy/dynamic_linking`.
 Dynamic linking is development-only; do not enable it for release builds
 unless the Bevy runtime DLLs are deliberately bundled and tested.

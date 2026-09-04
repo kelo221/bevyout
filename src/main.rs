@@ -2,7 +2,7 @@ use anyhow::Result;
 use clap::Parser;
 
 use bevyout::{
-    Cli, CommandLine, animation_zoo, apply, bake, cache, cells, exterior_catalog,
+    Cli, CommandLine, animation_zoo, apply, bake, cache, cells, export_raylib, exterior_catalog,
     exterior_conversion_report, nif_convert, prepare, ragdoll_lab, render, report, script, view,
 };
 
@@ -23,5 +23,6 @@ fn main() -> Result<()> {
         CommandLine::NifConvert(args) => nif_convert(args),
         CommandLine::ExteriorConversionReport(args) => exterior_conversion_report(args),
         CommandLine::ExteriorCatalog(args) => exterior_catalog(args),
+        CommandLine::ExportRaylib(args) => export_raylib(args),
     }
 }

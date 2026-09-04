@@ -163,6 +163,26 @@ fn ragdoll_lab_uses_configured_cache_without_touching_prepared_data() {
 }
 
 #[test]
+fn export_raylib_uses_configured_cache_without_touching_prepared_data() {
+    let config = TempConfigFile::new(SAMPLE_CONFIG);
+    let mut cli = Cli::try_parse_from([
+        "bevyout",
+        "export-raylib",
+        "SuperDuperMart",
+        "--config",
+        config.path().to_str().unwrap(),
+    ])
+    .unwrap();
+
+    apply(&mut cli).unwrap();
+
+    let CommandLine::ExportRaylib(args) = &cli.command else {
+        panic!("expected export-raylib command");
+    };
+    assert_eq!(args.cache_dir.as_deref(), Some(Path::new("/config/cache")));
+}
+
+#[test]
 fn animation_zoo_uses_configured_cache_without_touching_prepared_data() {
     let config = TempConfigFile::new(SAMPLE_CONFIG);
     let mut cli = Cli::try_parse_from([

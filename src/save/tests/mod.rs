@@ -72,6 +72,8 @@ fn sample_save() -> SaveGame {
                         procedure_index: 3,
                         elapsed_seconds: 4.5,
                     }),
+                    limbs: bevyout_core::combat::LimbState::healthy(),
+                    awareness: Default::default(),
                 },
             )]),
         },
@@ -142,6 +144,7 @@ fn sample_save() -> SaveGame {
         canonical: None,
         dialogue: Default::default(),
         location: None,
+        rpg: RpgSaveState::default(),
     }
 }
 
@@ -166,6 +169,125 @@ fn v8_round_trip_preserves_exact_world_location() {
     ));
     let bytes = encode_save(&save).unwrap();
     assert_eq!(decode_save(&bytes).unwrap(), save);
+}
+
+#[test]
+fn v9_round_trip_preserves_player_limbs_and_rpg() {
+    let mut save = sample_save();
+    save.rpg
+        .limbs
+        .part_mut(bevyout_core::combat::BodyPartId::Head)
+        .current_milli = 0;
+    save.rpg
+        .limbs
+        .part_mut(bevyout_core::combat::BodyPartId::Head)
+        .crippled = true;
+    save.rpg.current_health = Some(70.0);
+    let bytes = encode_save(&save).unwrap();
+    let decoded = decode_save(&bytes).unwrap();
+    assert_eq!(decoded, save);
+    assert!(
+        decoded
+            .rpg
+            .limbs
+            .part(bevyout_core::combat::BodyPartId::Head)
+            .crippled
+    );
+}
+
+#[test]
+fn v9_round_trip_preserves_optional_time_and_lifecycle() {
+    let mut save = sample_save();
+    save.rpg.clock.absolute_game_ms = 3_600_000;
+    save.rpg.clock.timescale = 30;
+    save.rpg.lifecycle.revision = bevyout_core::lifecycle::LIFECYCLE_SNAPSHOT_REVISION;
+    save.rpg.lifecycle.clock = save.rpg.clock;
+    save.rpg.lifecycle.encounter_zones.insert(
+        0x0002_a4a0,
+        bevyout_core::lifecycle::EncounterZoneState {
+            zone_form_id: 0x0002_a4a0,
+            first_entered_game_ms: 0,
+            locked_level: 6,
+            min_level: 2,
+            max_level: 10,
+        },
+    );
+    let bytes = encode_save(&save).unwrap();
+    let decoded = decode_save(&bytes).unwrap();
+    assert_eq!(decoded.rpg.clock.absolute_game_ms, 3_600_000);
+    assert_eq!(
+        decoded.rpg.lifecycle.encounter_zones[&0x0002_a4a0].locked_level,
+        6
+    );
+    assert_eq!(decoded.rpg, save.rpg);
+}
+
+#[test]
+fn v8_decode_defaults_missing_rpg_and_actor_limbs() {
+    let mut save = sample_save();
+    save.header.format_version = 8;
+    save.rpg = RpgSaveState::default();
+    let bytes = encode_save(&save).unwrap();
+    let decoded = decode_save(&bytes).unwrap();
+    assert_eq!(decoded.rpg, RpgSaveState::default());
+    let actor = decoded
+        .world
+        .cells
+        .get(&0x0001_51e3)
+        .and_then(|cell| cell.actors.get(&0x0004_1600))
+        .expect("sample actor");
+    assert_eq!(actor.limbs, bevyout_core::combat::LimbState::healthy());
+}
+
+#[test]
+fn decode_rpg_skips_unknown_subrecords() {
+    let mut payload = encode_rpg(&RpgSaveState::default()).unwrap();
+    write_subrecord(&mut payload, tag("UNKN"), b"future").unwrap();
+    let decoded = decode_rpg(&payload).unwrap();
+    assert_eq!(decoded, RpgSaveState::default());
+}
+
+#[test]
+fn decode_rpg_rejects_missing_head() {
+    let mut payload = Vec::new();
+    write_subrecord(&mut payload, tag("UNKN"), b"no-head").unwrap();
+    let error = decode_rpg(&payload).unwrap_err().to_string();
+    assert!(error.contains("RPGS is missing HEAD"), "{error}");
+}
+
+#[test]
+fn decode_rpg_rejects_unsupported_head_revision() {
+    let mut payload = Vec::new();
+    write_subrecord(&mut payload, tag("HEAD"), &1u32.to_le_bytes()).unwrap();
+    let previous = decode_rpg(&payload).unwrap_err().to_string();
+    assert!(previous.contains("unsupported"), "{previous}");
+    let mut payload = Vec::new();
+    write_subrecord(&mut payload, tag("HEAD"), &3u32.to_le_bytes()).unwrap();
+    let future = decode_rpg(&payload).unwrap_err().to_string();
+    assert!(future.contains("unsupported"), "{future}");
+}
+
+#[test]
+fn decode_rpg_rejects_missing_required_subrecords() {
+    let mut payload = Vec::new();
+    write_subrecord(&mut payload, tag("HEAD"), &RPG_SAVE_REVISION.to_le_bytes()).unwrap();
+    let error = decode_rpg(&payload).unwrap_err().to_string();
+    assert!(error.contains("RPGS is missing STAT"), "{error}");
+}
+
+#[test]
+fn decode_rpg_rejects_duplicate_non_head_subrecords() {
+    let mut payload = encode_rpg(&RpgSaveState::default()).unwrap();
+    write_subrecord(
+        &mut payload,
+        tag("STAT"),
+        ron::ser::to_string(&(CharacterSheet::default(), 0u16, 0u16, None::<f32>))
+            .unwrap()
+            .as_bytes(),
+    )
+    .unwrap();
+    let error = decode_rpg(&payload).unwrap_err().to_string();
+    assert!(error.contains("duplicate STAT"), "{error}");
 }
 
 #[test]
@@ -266,9 +388,9 @@ fn version_three_save_round_trips_equipment_and_hotkeys() {
 }
 
 #[test]
-fn version_eight_actor_item_dialogue_location_and_combat_rng_round_trip_deterministically() {
+fn current_format_actor_item_dialogue_location_and_combat_rng_round_trip_deterministically() {
     let save = sample_save();
-    assert_eq!(save.header.format_version, 8);
+    assert_eq!(save.header.format_version, CURRENT_SAVE_FORMAT_VERSION);
     let first = encode_save(&save).unwrap();
     let second = encode_save(&save).unwrap();
     assert_eq!(first, second);

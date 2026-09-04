@@ -21,6 +21,27 @@ impl ConsoleCommandProvider for WorldCommandProvider {
             )
             .mutating(),
             ConsoleCommand::new(
+                "unlock",
+                "unlock <reference>",
+                "Clear a door reference's lock (GECK unlock parity; same as setlock <reference> 0).",
+                unlock,
+            )
+            .mutating(),
+            ConsoleCommand::new(
+                "lockpick",
+                "lockpick [<reference>|angle <milli>|torque <ms>|release|force|cancel]",
+                "Start, inspect, or step a headless lockpick session. No arguments reports the active session.",
+                lockpick,
+            )
+            .mutating(),
+            ConsoleCommand::new(
+                "hackterminal",
+                "hackterminal [<reference>|guess <word>|bracket <id>|cancel]",
+                "Start, inspect, or step a synthetic terminal hacking session. No arguments reports the active board.",
+                hackterminal,
+            )
+            .mutating(),
+            ConsoleCommand::new(
                 "tp",
                 "tp <x> <y> <z> [<cell-formid>]",
                 "Atomically teleport the player to (x, y, z) in metres, optionally after swapping to a prepared cell first.",
@@ -51,6 +72,33 @@ impl ConsoleCommandProvider for WorldCommandProvider {
                 "Report every exterior-resident gameplay actor: owning cell generation, nav binding, running package, and last residency rejection.",
                 actor_residency,
             ),
+            ConsoleCommand::new(
+                "showgametime",
+                "showgametime",
+                "Report the integer game clock, calendar, remainder, and lighting-hour projection.",
+                show_game_time,
+            ),
+            ConsoleCommand::new(
+                "passtime",
+                "passtime <hours>",
+                "Advance the integer game clock by whole hours and process due lifecycle tasks.",
+                pass_time,
+            )
+            .mutating(),
+            ConsoleCommand::new(
+                "resetcell",
+                "resetcell <cell-formid>",
+                "Apply a due cell reset if the cell is registered, vacant, and the due time has arrived.",
+                reset_cell,
+            )
+            .mutating(),
+            ConsoleCommand::new(
+                "fasttravel",
+                "fasttravel <cell-formid> [hours]",
+                "Validate then commit fast travel: advance time, process due tasks, then request arrival.",
+                fast_travel,
+            )
+            .mutating(),
         ] {
             registry.register(command)?;
         }
@@ -878,6 +926,263 @@ pub(super) fn setlock(
     ))
 }
 
+pub(super) fn unlock(
+    world: &mut World,
+    invocation: &ConsoleInvocation,
+) -> Result<ConsoleCommandResult, ConsoleError> {
+    let [selector] = invocation.args.as_slice() else {
+        return Err(ConsoleError::new(
+            "bad_arity",
+            "unlock requires exactly one door reference",
+        ));
+    };
+    let mut unlock_invocation = invocation.clone();
+    unlock_invocation.command = "setlock".into();
+    unlock_invocation.args = vec![selector.clone(), "0".into()];
+    setlock(world, &unlock_invocation)
+}
+
+pub(super) fn lockpick(
+    world: &mut World,
+    invocation: &ConsoleInvocation,
+) -> Result<ConsoleCommandResult, ConsoleError> {
+    match invocation.args.as_slice() {
+        [] => lockpick_status(world),
+        [selector] if !is_lockpick_verb(selector) => start_lockpick_console(world, selector),
+        [verb] if verb.eq_ignore_ascii_case("cancel") => {
+            apply_lockpick_console(world, bevyout_core::minigames::LockpickInput::Cancel)
+        }
+        [verb] if verb.eq_ignore_ascii_case("force") => {
+            apply_lockpick_console(world, bevyout_core::minigames::LockpickInput::ForceLock)
+        }
+        [verb] if verb.eq_ignore_ascii_case("release") => {
+            apply_lockpick_console(world, bevyout_core::minigames::LockpickInput::ReleaseTorque)
+        }
+        [verb, value] if verb.eq_ignore_ascii_case("angle") => {
+            let angle = crate::viewer::minigames::parse_pick_angle(value)
+                .map_err(|error| ConsoleError::new("bad_type", error.to_string()))?;
+            apply_lockpick_console(
+                world,
+                bevyout_core::minigames::LockpickInput::SetPickAngle(angle),
+            )
+        }
+        [verb, value] if verb.eq_ignore_ascii_case("torque") => {
+            let delta_ms = value.parse::<u32>().map_err(|_| {
+                ConsoleError::new("bad_type", "lockpick torque expects milliseconds")
+            })?;
+            apply_lockpick_console(
+                world,
+                bevyout_core::minigames::LockpickInput::ApplyTorque { delta_ms },
+            )
+        }
+        _ => Err(ConsoleError::new(
+            "bad_arity",
+            "lockpick expects a door reference, or angle/torque/release/force/cancel",
+        )),
+    }
+}
+
+fn is_lockpick_verb(value: &str) -> bool {
+    matches!(
+        value.to_ascii_lowercase().as_str(),
+        "angle" | "torque" | "release" | "force" | "cancel"
+    )
+}
+
+fn start_lockpick_console(
+    world: &mut World,
+    selector: &str,
+) -> Result<ConsoleCommandResult, ConsoleError> {
+    let entity = resolve_reference(world, selector)?;
+    let placement = world
+        .get::<interaction::PlacementRoot>(entity)
+        .ok_or_else(|| ConsoleError::new("not_activatable", "reference has no placement root"))?
+        .placement()
+        .clone();
+    let PreparedSemantic::Door(door) = &placement.semantic else {
+        return Err(ConsoleError::new(
+            "not_a_door",
+            "lockpick only accepts door references",
+        ));
+    };
+    let difficulty = door.lock_level.unwrap_or(0).max(0) as u8;
+    crate::viewer::minigames::begin_lockpick(world, entity, difficulty, placement.owner_form_id);
+    let mut result = lockpick_status(world)?;
+    result.log = vec![format!(
+        "lockpick {:08x} difficulty {difficulty}",
+        placement.reference_form_id
+    )];
+    Ok(result)
+}
+
+fn apply_lockpick_console(
+    world: &mut World,
+    input: bevyout_core::minigames::LockpickInput,
+) -> Result<ConsoleCommandResult, ConsoleError> {
+    let commit = crate::viewer::minigames::apply_lockpick_input(world, input)
+        .map_err(|error| ConsoleError::new("minigame", error.to_string()))?;
+    let mut result = lockpick_status(world)?;
+    result.value["commit"] = json!({
+        "lock_unlocked": commit.lock_unlocked,
+        "pin_consumed": commit.pin_consumed,
+    });
+    Ok(result)
+}
+
+fn lockpick_status(world: &mut World) -> Result<ConsoleCommandResult, ConsoleError> {
+    let Some(session) = crate::viewer::minigames::lockpick_snapshot(world).cloned() else {
+        return Ok(ConsoleCommandResult::new(
+            json!({ "active": false }),
+            vec!["lockpick: no active session".into()],
+        ));
+    };
+    let rng_index = world
+        .get_resource::<crate::viewer::minigames::MinigameRuntime>()
+        .map(|runtime| runtime.rng.draw_index())
+        .unwrap_or(0);
+    let pins = world
+        .get_resource::<interaction::CanonicalItemLedger>()
+        .map(|ledger| bevyout_core::minigames::bobby_pin_count(&ledger.ledger))
+        .unwrap_or(0);
+    Ok(ConsoleCommandResult::new(
+        json!({
+            "active": session.is_active(),
+            "phase": format!("{:?}", session.phase),
+            "difficulty": session.config.difficulty,
+            "skill": session.config.skill,
+            "pick_angle_milli": session.pick_angle.0,
+            "cylinder_milli": session.cylinder.0,
+            "stress": session.stress.0,
+            "pin_breaks": session.pin_breaks,
+            "force_chance_bps": session.last_force_chance_bps,
+            "unlocked": session.unlocked(),
+            "rng_draw_index": rng_index,
+            "bobby_pins": pins,
+        }),
+        vec![format!(
+            "lockpick phase={:?} angle={} cylinder={} stress={} pins={pins} rng={rng_index}",
+            session.phase, session.pick_angle.0, session.cylinder.0, session.stress.0
+        )],
+    ))
+}
+
+pub(super) fn hackterminal(
+    world: &mut World,
+    invocation: &ConsoleInvocation,
+) -> Result<ConsoleCommandResult, ConsoleError> {
+    match invocation.args.as_slice() {
+        [] => hacking_status(world),
+        [selector] if !is_hacking_verb(selector) => start_hacking_console(world, selector),
+        [verb] if verb.eq_ignore_ascii_case("cancel") => {
+            apply_hacking_console(world, bevyout_core::minigames::HackingInput::Cancel)
+        }
+        [verb, word] if verb.eq_ignore_ascii_case("guess") => {
+            let session = crate::viewer::minigames::hacking_snapshot(world)
+                .ok_or_else(|| ConsoleError::new("minigame", "no active hacking session"))?;
+            let index = session
+                .board
+                .words
+                .iter()
+                .position(|entry| entry.text.eq_ignore_ascii_case(word))
+                .ok_or_else(|| ConsoleError::new("minigame", "UnknownWord"))?;
+            apply_hacking_console(
+                world,
+                bevyout_core::minigames::HackingInput::GuessWord { index },
+            )
+        }
+        [verb, value] if verb.eq_ignore_ascii_case("bracket") => {
+            let pair = value.parse::<u8>().map_err(|_| {
+                ConsoleError::new("bad_type", "hackterminal bracket expects an integer id")
+            })?;
+            apply_hacking_console(
+                world,
+                bevyout_core::minigames::HackingInput::UseBracket { pair },
+            )
+        }
+        _ => Err(ConsoleError::new(
+            "bad_arity",
+            "hackterminal expects a reference, or guess/bracket/cancel",
+        )),
+    }
+}
+
+fn is_hacking_verb(value: &str) -> bool {
+    matches!(
+        value.to_ascii_lowercase().as_str(),
+        "guess" | "bracket" | "cancel"
+    )
+}
+
+fn start_hacking_console(
+    world: &mut World,
+    selector: &str,
+) -> Result<ConsoleCommandResult, ConsoleError> {
+    let entity = resolve_reference(world, selector)?;
+    if world.get::<interaction::PlacementRoot>(entity).is_none() {
+        return Err(ConsoleError::new(
+            "not_activatable",
+            "reference has no placement root",
+        ));
+    }
+    crate::viewer::minigames::begin_hacking(world, entity)
+        .map_err(|error| ConsoleError::new("minigame", error.to_string()))?;
+    let mut result = hacking_status(world)?;
+    result.log = vec![format!("hackterminal {selector} started")];
+    Ok(result)
+}
+
+fn apply_hacking_console(
+    world: &mut World,
+    input: bevyout_core::minigames::HackingInput,
+) -> Result<ConsoleCommandResult, ConsoleError> {
+    let commit = crate::viewer::minigames::apply_hacking_input(world, input)
+        .map_err(|error| ConsoleError::new("minigame", error.to_string()))?;
+    let mut result = hacking_status(world)?;
+    result.value["commit"] = json!({
+        "terminal_unlocked": commit.terminal_unlocked,
+        "terminal_locked_out": commit.terminal_locked_out,
+    });
+    Ok(result)
+}
+
+fn hacking_status(world: &mut World) -> Result<ConsoleCommandResult, ConsoleError> {
+    let Some(session) = crate::viewer::minigames::hacking_snapshot(world).cloned() else {
+        return Ok(ConsoleCommandResult::new(
+            json!({ "active": false }),
+            vec!["hackterminal: no active session".into()],
+        ));
+    };
+    let rng_index = world
+        .get_resource::<crate::viewer::minigames::MinigameRuntime>()
+        .map(|runtime| runtime.rng.draw_index())
+        .unwrap_or(0);
+    let words: Vec<&str> = session
+        .board
+        .words
+        .iter()
+        .map(|word| word.text.as_str())
+        .collect();
+    Ok(ConsoleCommandResult::new(
+        json!({
+            "active": session.is_active(),
+            "phase": format!("{:?}", session.phase),
+            "words": words,
+            "attempts_remaining": session.attempts_remaining,
+            "likeness": session.last_likeness,
+            "unlocked": session.unlocked(),
+            "locked_out": session.locked_out(),
+            "rng_draw_index": rng_index,
+        }),
+        vec![format!(
+            "hackterminal phase={:?} attempts={} likeness={:?} words={}",
+            session.phase,
+            session.attempts_remaining,
+            session.last_likeness,
+            words.join(",")
+        )],
+    ))
+}
+
 pub(super) fn ragdoll_probe(
     world: &mut World,
     invocation: &ConsoleInvocation,
@@ -1174,4 +1479,307 @@ pub(super) fn teleport_player(
             position.x, position.y, position.z
         )],
     ))
+}
+
+fn show_game_time(
+    world: &mut World,
+    invocation: &ConsoleInvocation,
+) -> Result<ConsoleCommandResult, ConsoleError> {
+    no_args(invocation)?;
+    let runtime = world
+        .get_resource::<crate::viewer::game_time::GameTimeRuntime>()
+        .ok_or_else(|| ConsoleError::new("time_unavailable", "game clock is unavailable"))?;
+    let clock = runtime.world.clock;
+    let date = clock.calendar();
+    let lighting = world
+        .get_resource::<super::super::day_night::GameClock>()
+        .map(|clock| clock.hour);
+    Ok(ConsoleCommandResult::new(
+        json!({
+            "game_ms": clock.absolute_game_ms,
+            "remainder": clock.fractional_timescale_remainder,
+            "timescale": clock.timescale,
+            "year": date.year,
+            "month": date.month,
+            "day": date.day,
+            "hour": date.hour,
+            "minute": date.minute,
+            "lighting_hour": clock.hour_as_f32(),
+            "projected_lighting_hour": lighting,
+        }),
+        vec![format!(
+            "Game time {:04}-{:02}-{:02} {:02}:{:02}; {} ms; timescale {}.",
+            date.year,
+            date.month,
+            date.day,
+            date.hour,
+            date.minute,
+            clock.absolute_game_ms,
+            clock.timescale
+        )],
+    ))
+}
+
+fn pass_time(
+    world: &mut World,
+    invocation: &ConsoleInvocation,
+) -> Result<ConsoleCommandResult, ConsoleError> {
+    let [hours] = invocation.args.as_slice() else {
+        return Err(ConsoleError::new(
+            "bad_arity",
+            "passtime expects exactly one hour count",
+        ));
+    };
+    let hours = hours
+        .parse::<u64>()
+        .map_err(|_| ConsoleError::new("bad_type", "hours must be a whole number"))?;
+    let delta_ms = hours
+        .checked_mul(bevyout_core::time::MS_PER_HOUR)
+        .ok_or_else(|| ConsoleError::new("overflow", "passtime would overflow game time"))?;
+    world.resource_scope(
+        |world, mut runtime: Mut<crate::viewer::game_time::GameTimeRuntime>| {
+            {
+                let mut ledger = world
+                    .get_resource_mut::<interaction::CanonicalItemLedger>()
+                    .map(|mut canonical| std::mem::take(&mut canonical.ledger));
+                let mut progression = world
+                    .get_resource_mut::<super::stats::PlayerProgression>()
+                    .map(|progression| progression.clone());
+                crate::viewer::game_time::passtime_ms(
+                    &mut runtime,
+                    delta_ms,
+                    bevyout_core::time::TimeAdvanceReason::Wait,
+                    ledger.as_mut(),
+                    progression.as_mut(),
+                )
+                .map_err(|_| ConsoleError::new("overflow", "passtime would overflow game time"))?;
+                if let Some(updated) = ledger
+                    && let Some(mut canonical) =
+                        world.get_resource_mut::<interaction::CanonicalItemLedger>()
+                {
+                    canonical.ledger = updated;
+                }
+                if let Some(updated) = progression
+                    && let Some(mut stored) =
+                        world.get_resource_mut::<super::stats::PlayerProgression>()
+                {
+                    *stored = updated;
+                }
+            }
+            crate::viewer::game_time::project_runtime_to_world(world, &runtime);
+            if let Some(mut clock) = world.get_resource_mut::<super::super::day_night::GameClock>()
+            {
+                clock.hour = runtime.world.clock.hour_as_f32();
+            }
+            Ok(ConsoleCommandResult::new(
+                json!({
+                    "game_ms": runtime.world.clock.absolute_game_ms,
+                    "hours": hours,
+                }),
+                vec![format!(
+                    "passtime {hours} hours; now {} ms.",
+                    runtime.world.clock.absolute_game_ms
+                )],
+            ))
+        },
+    )
+}
+
+fn reset_cell(
+    world: &mut World,
+    invocation: &ConsoleInvocation,
+) -> Result<ConsoleCommandResult, ConsoleError> {
+    let [cell] = invocation.args.as_slice() else {
+        return Err(ConsoleError::new(
+            "bad_arity",
+            "resetcell expects exactly one cell FormID",
+        ));
+    };
+    let cell = parse_item_form_id(cell)
+        .ok_or_else(|| ConsoleError::new("bad_form_id", "resetcell FormID must be hexadecimal"))?;
+    world.resource_scope(
+        |world, mut runtime: Mut<crate::viewer::game_time::GameTimeRuntime>| {
+            let due = runtime
+                .world
+                .cells
+                .get(&cell)
+                .and_then(|state| state.reset_due_game_ms)
+                .ok_or_else(|| {
+                    ConsoleError::new(
+                        "reset_rejected",
+                        format!("resetcell {cell:08x} rejected: NotDue"),
+                    )
+                })?;
+            let mut ledger = world.get_resource_mut::<interaction::CanonicalItemLedger>();
+            let result = runtime.world.apply_cell_reset(
+                cell,
+                due,
+                ledger.as_mut().map(|canonical| &mut canonical.ledger),
+            );
+            match result {
+                Ok(receipt) => Ok(ConsoleCommandResult::new(
+                    json!({
+                        "cell_form_id": cell,
+                        "generation": receipt.generation,
+                        "due_game_ms": receipt.due_game_ms,
+                    }),
+                    vec![format!(
+                        "resetcell {cell:08x} generation {}.",
+                        receipt.generation
+                    )],
+                )),
+                Err(error) => Err(ConsoleError::new(
+                    "reset_rejected",
+                    format!("resetcell {cell:08x} rejected: {error:?}"),
+                )),
+            }
+        },
+    )
+}
+
+fn fast_travel_evidence(
+    world: &World,
+    destination_cell: u32,
+    travel_ms: u64,
+) -> Result<bevyout_core::lifecycle::FastTravelEvidence, ConsoleError> {
+    let asset_root = world
+        .get_resource::<crate::viewer::LoadedSceneManifest>()
+        .map(|manifest| PathBuf::from(&manifest.0.asset_root))
+        .ok_or_else(|| {
+            ConsoleError::new("cell_unavailable", "no active cell manifest is loaded")
+        })?;
+    let discovered = tp_scene_manifest_path(&asset_root, destination_cell).is_file();
+    let interior = world
+        .get_resource::<crate::viewer::LoadedSceneManifest>()
+        .is_some_and(|manifest| manifest.0.cell.interior);
+    let detection = world
+        .get_resource::<crate::viewer::hud::HudDetection>()
+        .map(|hud| hud.0)
+        .unwrap_or_default();
+    let danger = matches!(
+        detection,
+        bevyout_core::detection::DetectionHud::Caution
+            | bevyout_core::detection::DetectionHud::Danger
+    );
+    let combat = matches!(detection, bevyout_core::detection::DetectionHud::Danger);
+    let catalog = world.get_resource::<PreparedItemCatalog>();
+    let carried = world
+        .get_resource::<interaction::PlayerInventory>()
+        .map(|inventory| {
+            inventory.total_weight(|form_id| {
+                catalog.and_then(|catalog| {
+                    catalog
+                        .items
+                        .iter()
+                        .find(|item| item.base_form_id == form_id)
+                        .and_then(|item| item.weight)
+                })
+            })
+        })
+        .unwrap_or(0.0);
+    let carry_capacity = world
+        .get_resource::<super::stats::PlayerProgression>()
+        .zip(world.get_resource::<super::stats::StatsSettings>())
+        .map(|(progression, settings)| progression.stats.derived(&settings.0).carry_weight)
+        .unwrap_or(f32::MAX);
+    let encumbered = carried > carry_capacity;
+    let radiation = world
+        .get_resource::<super::stats::PlayerProgression>()
+        .is_some_and(|progression| progression.radiation.rads >= 200);
+    Ok(bevyout_core::lifecycle::FastTravelEvidence {
+        destination_cell,
+        travel_ms,
+        discovered,
+        danger,
+        interior,
+        encumbered,
+        combat,
+        radiation,
+    })
+}
+
+fn fast_travel(
+    world: &mut World,
+    invocation: &ConsoleInvocation,
+) -> Result<ConsoleCommandResult, ConsoleError> {
+    if invocation.args.is_empty() || invocation.args.len() > 2 {
+        return Err(ConsoleError::new(
+            "bad_arity",
+            "fasttravel expects a cell FormID and optional hours",
+        ));
+    }
+    let cell = parse_item_form_id(&invocation.args[0])
+        .ok_or_else(|| ConsoleError::new("bad_form_id", "fasttravel FormID must be hexadecimal"))?;
+    let hours = if invocation.args.len() == 2 {
+        invocation.args[1]
+            .parse::<u64>()
+            .map_err(|_| ConsoleError::new("bad_type", "hours must be a whole number"))?
+    } else {
+        1
+    };
+    let travel_ms = hours
+        .checked_mul(bevyout_core::time::MS_PER_HOUR)
+        .ok_or_else(|| ConsoleError::new("overflow", "fasttravel would overflow game time"))?;
+    let evidence = fast_travel_evidence(world, cell, travel_ms)?;
+    if !evidence.discovered {
+        return Err(ConsoleError::new(
+            "cell_not_found",
+            format!("cell {cell:08x} is not a prepared cell"),
+        ));
+    }
+    world.resource_scope(
+        |world, mut runtime: Mut<crate::viewer::game_time::GameTimeRuntime>| {
+            let commit = {
+                let mut ledger = world
+                    .get_resource_mut::<interaction::CanonicalItemLedger>()
+                    .map(|mut canonical| std::mem::take(&mut canonical.ledger));
+                let mut progression = world
+                    .get_resource_mut::<super::stats::PlayerProgression>()
+                    .map(|progression| progression.clone());
+                let commit = crate::viewer::game_time::commit_fast_travel(
+                    &mut runtime,
+                    evidence,
+                    ledger.as_mut(),
+                    progression.as_mut(),
+                )
+                .map_err(|block| ConsoleError::new("fast_travel_blocked", format!("{block:?}")))?;
+                if let Some(updated) = ledger
+                    && let Some(mut canonical) =
+                        world.get_resource_mut::<interaction::CanonicalItemLedger>()
+                {
+                    canonical.ledger = updated;
+                }
+                if let Some(updated) = progression
+                    && let Some(mut stored) =
+                        world.get_resource_mut::<super::stats::PlayerProgression>()
+                {
+                    *stored = updated;
+                }
+                commit
+            };
+            crate::viewer::game_time::project_runtime_to_world(world, &runtime);
+            if let Some(mut clock) = world.get_resource_mut::<super::super::day_night::GameClock>()
+            {
+                clock.hour = runtime.world.clock.hour_as_f32();
+            }
+            world.write_message(interaction::DoorTravelRequested {
+                destination_cell_form_id: cell,
+                translation: Vec3::ZERO,
+                rotation_xyzw: [0.0, 0.0, 0.0, 1.0],
+                door_form_id: 0,
+            });
+            Ok(ConsoleCommandResult::new(
+                json!({
+                    "cell_form_id": cell,
+                    "travel_ms": commit.travel_ms,
+                    "game_ms": runtime.world.clock.absolute_game_ms,
+                    "arrival_requested": commit.arrival_requested,
+                }),
+                vec![format!(
+                    "fasttravel {cell:08x}; now {} ms.",
+                    runtime.world.clock.absolute_game_ms
+                )],
+            ))
+        },
+    )
 }

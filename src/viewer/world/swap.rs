@@ -412,6 +412,11 @@ fn apply_fallback_resolution(world: &mut World) {
 /// #60/#61), switches the cell ambient loop, and queues the destination's
 /// colliders for staggered construction.
 fn activate_resident_cell(world: &mut World, request: SwapRequest, kind: SwapKind) {
+    if let Some(mut runtime) = world.get_resource_mut::<crate::viewer::minigames::MinigameRuntime>()
+        && crate::viewer::minigames::cancel_active_sessions(&mut runtime)
+    {
+        world.write_message(RequestStateTransition::Modal(GameplayModal::None));
+    }
     let SwapRequest {
         source_cell,
         destination_cell,

@@ -7,7 +7,9 @@
 //! because NPCs resolve through persisted save state, not this sheet.
 
 use bevyout_core::actor_state::ActorValue;
-use bevyout_core::effects::{ActiveEffectsLedger, projected_derived, projected_special};
+use bevyout_core::effects::{
+    ActiveEffectsLedger, projected_derived_with_limbs, projected_special_with_limbs,
+};
 use bevyout_core::stats as core_stats;
 
 use super::super::effects::{ActiveEffectsList, PlayerRadiation, PlayerVitals};
@@ -58,6 +60,13 @@ impl ConsoleCommandProvider for StatsCommandProvider {
             )
             .reference_callable(false)
             .mutating(),
+            ConsoleCommand::new(
+                "showstats",
+                "[player.]showstats",
+                "Dump the shared RPG inspection snapshot as JSON.",
+                show_stats,
+            )
+            .reference_callable(false),
         ] {
             registry.register(command)?;
         }
@@ -122,7 +131,14 @@ fn projected_max_health(world: &World) -> Result<f32, ConsoleError> {
     let progression = player_progression(world)?;
     let settings = world.resource::<StatsSettings>().0;
     let (ledger, rads) = live_or_stored_effects(world);
-    Ok(projected_derived(&progression.stats, &ledger, rads, &settings).max_health)
+    Ok(projected_derived_with_limbs(
+        &progression.stats,
+        &ledger,
+        rads,
+        &settings,
+        Some(&progression.limbs),
+    )
+    .max_health)
 }
 
 fn current_health(world: &World) -> Result<f32, ConsoleError> {
@@ -155,14 +171,25 @@ fn read_actor_value(world: &World, value: ActorValue) -> Result<f64, ConsoleErro
     let progression = player_progression(world)?;
     let settings = world.resource::<StatsSettings>().0;
     let (ledger, rads) = live_or_stored_effects(world);
-    let derived = projected_derived(&progression.stats, &ledger, rads, &settings);
+    let derived = projected_derived_with_limbs(
+        &progression.stats,
+        &ledger,
+        rads,
+        &settings,
+        Some(&progression.limbs),
+    );
     let resolved = match value {
         ActorValue::Health => current_health(world)?,
         ActorValue::ActionPoints => derived.max_action_points,
         ActorValue::RadResist => ledger.modifier_for(ActorValue::RadResist).max(0.0),
-        ActorValue::Special(attribute) => {
-            f32::from(projected_special(&progression.stats, &ledger, rads)[&attribute])
-        }
+        ActorValue::Special(attribute) => f32::from(
+            projected_special_with_limbs(
+                &progression.stats,
+                &ledger,
+                rads,
+                Some(&progression.limbs),
+            )[&attribute],
+        ),
         ActorValue::Skill(skill) => f32::from(progression.stats.skill_value(skill)),
         other => {
             return Err(ConsoleError::new(
@@ -330,6 +357,32 @@ pub(super) fn reward_xp(
         ConsoleError::new("bad_type", "rewardxp expects a non-negative whole number")
     })?;
     apply_award(world, amount, "rewardxp")
+}
+
+fn show_stats(
+    world: &mut World,
+    invocation: &ConsoleInvocation,
+) -> Result<ConsoleCommandResult, ConsoleError> {
+    no_args(invocation)?;
+    let snapshot = super::super::inspection::rpg_snapshot_from_world(world);
+    let value = serde_json::to_value(&snapshot).map_err(|error| {
+        ConsoleError::new(
+            "inspection_serialize",
+            format!("failed to serialize stats: {error}"),
+        )
+    })?;
+    let player = &snapshot.player;
+    let ap = match player.ap_current {
+        Some(current) => format!("{current}/{}", player.ap_max),
+        None => format!("—/{}", player.ap_max),
+    };
+    Ok(ConsoleCommandResult::new(
+        value,
+        vec![format!(
+            "LVL {}  HP {}/{}  AP {}  XP {}/{}",
+            player.level, player.hp_current, player.hp_max, ap, player.xp_current, player.xp_next
+        )],
+    ))
 }
 
 /// Applies the award through the kernel and folds the granted skill points

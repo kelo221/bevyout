@@ -96,7 +96,10 @@ pub fn ragdoll_lab(args: RagdollLabArgs) -> Result<()> {
                     ..default()
                 }),
                 ..default()
-            }),
+            })
+            .set(super::gpu_validation::viewer_render_plugin(
+                super::gpu_validation::gpu_validation_enabled_from_env(args.wgpu_validation),
+            )),
     );
     app.add_plugins(BoxdddPhysicsPlugin::new(BoxdddPhysicsSettings {
         gravity: Vec3::new(0.0, -9.81, 0.0),

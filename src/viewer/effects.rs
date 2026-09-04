@@ -33,7 +33,7 @@ use bevyout_core::chems::{RPG_RNG_DEFAULT_SEED, RpgRngState};
 use bevyout_core::effects::{
     ActiveEffect, ActiveEffectsLedger, EffectSource, IngestibleConditionOutcome,
     IngestibleDefinition, active_rad_resistance_bps, evaluate_ingestible_condition,
-    projected_derived, projected_special,
+    projected_derived, projected_special_with_limbs,
 };
 use bevyout_core::perks::PerkProgression;
 use bevyout_core::radiation::{self, RadiationPool};
@@ -218,9 +218,17 @@ type ProjectionQuery<'w, 's> = Query<
 
 /// Refreshes the effective-SPECIAL projection from the authoritative sheet
 /// plus active modifiers and radiation penalties.
-fn recalculate_projected_special(mut players: ProjectionQuery) {
+fn recalculate_projected_special(
+    progression: Res<PlayerProgression>,
+    mut players: ProjectionQuery,
+) {
     for (stats, effects, radiation, mut projection) in &mut players {
-        projection.0 = projected_special(&stats.0, &effects.ledger, radiation.0.rads);
+        projection.0 = projected_special_with_limbs(
+            &stats.0,
+            &effects.ledger,
+            radiation.0.rads,
+            Some(&progression.limbs),
+        );
     }
 }
 
@@ -251,10 +259,17 @@ pub(crate) fn apply_player_radiation(
 /// dose publishes `ExpiredChemDose` for the withdrawal transition below.
 fn tick_active_effects_and_doses(
     time: Res<Time>,
+    runtime: Option<Res<super::game_time::GameTimeRuntime>>,
     mut players: Query<&mut ActiveEffectsList>,
     mut expired: MessageWriter<ExpiredChemDose>,
 ) {
-    let delta_ms = u32::try_from((time.delta_secs() * 1000.0).round() as u64).unwrap_or(u32::MAX);
+    let delta_ms = if runtime.is_some() {
+        // Integer advances already ticked the ledger inside LifecycleWorld.
+        // Isolated tests without GameTimeRuntime keep the frame fallback.
+        return;
+    } else {
+        u32::try_from((time.delta_secs() * 1000.0).round() as u64).unwrap_or(u32::MAX)
+    };
     if delta_ms == 0 {
         return;
     }

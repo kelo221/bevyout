@@ -25,6 +25,8 @@ pub(super) struct ContainerActivation<'w> {
     states: ResMut<'w, ContainerStates>,
     active: ResMut<'w, ActiveContainerTarget>,
     modal_requests: MessageWriter<'w, RequestStateTransition>,
+    minigames: Option<ResMut<'w, crate::viewer::minigames::MinigameRuntime>>,
+    progression: Option<Res<'w, crate::viewer::stats::PlayerProgression>>,
 }
 
 /// Bundles wave-1's dropped-item retrieval resources (save-state removal,
@@ -192,16 +194,24 @@ pub(super) fn activate_focused_placement(
                 }
                 let _ = inventory.add_stack(stack);
             }
-            // Issue #81 (F81.4): picking up an owned reference is theft; no
-            // crime/karma consequences in M3, only the stable log line.
             // Player-dropped runtime items carry no owner.
-            if let item_rules::TakeClassification::Steal { owner_form_id } =
-                item_rules::classify_take(placement.owner_form_id)
-            {
-                info!(
-                    "steal {:08x} owner {:08x}",
-                    placement.base_form_id, owner_form_id
-                );
+            if runtime_item.is_none() {
+                commands.queue({
+                    let claim = item_rules::OwnershipClaim {
+                        owner_form_id: placement.owner_form_id,
+                        owner_faction_rank: placement.owner_faction_rank,
+                    };
+                    let steal_form_id = placement.base_form_id;
+                    move |world: &mut World| {
+                        let item_id =
+                            world
+                                .get_resource::<CanonicalItemLedger>()
+                                .and_then(|canonical| {
+                                    crime::latest_player_item(canonical, steal_form_id)
+                                });
+                        crime::report_theft_in_world(world, claim, item_id, steal_form_id);
+                    }
+                });
             }
             write_pickup_sound(&mut sounds, placement.audio.pickup_sound_form_id, position);
             notice.show(format!("Picked up {name} x{count}"));
@@ -266,6 +276,7 @@ pub(super) fn activate_focused_placement(
                 name: name.clone(),
                 item_names: container_item_names(&placement.inventory),
                 owner_form_id: placement.owner_form_id,
+                owner_faction_rank: placement.owner_faction_rank,
             });
             write_container_sound(&mut sounds, placement.audio.open_sound_form_id, position);
             animation_playback.write(animation::PlayPlacementAnimation {
@@ -295,6 +306,25 @@ pub(super) fn activate_focused_placement(
                     "door {} ({:08x}) is locked; key {:?}",
                     name, placement.reference_form_id, door.key_form_id
                 );
+                let difficulty = door.lock_level.unwrap_or(0).max(0) as u8;
+                let owner = placement.owner_form_id;
+                if let Some(runtime) = container_activation.minigames.as_mut() {
+                    let skill = container_activation
+                        .progression
+                        .as_ref()
+                        .map(|progression| {
+                            progression
+                                .stats
+                                .skill_value(bevyout_core::actor_state::ActorSkill::Lockpick)
+                        })
+                        .unwrap_or(0);
+                    crate::viewer::minigames::start_lockpick_session(
+                        runtime, skill, entity, difficulty, owner,
+                    );
+                    container_activation
+                        .modal_requests
+                        .write(RequestStateTransition::Modal(GameplayModal::Lockpicking));
+                }
                 return;
             }
             // Issue #186: the open-state toggle goes through the shared

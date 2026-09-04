@@ -34,6 +34,24 @@ impl PlacementRoot {
     /// <= 0)` rule. Returns `false` (no-op) for a non-door placement so
     /// `console::world_commands::setlock` can report a clean error instead
     /// of silently doing nothing.
+    #[must_use]
+    #[expect(dead_code)]
+    pub(crate) fn ownership(&self) -> (Option<u32>, Option<i32>) {
+        (
+            self.placement.owner_form_id,
+            self.placement.owner_faction_rank,
+        )
+    }
+
+    pub(crate) fn set_ownership(
+        &mut self,
+        owner_form_id: Option<u32>,
+        owner_faction_rank: Option<i32>,
+    ) {
+        self.placement.owner_form_id = owner_form_id;
+        self.placement.owner_faction_rank = owner_faction_rank;
+    }
+
     pub(crate) fn set_door_lock_level(&mut self, lock_level: Option<i8>) -> bool {
         match &mut self.placement.semantic {
             PreparedSemantic::Door(door) => {
@@ -195,6 +213,23 @@ pub(crate) struct ActiveContainer {
     /// `XOWN` owner of the container reference (issue #81): taking from an
     /// owned container logs as theft.
     pub(super) owner_form_id: Option<u32>,
+    /// `XRNK` required faction rank when the owner is a known faction.
+    pub(super) owner_faction_rank: Option<i32>,
+}
+
+impl ActiveContainer {
+    pub(crate) fn matches_entity(&self, entity: Entity) -> bool {
+        self.entity == entity
+    }
+
+    pub(crate) fn set_ownership(
+        &mut self,
+        owner_form_id: Option<u32>,
+        owner_faction_rank: Option<i32>,
+    ) {
+        self.owner_form_id = owner_form_id;
+        self.owner_faction_rank = owner_faction_rank;
+    }
 }
 
 #[derive(Resource, Default)]

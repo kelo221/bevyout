@@ -79,9 +79,8 @@ impl BodyDelta {
 /// `activated` (door/container open state), `enable_root_form_id` (an
 /// enable-group root recorded on a delta, see `resolve_effective_enabled`'s
 /// doc comment), and `body` (dynamic-body pose/velocity), since #60/#61 need
-/// all of them; `lock_level` stays out of this seam exactly like
-/// `swap_policy::ReferenceDelta` leaves it out (no lock-picking UI in this
-/// wave's scope). Container `inventory`/leveled-resolved state (issue #76)
+/// all of them. M9 wave 7 captures `lock_level` so a picked lock or locked-out
+/// terminal survives save/load. Container `inventory`/leveled-resolved state (issue #76)
 /// deliberately does *not* live here: `ContainerDelta` below is its own
 /// small, non-`Copy` seam (a container's stack list is variable-length,
 /// which would cost every other caller of this `Copy` type a `.clone()`),
@@ -92,6 +91,7 @@ pub(crate) struct ReferenceDelta {
     pub(crate) enabled: Option<bool>,
     pub(crate) deleted: bool,
     pub(crate) activated: Option<bool>,
+    pub(crate) lock_level: Option<i8>,
     pub(crate) enable_root_form_id: Option<u32>,
     pub(crate) transform: Option<TransformDelta>,
     pub(crate) body: Option<BodyDelta>,
@@ -211,6 +211,7 @@ pub(crate) struct PlacementApplication {
     pub(crate) visibility: VisibilityDecision,
     pub(crate) transform: Option<TransformDelta>,
     pub(crate) activated: Option<bool>,
+    pub(crate) lock_level: Option<i8>,
     pub(crate) body: Option<BodyDelta>,
 }
 
@@ -239,6 +240,7 @@ pub(crate) fn plan_apply(
                 },
                 transform: delta.and_then(|delta| delta.transform),
                 activated: delta.and_then(|delta| delta.activated),
+                lock_level: delta.and_then(|delta| delta.lock_level),
                 body: delta.and_then(|delta| delta.body),
             }
         })
@@ -251,6 +253,7 @@ pub(crate) fn plan_apply(
 pub(crate) struct BaselinePlacement {
     pub(crate) reference_form_id: u32,
     pub(crate) transform: TransformDelta,
+    pub(crate) lock_level: Option<i8>,
 }
 
 /// One placement's runtime state at capture time (F60.1c/F61.1): `present`
@@ -264,6 +267,7 @@ pub(crate) struct RuntimeSnapshot {
     pub(crate) present: bool,
     pub(crate) transform: Option<TransformDelta>,
     pub(crate) activated: Option<bool>,
+    pub(crate) lock_level: Option<i8>,
     pub(crate) body: Option<BodyDelta>,
 }
 
@@ -309,11 +313,26 @@ pub(crate) fn diff_capture(
         if snapshot.activated == Some(true) {
             delta.activated = Some(true);
         }
+        let baseline_lock = normalize_lock(
+            baseline_by_id
+                .get(&snapshot.reference_form_id)
+                .and_then(|baseline| baseline.lock_level),
+        );
+        let live_lock = normalize_lock(snapshot.lock_level);
+        if live_lock != baseline_lock {
+            // `Some(0)` is the persisted unlocked sentinel: `Option<i8>` cannot
+            // otherwise distinguish "no lock override" from "picked open".
+            delta.lock_level = Some(live_lock.unwrap_or(0));
+        }
         if delta != ReferenceDelta::default() {
             deltas.insert(snapshot.reference_form_id, delta);
         }
     }
     deltas
+}
+
+fn normalize_lock(lock_level: Option<i8>) -> Option<i8> {
+    lock_level.filter(|&level| level > 0)
 }
 
 /// Issue #76's fixed seam: mirrors agent B's runtime `interaction::

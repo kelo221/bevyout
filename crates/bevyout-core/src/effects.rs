@@ -21,6 +21,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 use crate::actor_state::{ActorSkill, ActorValue, SpecialAttribute};
+use crate::combat::limbs::LimbState;
 use crate::perks::PerkProgression;
 use crate::radiation::radiation_penalties;
 use crate::stats::{
@@ -79,8 +80,8 @@ pub fn actor_value_from_effect_index(index: i32) -> Option<ActorValue> {
 /// associated actor value for the effect's duration.
 pub const ARCHETYPE_VALUE_MODIFIER: u32 = 0;
 /// `MGEF.DATA` archetype 34 (Value And Parts): value modifier plus limb
-/// parts (Stimpak's `RestoreHealthStimpak`); the value part applies, limb
-/// restoration itself is wave 4.
+/// parts (Stimpak's `RestoreHealthStimpak`). The value part applies here;
+/// selected-limb restoration is keyed off the ingestible, not AV index 25.
 pub const ARCHETYPE_VALUE_AND_PARTS: u32 = 34;
 
 /// True when an MGEF archetype's magnitude shifts its associated actor
@@ -221,6 +222,17 @@ impl IngestibleDefinition {
     pub fn addiction_chance_bps(&self) -> u32 {
         (self.addiction_chance_percent.clamp(0.0, 100.0) * 100.0).round() as u32
     }
+
+    /// True when consuming this item should restore the selected limb (Stimpak).
+    #[must_use]
+    pub fn restores_limbs(&self) -> bool {
+        self.form_id == 0x0001_5169
+            || self.editor_id.eq_ignore_ascii_case("stimpak")
+            || self
+                .effects
+                .iter()
+                .any(|effect| effect.editor_id.to_ascii_lowercase().contains("stimpak"))
+    }
 }
 
 /// What granted an active effect; withdrawal entries are what the ledger
@@ -351,7 +363,19 @@ pub fn projected_special(
     ledger: &ActiveEffectsLedger,
     rads: u16,
 ) -> BTreeMap<SpecialAttribute, u8> {
+    projected_special_with_limbs(sheet, ledger, rads, None)
+}
+
+/// Effective SPECIAL including a crippled-head Perception penalty.
+#[must_use]
+pub fn projected_special_with_limbs(
+    sheet: &CharacterSheet,
+    ledger: &ActiveEffectsLedger,
+    rads: u16,
+    limbs: Option<&LimbState>,
+) -> BTreeMap<SpecialAttribute, u8> {
     let penalties = radiation_penalties(rads);
+    let head_penalty = limbs.map_or(0, LimbState::head_perception_penalty);
     let all = [
         SpecialAttribute::Strength,
         SpecialAttribute::Perception,
@@ -366,7 +390,12 @@ pub fn projected_special(
             let base = i16::from(sheet.effective_special(attribute));
             let modifier = ledger.modifier_for(ActorValue::Special(attribute));
             let penalty = i16::from(penalties.get(&attribute).copied().unwrap_or(0));
-            let effective = (base as f32 + modifier + f32::from(penalty))
+            let limb = if attribute == SpecialAttribute::Perception {
+                i16::from(head_penalty)
+            } else {
+                0
+            };
+            let effective = (base as f32 + modifier + f32::from(penalty) + f32::from(limb))
                 .round()
                 .clamp(1.0, 10.0) as u8;
             (attribute, effective)
@@ -382,7 +411,19 @@ pub fn projected_derived(
     rads: u16,
     settings: &GmstSettings,
 ) -> DerivedAttributes {
-    let special = projected_special(sheet, ledger, rads);
+    projected_derived_with_limbs(sheet, ledger, rads, settings, None)
+}
+
+/// Derived attributes using effective SPECIAL including limb penalties.
+#[must_use]
+pub fn projected_derived_with_limbs(
+    sheet: &CharacterSheet,
+    ledger: &ActiveEffectsLedger,
+    rads: u16,
+    settings: &GmstSettings,
+    limbs: Option<&LimbState>,
+) -> DerivedAttributes {
+    let special = projected_special_with_limbs(sheet, ledger, rads, limbs);
     let mut derived = derived_from_special(
         sheet.level,
         special[&SpecialAttribute::Strength],

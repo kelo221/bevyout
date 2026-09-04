@@ -139,12 +139,14 @@ fn a_moved_dynamic_body_produces_transform_and_body_deltas() {
     let baselines = [BaselinePlacement {
         reference_form_id: 0x100,
         transform: transform([0.0, 0.0, 0.0]),
+        lock_level: None,
     }];
     let snapshots = [RuntimeSnapshot {
         reference_form_id: 0x100,
         present: true,
         transform: Some(transform([1.0, 0.0, 0.0])),
         activated: None,
+        lock_level: None,
         body: Some(BodyDelta {
             linear_velocity: [0.5, 0.0, 0.0],
             angular_velocity: [0.0, 0.0, 0.0],
@@ -163,12 +165,14 @@ fn an_open_container_produces_an_activated_delta() {
     let baselines = [BaselinePlacement {
         reference_form_id: 0x200,
         transform: transform([0.0, 0.0, 0.0]),
+        lock_level: None,
     }];
     let snapshots = [RuntimeSnapshot {
         reference_form_id: 0x200,
         present: true,
         transform: Some(transform([0.0, 0.0, 0.0])),
         activated: Some(true),
+        lock_level: None,
         body: None,
     }];
     let deltas = diff_capture(&baselines, &snapshots);
@@ -181,12 +185,14 @@ fn a_taken_pickup_produces_a_deleted_delta() {
     let baselines = [BaselinePlacement {
         reference_form_id: 0x300,
         transform: transform([0.0, 0.0, 0.0]),
+        lock_level: None,
     }];
     let snapshots = [RuntimeSnapshot {
         reference_form_id: 0x300,
         present: false,
         transform: None,
         activated: None,
+        lock_level: None,
         body: None,
     }];
     let deltas = diff_capture(&baselines, &snapshots);
@@ -199,12 +205,14 @@ fn an_untouched_reference_produces_no_delta() {
     let baselines = [BaselinePlacement {
         reference_form_id: 0x400,
         transform: transform([0.0, 0.0, 0.0]),
+        lock_level: None,
     }];
     let snapshots = [RuntimeSnapshot {
         reference_form_id: 0x400,
         present: true,
         transform: Some(transform([0.0, 0.0, 0.0])),
         activated: None,
+        lock_level: None,
         body: Some(BodyDelta::default()),
     }];
     let deltas = diff_capture(&baselines, &snapshots);
@@ -239,12 +247,14 @@ fn capture_then_apply_round_trips_a_moved_open_reference() {
     let baselines = [BaselinePlacement {
         reference_form_id: 0x500,
         transform: transform([0.0, 0.0, 0.0]),
+        lock_level: None,
     }];
     let snapshots = [RuntimeSnapshot {
         reference_form_id: 0x500,
         present: true,
         transform: application.transform,
         activated: application.activated,
+        lock_level: application.lock_level,
         body: application.body,
     }];
     let recaptured = diff_capture(&baselines, &snapshots);

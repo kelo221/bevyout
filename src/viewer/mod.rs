@@ -59,6 +59,7 @@ mod animation;
 mod animation_zoo;
 mod audio;
 mod cinema;
+mod crime;
 mod interaction;
 mod inventory;
 mod openmw_player;
@@ -82,12 +83,16 @@ mod diagnostics;
 pub(crate) mod dialogue;
 mod effects;
 mod fallout_ui;
+mod game_time;
 mod glow_card_policy;
+mod gpu_validation;
 mod hud;
 #[cfg(test)]
 mod hybrid_shadow_policy;
+mod inspection;
 mod lighting;
 mod material_clamp_policy;
+mod minigames;
 mod nav;
 mod nav_overlay;
 mod pause_menu;
@@ -95,6 +100,7 @@ mod perception;
 mod performance_policy;
 mod ragdoll_lab;
 mod realtime_shadow_policy;
+mod recipes;
 mod scene;
 mod screen_fx;
 mod stats;
@@ -130,6 +136,7 @@ pub fn view(args: ViewArgs) -> Result<()> {
             agent_port: args.agent_bridge.then_some(args.agent_port),
             unfocused: args.unfocused,
             save_slot: args.save_slot,
+            wgpu_validation: args.wgpu_validation,
         },
     )
 }
@@ -308,6 +315,7 @@ pub fn render(args: RenderArgs) -> Result<()> {
             // unfocused automatically via `run_view`'s own agent_port check.
             unfocused: false,
             save_slot: None,
+            wgpu_validation: args.wgpu_validation,
         },
     )
 }

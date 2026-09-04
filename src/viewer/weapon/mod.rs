@@ -177,6 +177,7 @@ pub(crate) struct ClearWeaponJamRequested;
 #[derive(Message, Clone, Debug)]
 struct AcceptedWeaponShot {
     shot_index: u64,
+    weapon_instance: ItemInstanceId,
     weapon: EquippedWeapon,
     damage: f32,
 }
@@ -550,6 +551,7 @@ fn process_action_requests(
                     }
                     accepted_shots.write(AcceptedWeaponShot {
                         shot_index,
+                        weapon_instance: weapon_id,
                         weapon,
                         damage,
                     });

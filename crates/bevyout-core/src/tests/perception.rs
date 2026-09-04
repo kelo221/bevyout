@@ -187,6 +187,7 @@ fn clear_resets_all_awareness() {
         acquired: Some(TargetId::player()),
         time_since_seen: 3.0,
         last_known_position: Some([1.0, 2.0, 3.0]),
+        ..Default::default()
     };
     state.clear();
     assert_eq!(state, AwarenessState::default());
@@ -197,11 +198,13 @@ fn clear_resets_all_awareness() {
 fn awareness_state_round_trips_through_serde_for_save_load() {
     let state = AwarenessState {
         confidence: 0.6,
+        confidence_milli: 600,
         acquired: Some(TargetId {
             class: TargetClass::Actor,
             form_id: 0x1234,
         }),
         time_since_seen: 1.5,
+        time_since_seen_ms: 1_500,
         last_known_position: Some([4.0, 5.0, 6.0]),
     };
     let text = ron::ser::to_string(&state).unwrap();

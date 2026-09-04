@@ -9,6 +9,7 @@ mod cell_map;
 mod content_index;
 #[allow(dead_code)]
 pub(crate) mod dialogue;
+mod export_raylib;
 mod exterior;
 mod manifest;
 mod nif_convert;
@@ -89,6 +90,7 @@ pub(crate) use physics::{
 // `tnm` reads `navgraph.ron` on demand rather than through a preloaded
 // resource.
 pub(crate) use prepare::ITEM_CATALOG_REVISION;
+pub(crate) use prepare::RECIPE_CATALOG_REVISION;
 pub(crate) use prepare::{
     ACTOR_ANIMATION_CATALOG_REVISION, ACTOR_ANIMATION_NATIVE_CONVERTER_REVISION,
     ACTOR_CATALOG_REVISION, ActorBlueprint, ActorCatalogEntry, EFFECT_CATALOG_REVISION,
@@ -96,8 +98,10 @@ pub(crate) use prepare::{
     PreparedEffectCatalog, PreparedGmstCatalog, PreparedPackageCatalog, PreparedPackageEntry,
     PreparedPerkCatalog,
 };
+pub(crate) use recipe::PreparedRecipeCatalog;
 // Issue #128's `tnm` console command decodes `navgraph.ron` (issue #111)
 // straight into these types -- see `viewer::nav_overlay`.
+pub use export_raylib::export_raylib;
 /// Test-only re-export (issue #128): only `viewer::nav_overlay`'s unit
 /// tests construct a `PreparedNavPolygon` fixture directly; production code
 /// only ever iterates `PreparedNavMesh::polygons` without naming the

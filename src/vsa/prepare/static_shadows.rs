@@ -208,7 +208,7 @@ fn sorted_shadow_casters(placements: &[PreparedPlacement]) -> Vec<&PreparedPlace
     casters
 }
 
-fn is_static_shadow_caster(placement: &PreparedPlacement) -> bool {
+pub(crate) fn is_static_shadow_caster(placement: &PreparedPlacement) -> bool {
     placement.initially_enabled
         && placement.asset_path.is_some()
         // Movable bodies must not leave a baked silhouette behind when they

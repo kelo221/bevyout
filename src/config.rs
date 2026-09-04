@@ -107,6 +107,11 @@ pub fn apply(cli: &mut Cli) -> Result<()> {
                 args.cache_dir = config.output.cache_dir.clone();
             }
         }
+        CommandLine::ExportRaylib(args) => {
+            if args.cache_dir.is_none() {
+                args.cache_dir = config.output.cache_dir.clone();
+            }
+        }
         CommandLine::Cache(_)
         | CommandLine::View(_)
         | CommandLine::Script(_)

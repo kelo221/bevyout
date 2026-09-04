@@ -495,6 +495,28 @@ pub(super) fn spawn_stats_body(
                         BorderColor::all(GREEN),
                     ));
                 }
+                if !status.radiation_line.is_empty() {
+                    labels.spawn((
+                        Text::new(status.radiation_line.clone()),
+                        TextColor(GREEN),
+                        TextFont {
+                            font_size: FontSize::Px(16.0),
+                            ..default()
+                        },
+                        glow(),
+                    ));
+                }
+                for line in &status.effect_lines {
+                    labels.spawn((
+                        Text::new(line.clone()),
+                        TextColor(GREEN),
+                        TextFont {
+                            font_size: FontSize::Px(16.0),
+                            ..default()
+                        },
+                        glow(),
+                    ));
+                }
             });
             body.spawn(Node {
                 width: Val::Percent(64.0),
@@ -518,14 +540,25 @@ pub(super) fn spawn_stats_body(
                             &sources.figure_layout,
                             &sources.figure_editor,
                         );
-                        for (left, top, width, value) in [
-                            (169.0, 0.0, 82.0, 0.82),
-                            (8.0, 128.0, 94.0, 0.72),
-                            (318.0, 128.0, 94.0, 0.88),
-                            (169.0, 162.0, 82.0, 0.94),
-                            (58.0, 292.0, 94.0, 0.78),
-                            (268.0, 292.0, 94.0, 0.86),
+                        for (left, top, width, part) in [
+                            (169.0, 0.0, 82.0, bevyout_core::combat::BodyPartId::Head),
+                            (8.0, 128.0, 94.0, bevyout_core::combat::BodyPartId::LeftArm),
+                            (
+                                318.0,
+                                128.0,
+                                94.0,
+                                bevyout_core::combat::BodyPartId::RightArm,
+                            ),
+                            (169.0, 162.0, 82.0, bevyout_core::combat::BodyPartId::Torso),
+                            (58.0, 292.0, 94.0, bevyout_core::combat::BodyPartId::LeftLeg),
+                            (
+                                268.0,
+                                292.0,
+                                94.0,
+                                bevyout_core::combat::BodyPartId::RightLeg,
+                            ),
                         ] {
+                            let value = status.limbs.part(part).fraction();
                             condition_meter(body, left, top, width, value);
                         }
                     });

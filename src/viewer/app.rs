@@ -9,6 +9,7 @@ pub(crate) struct RunViewOptions {
     pub(crate) agent_port: Option<u16>,
     pub(crate) unfocused: bool,
     pub(crate) save_slot: Option<String>,
+    pub(crate) wgpu_validation: bool,
 }
 
 pub(crate) fn run_view(manifest_path: PathBuf, options: RunViewOptions) -> Result<()> {
@@ -21,6 +22,7 @@ pub(crate) fn run_view(manifest_path: PathBuf, options: RunViewOptions) -> Resul
         agent_port,
         unfocused,
         save_slot,
+        wgpu_validation,
     } = options;
     let manifest_path = fs::canonicalize(&manifest_path).context("manifest does not exist")?;
     let text = fs::read_to_string(&manifest_path)?;
@@ -85,6 +87,7 @@ pub(crate) fn run_view(manifest_path: PathBuf, options: RunViewOptions) -> Resul
     // M9 wave 3 (#318): ingestible definitions for the chem/aid runtime and
     // console commands; also degrades to empty instead of failing startup.
     let effect_catalog = effects::load_effect_catalog_for_manifest(&manifest, &asset_root);
+    let recipe_catalog = recipes::load_recipe_catalog_for_manifest(&manifest, &asset_root);
     // Issue #60 (F60.3): load and compatibility-check the save slot before
     // any window exists, so a mismatched save fails fast with a plain error.
     let loaded_save = save_slot
@@ -130,7 +133,10 @@ pub(crate) fn run_view(manifest_path: PathBuf, options: RunViewOptions) -> Resul
             .set(AssetPlugin {
                 file_path: asset_root.to_string_lossy().to_string(),
                 ..default()
-            }),
+            })
+            .set(super::gpu_validation::viewer_render_plugin(
+                super::gpu_validation::gpu_validation_enabled_from_env(wgpu_validation),
+            )),
         FrameTimeDiagnosticsPlugin::new(RENDER_REPORT_HISTORY),
         RenderDiagnosticsPlugin,
         AutoExposurePlugin,
@@ -177,6 +183,7 @@ pub(crate) fn run_view(manifest_path: PathBuf, options: RunViewOptions) -> Resul
     app.insert_resource(stats_settings);
     app.insert_resource(perk_catalog);
     app.insert_resource(effect_catalog);
+    app.insert_resource(recipe_catalog);
     // F51.4: `[world] resident_cell_limit` in `.bevyout/config.toml` (or the
     // user config) remains the conservative interior graph-preload budget.
     // `[world]` limits are intentionally separate: interior preloading keeps
@@ -324,6 +331,32 @@ pub(crate) fn run_view(manifest_path: PathBuf, options: RunViewOptions) -> Resul
         app.insert_resource(world::CurrentWorldLocation(save.location.clone()));
         app.insert_resource(world::PlaythroughSeed(save.rng_state));
         app.insert_resource(weapon::CombatRngRuntime(save.combat_rng));
+        app.insert_resource(stats::PlayerProgression {
+            stats: save.rpg.stats.clone(),
+            perks: save.rpg.perks.clone(),
+            unspent_skill_points: save.rpg.unspent_skill_points,
+            total_skill_points: save.rpg.total_skill_points,
+            radiation: save.rpg.radiation,
+            effects: save.rpg.effects.clone(),
+            chem_doses_ms: save.rpg.chem_doses_ms.clone(),
+            addictions: save.rpg.addictions.clone(),
+            current_health: save.rpg.current_health,
+            limbs: save.rpg.limbs.clone(),
+            crime: save.rpg.crime.clone(),
+        });
+        app.insert_resource(effects::RngResource(save.rpg.rng));
+        {
+            let mut runtime = crate::viewer::game_time::GameTimeRuntime::default();
+            runtime.world.restore_snapshot(save.rpg.lifecycle.clone());
+            runtime.world.clock = save.rpg.clock;
+            runtime.world.effects = save.rpg.effects.clone();
+            runtime.world.chem_doses_ms = save.rpg.chem_doses_ms.clone();
+            runtime.world.addictions = save.rpg.addictions.clone();
+            runtime.world.radiation = save.rpg.radiation;
+            runtime.world.current_health = save.rpg.current_health;
+            runtime.world.limbs = save.rpg.limbs.clone();
+            app.insert_resource(runtime);
+        }
         app.world_mut()
             .resource_mut::<dialogue::DialogueRuntime>()
             .restore_snapshot(save.dialogue);
